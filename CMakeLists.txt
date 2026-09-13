@@ -20,7 +20,7 @@ if(SAP_BUILD_VST3)
 
     set(SMTG_ENABLE_VST3_PLUGIN_EXAMPLES OFF CACHE BOOL "" FORCE)
     set(SMTG_ENABLE_VST3_HOSTING_EXAMPLES OFF CACHE BOOL "" FORCE)
-    set(SMTG_ENABLE_VSTGUI_SUPPORT OFF CACHE BOOL "" FORCE)
+    set(SMTG_ENABLE_VSTGUI_SUPPORT ON CACHE BOOL "" FORCE)
 
     add_subdirectory(extern/vst3sdk ${CMAKE_BINARY_DIR}/vst3sdk EXCLUDE_FROM_ALL)
 
@@ -37,7 +37,13 @@ if(SAP_BUILD_VST3)
     )
 
     target_include_directories(SmartAlignPost PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-    target_link_libraries(SmartAlignPost PRIVATE sdk)
+    target_link_libraries(SmartAlignPost PRIVATE sdk vstgui_support)
+
+    smtg_target_add_plugin_resources(SmartAlignPost
+        RESOURCES
+            resources/smartalignpost.uidesc
+    )
+
     smtg_target_configure_version_file(SmartAlignPost)
     smtg_target_set_bundle(SmartAlignPost
         BUNDLE_IDENTIFIER "org.smartalignpost.SmartAlignPost"
