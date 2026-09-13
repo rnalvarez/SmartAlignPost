@@ -5,6 +5,8 @@ on:
   push:
     paths:
       - 'src/**'
+      - 'reaper/**'
+      - 'resources/**'
       - 'CMakeLists.txt'
       - '.gitmodules'
       - '.github/workflows/build-vst3.yml'
@@ -19,7 +21,7 @@ jobs:
           submodules: recursive
 
       - name: Configurar CMake
-        run: cmake -S . -B build -DSAP_BUILD_TESTS=ON -DSAP_BUILD_VST3=ON
+        run: cmake -S . -B build -DSAP_BUILD_TESTS=ON -DSAP_BUILD_VST3=ON -DSAP_BUILD_PROTOTYPE=ON
 
       - name: Compilar
         run: cmake --build build --config Release --parallel
@@ -27,16 +29,21 @@ jobs:
       - name: Ejecutar pruebas DSP
         run: ctest --test-dir build --build-config Release --output-on-failure
 
-      - name: Empaquetar VST3
+      - name: Empaquetar VST3 + prototipo REAPER
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+          New-Item -ItemType Directory -Force -Path artifacts/package/SmartAlignPost | Out-Null
           $vst3 = Get-ChildItem -Path build -Filter '*.vst3' -Recurse | Select-Object -First 1
           if (-not $vst3) { throw 'No se encontró ningún archivo .vst3' }
-          Compress-Archive -Path $vst3.FullName -DestinationPath artifacts/SmartAlignPost-Windows-VST3.zip
+          Copy-Item -Recurse $vst3.FullName artifacts/package/SmartAlignPost/
+          $exe = 'build/Release/SmartAlignPostPrototype.exe'
+          if (-not (Test-Path $exe)) { throw "No se encontró $exe" }
+          Copy-Item $exe artifacts/package/SmartAlignPost/
+          Copy-Item 'reaper/Smart Align Post - Selection Helper.lua' artifacts/package/SmartAlignPost/
+          Compress-Archive -Path artifacts/package/SmartAlignPost -DestinationPath artifacts/SmartAlignPost-Windows-VST3-Prototype.zip
 
       - name: Publicar artefacto
         uses: actions/upload-artifact@v4
         with:
-          name: SmartAlignPost-Windows-VST3
-          path: artifacts/SmartAlignPost-Windows-VST3.zip
+          name: SmartAlignPost-Windows-VST3-Prototype
+          path: artifacts/SmartAlignPost-Windows-VST3-Prototype.zip
