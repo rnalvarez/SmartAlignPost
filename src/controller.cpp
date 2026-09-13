@@ -1,6 +1,5 @@
 #include "controller.h"
 #include "vstgui/plugin-bindings/vst3editor.h"
-#include "vstgui/plugin-bindings/vst3editorcontroller.h"
 
 using namespace Steinberg;
 using namespace Steinberg::Vst;
