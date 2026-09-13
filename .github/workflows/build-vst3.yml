@@ -1,4 +1,4 @@
-name: Compilar VST3
+name: Compilar VST3 Windows
 
 on:
   workflow_dispatch:
@@ -40,33 +40,3 @@ jobs:
         with:
           name: SmartAlignPost-Windows-VST3
           path: artifacts/SmartAlignPost-Windows-VST3.zip
-
-  build-macos:
-    runs-on: macos-latest
-    steps:
-      - name: Descargar repositorio con submodules
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Configurar CMake
-        run: cmake -S . -B build -DSAP_BUILD_TESTS=ON -DSAP_BUILD_VST3=ON
-
-      - name: Compilar
-        run: cmake --build build --config Release --parallel
-
-      - name: Ejecutar pruebas DSP
-        run: ctest --test-dir build --build-config Release --output-on-failure
-
-      - name: Empaquetar VST3
-        run: |
-          mkdir -p artifacts
-          vst3=$(find build -type d -name '*.vst3' | head -1)
-          test -n "$vst3"
-          ditto -c -k --sequesterRsrc --keepParent "$vst3" artifacts/SmartAlignPost-macOS-VST3.zip
-
-      - name: Publicar artefacto
-        uses: actions/upload-artifact@v4
-        with:
-          name: SmartAlignPost-macOS-VST3
-          path: artifacts/SmartAlignPost-macOS-VST3.zip
