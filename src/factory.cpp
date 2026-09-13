@@ -6,8 +6,8 @@
 #define stringPluginName "Smart Align Post"
 
 BEGIN_FACTORY_DEF("Ramiro N. Alvarez",
-                  "https://github.com/YOUR_USER/SmartAlignPost",
-                  "mailto:replace@example.com")
+                  "https://github.com/rnalvarez/SmartAlignPost",
+                  "")
 
 DEF_CLASS2(INLINE_UID_FROM_FUID(SmartAlignPost::ProcessorUID),
            PClassInfo::kManyInstances,
