@@ -34,6 +34,7 @@ if(SAP_BUILD_VST3)
         src/controller.h
         src/controller.cpp
         src/factory.cpp
+        src/platform_module.cpp
     )
 
     target_include_directories(SmartAlignPost PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
