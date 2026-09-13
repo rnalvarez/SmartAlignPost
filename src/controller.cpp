@@ -1,6 +1,6 @@
 #include "controller.h"
 #include "vstgui/plugin-bindings/vst3editor.h"
-#include "pluginterfaces/base/ustring.h"
+#include "public.sdk/source/vst/vstparameters.h"
 
 using namespace Steinberg;
 using namespace Steinberg::Vst;
@@ -16,12 +16,12 @@ tresult PLUGIN_API Controller::initialize(FUnknown* context) {
     if (r != kResultOk)
         return r;
 
-    // MODE: selector STATIC / DYNAMIC.
-    // kIsList tells VSTGUI's VST3 editor to build the option menu
-    // from getParamStringByValue() for each step.
-    parameters.addParameter(
-        STR16("Mode"), nullptr, 1, 0.0,
-        ParameterInfo::kCanAutomate | ParameterInfo::kIsList, 0);
+    // MODE: use the SDK StringListParameter so VSTGUI can populate the
+    // COptionMenu with real entries instead of relying on manual conversion.
+    auto* modeParam = new StringListParameter(STR16("Mode"), 0);
+    modeParam->appendString(STR16("STATIC"));
+    modeParam->appendString(STR16("DYNAMIC"));
+    parameters.addParameter(modeParam);
 
     // ANALYZE / APPLY are action parameters. The custom editor presents them
     // as push buttons; the processor integration will consume their events.
@@ -41,18 +41,6 @@ IPlugView* PLUGIN_API Controller::createView(const char* name) {
         return new VSTGUI::VST3Editor(this, "view", "smartalignpost.uidesc");
     }
     return nullptr;
-}
-
-tresult PLUGIN_API Controller::getParamStringByValue(
-    ParamID tag, ParamValue valueNormalized, String128 string) {
-    if (tag == 0) {
-        Steinberg::UString(string, 128).fromAscii(
-            valueNormalized < 0.5 ? "STATIC" : "DYNAMIC");
-        // VSTGUI expects kResultTrue here to use this text when populating
-        // a COptionMenu bound to a stepped/list parameter.
-        return kResultTrue;
-    }
-    return EditController::getParamStringByValue(tag, valueNormalized, string);
 }
 
 }
