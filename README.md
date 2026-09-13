@@ -1,120 +1,186 @@
 # Smart Align Post
 
-**Open-source microphone alignment engine and VST3 prototype for production-sound post-production.**
+**Herramienta open source para alineación temporal de micrófonos de sonido directo, con motor de análisis offline y futura implementación VST3 multiplataforma.**
 
-The project is inspired by workflows such as Sound Radix Auto-Align Post, but it is an independent implementation with a deliberately DAW-independent DSP core.
+> Proyecto independiente inspirado en flujos de trabajo profesionales como Sound Radix Auto-Align Post. No es una copia ni está afiliado a Sound Radix.
 
-## Project goal
+## ¿Qué problema busca resolver?
 
-Align one or more production microphones against a selected reference microphone, typically:
+En postproducción de sonido directo es habitual combinar un **boom** con uno o más **corbateros (lavalier)**. La distancia entre los micrófonos y la fuente cambia durante la actuación: cuando el intérprete se mueve, gira la cabeza o cambia su posición, también puede cambiar la relación temporal entre las grabaciones.
 
-- BOOM / MASTER
-- LAV 1
-- LAV 2
-- LAV 3...
+Smart Align Post busca analizar esas relaciones de forma **offline y precisa**, para mejorar la coherencia temporal y de fase entre los micrófonos.
 
-Two analysis modes are planned from the beginning:
+Ejemplo de uso previsto:
 
-- **STATIC** — calculate one fixed time offset.
-- **DYNAMIC** — calculate a time-offset curve offline and make conservative small corrections when the acoustic relationship changes during movement.
+```text
+BOOM / MASTER
+LAV 1
+LAV 2
+LAV 3...
+```
 
-The long-term user workflow is:
+## Modos de alineación
 
-> Select items → choose MASTER → choose STATIC/DYNAMIC → CALCULATE → inspect → APPLY → listen → Undo.
+### STATIC — alineación fija
 
-## What this first public delivery contains
+El sistema analiza el material y calcula un único desplazamiento temporal para cada micrófono fuente.
 
-### Implemented
+```text
+BOOM  ─────────────────────────────
+LAV1  ──── +4,3 ms ────────────────
+LAV2  ──── +6,1 ms ────────────────
+```
 
-- Independent C++17 alignment engine.
-- Normalized cross-correlation delay estimation.
-- Search-range limiting.
-- Confidence estimation.
-- Confidence gating.
-- Dynamic temporal smoothing.
-- Maximum slew-rate limiting.
-- Static and dynamic analysis results.
-- VST3 plug-in shell.
-- Cross-platform CMake project.
-- DSP unit tests.
-- GitHub Actions build matrix.
-- REAPER selection helper prototype.
+La corrección permanece fija durante todo el material analizado.
 
-### Not yet implemented
+### DYNAMIC — alineación dinámica
 
-This is important: **the VST3 shell in this delivery is not yet the finished offline item-aligning plug-in.**
+El sistema analiza el material por ventanas y calcula una curva de desplazamiento temporal. La corrección puede cambiar suavemente cuando existe evidencia suficiente de que la relación acústica entre los micrófonos ha cambiado.
 
-A normal VST3 plug-in does not have portable access to the host's timeline item-selection API. Therefore the final workflow needs a host integration layer (for example ARA2 where appropriate, or a REAPER-specific bridge) in addition to the VST3 DSP engine.
+El diseño incluye mecanismos para evitar movimientos erráticos:
 
-The current plug-in is intentionally a pass-through shell while the DSP engine is tested independently. This avoids presenting an unverified prototype as a finished Auto-Align replacement.
+- estimación de confianza;
+- rechazo de valores poco confiables;
+- suavizado temporal;
+- limitación de la velocidad de cambio;
+- conservación del último valor confiable.
 
-## Repository structure
+## Flujo de trabajo previsto
+
+La experiencia final que buscamos es:
+
+```text
+Seleccionar grabaciones
+        ↓
+Elegir MASTER
+        ↓
+Elegir STATIC o DYNAMIC
+        ↓
+CALCULAR
+        ↓
+Revisar resultados
+        ↓
+APLICAR
+        ↓
+Escuchar
+        ↓
+Deshacer si es necesario
+```
+
+El objetivo es que el análisis sea **offline**, no un proceso de alineación en tiempo real. Esto permite dedicar más tiempo de cálculo a encontrar una solución robusta.
+
+## Estado actual del proyecto
+
+### Ya implementado
+
+- Motor independiente en C++17.
+- Estimación de desplazamiento mediante correlación normalizada.
+- Limitación del rango de búsqueda.
+- Cálculo de confianza.
+- Puerta de confianza.
+- Suavizado temporal para modo dinámico.
+- Limitación de la velocidad de variación.
+- Resultados STATIC y DYNAMIC.
+- Estructura inicial de VST3.
+- Proyecto CMake multiplataforma.
+- Pruebas automatizadas del motor DSP.
+- Preparación para integración con REAPER.
+
+### Todavía en desarrollo
+
+La primera entrega pública **no es todavía un Auto-Align completo**.
+
+El VST3 actual funciona como una base de integración del motor, pero todavía no implementa el flujo final de selección de items del timeline, análisis offline completo y aplicación de las correcciones.
+
+Esto es intencional. Un VST3 estándar recibe audio y parámetros del host, pero no dispone de una API portátil para acceder directamente a los items seleccionados en el timeline de cada DAW. Por eso el proyecto separa:
+
+1. **Motor de alineación** — independiente del DAW.
+2. **VST3** — interfaz y procesamiento estándar multiplataforma.
+3. **Integración con cada DAW** — capa específica cuando sea necesaria.
+
+## Arquitectura
+
+```text
+                 SMART ALIGN ENGINE
+                        │
+        ┌───────────────┼────────────────┐
+        │               │                │
+       VST3           REAPER          otros DAW
+        │               │                │
+      audio          integración      integración
+      + UI            específica       específica
+```
+
+El motor DSP no debe depender de REAPER. Esto permite que el proyecto pueda crecer hacia otros DAW y, eventualmente, otras plataformas de plugin.
+
+## Estructura del repositorio
 
 ```text
 SmartAlignPost/
-├── src/                 # VST3 wrapper + DSP engine
-├── tests/               # deterministic DSP tests
-├── reaper/              # REAPER-specific helper prototypes
-├── docs/                # design and implementation notes
-├── extern/vst3sdk/      # Steinberg VST3 SDK git submodule
-├── .github/workflows/   # CI builds
+├── src/                 # Motor DSP y código VST3
+├── tests/               # Pruebas automatizadas del motor
+├── reaper/              # Prototipos de integración con REAPER
+├── docs/                # Diseño y documentación técnica
+├── .github/workflows/   # Compilación y pruebas automáticas
 ├── CMakeLists.txt
 ├── LICENSE
 ├── THIRD_PARTY_LICENSES.md
 └── CONTRIBUTING.md
 ```
 
-## Build
+## Compilación
 
-The project uses the official Steinberg VST3 SDK as a Git submodule. Steinberg's current SDK documentation supports CMake-based builds and lists Windows, macOS and Linux targets. See the official SDK repository and developer portal for platform-specific requirements. 
+El proyecto utiliza CMake.
 
-Clone with submodules:
+El SDK oficial de VST3 de Steinberg es una dependencia externa y no se copia dentro de este repositorio. El SDK oficial documenta compilación mediante CMake para Windows, macOS y Linux. citehttps://github.com/steinbergmedia/vst3sdk
 
-```bash
-git clone --recurse-submodules https://github.com/YOUR_USER/SmartAlignPost.git
-cd SmartAlignPost
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release
-ctest --test-dir build --output-on-failure
-```
+Para el desarrollo local, la configuración del proyecto descargará/obtendrá el SDK externo cuando sea necesario.
 
-If the repository was already cloned:
+### Pruebas del motor DSP
 
-```bash
-git submodule update --init --recursive
-```
+Las pruebas del motor no necesitan REAPER ni una instalación del plugin. Su objetivo es comprobar primero que el algoritmo matemático funciona correctamente.
 
-### DSP-only build
-
-The alignment engine tests do not require the VST3 SDK:
-
-```bash
-cmake -S . -B build-dsp -DSAP_BUILD_VST3=OFF -DSAP_BUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Release
+```text
+cmake -S . -B build-dsp -DSAP_BUILD_VST3=OFF -DSAP_BUILD_TESTS=ON
 cmake --build build-dsp --config Release
 ctest --test-dir build-dsp --output-on-failure
 ```
 
 ## REAPER
 
-The current `reaper/` helper only inspects selected items and demonstrates the intended MASTER/SOURCE selection convention. It does not modify media yet.
+REAPER es el primer DAW de referencia para el desarrollo porque permite probar rápidamente el flujo de trabajo de producción de sonido.
 
-For the next milestone, the REAPER integration should become the offline host bridge that:
+La integración prevista será:
 
-1. reads the selected items;
-2. identifies MASTER and SOURCES;
-3. extracts the relevant audio;
-4. runs the shared alignment engine offline;
-5. creates a non-destructive correction representation;
-6. supports preview/apply/undo.
+1. seleccionar los items de audio;
+2. indicar cuál es el MASTER;
+3. identificar las fuentes;
+4. analizar los archivos completos offline;
+5. calcular la corrección STATIC o DYNAMIC;
+6. mostrar resultados y confianza;
+7. aplicar la corrección sin destruir los originales;
+8. permitir escuchar y deshacer.
 
-## Algorithm notes
+## Relación con Auto-Align Post
 
-The current engine deliberately starts conservatively. It estimates time offset using normalized correlation and then, in dynamic mode, applies confidence gating, outlier resistance, smoothing and a maximum slew rate.
+Auto-Align Post de Sound Radix es una referencia conceptual importante para este proyecto, especialmente por sus conceptos de alineación estática y dinámica.
 
-Spectral phase correction is intentionally **not** part of this first delivery.
+Smart Align Post es un proyecto independiente y open source. No utiliza código propietario de Sound Radix.
 
-## License
+Las futuras funciones avanzadas se estudiarán de forma independiente, incluyendo la posibilidad de investigar correcciones espectrales de fase después de que la alineación temporal básica sea sólida.
 
-Project code: MIT. See `LICENSE`.
+## Licencia
 
-The VST3 SDK is a separate third-party dependency and remains under its own license. See `THIRD_PARTY_LICENSES.md` and the SDK repository.
+El código propio del proyecto está publicado bajo **MIT**. Consultar `LICENSE`.
+
+El SDK de VST3 de Steinberg es una dependencia independiente y conserva sus propias condiciones de licencia. Consultar `THIRD_PARTY_LICENSES.md` y la documentación oficial del SDK.
+
+## Estado del desarrollo
+
+**Versión:** 0.1 — base experimental pública.
+
+El proyecto está en desarrollo activo. Las primeras versiones priorizan la validación del algoritmo y la calidad del análisis antes de añadir funciones avanzadas de interfaz.
+
+## Contribuciones
+
+Las sugerencias, pruebas con material real y reportes de errores son bienvenidos. Consultar `CONTRIBUTING.md`.
