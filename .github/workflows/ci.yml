@@ -1,0 +1,25 @@
+name: Pruebas Smart Align Post
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  dsp-tests:
+    name: Pruebas del motor DSP
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Descargar código
+        uses: actions/checkout@v4
+
+      - name: Configurar CMake
+        run: cmake -S . -B build -DSAP_BUILD_VST3=OFF -DSAP_BUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Release
+
+      - name: Compilar pruebas
+        run: cmake --build build --config Release
+
+      - name: Ejecutar pruebas
+        run: ctest --test-dir build --output-on-failure -C Release
