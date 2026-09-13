@@ -132,7 +132,7 @@ SmartAlignPost/
 
 El proyecto utiliza CMake.
 
-El SDK oficial de VST3 de Steinberg es una dependencia externa y no se copia dentro de este repositorio. El SDK oficial documenta compilación mediante CMake para Windows, macOS y Linux. citehttps://github.com/steinbergmedia/vst3sdk
+El SDK oficial de VST3 de Steinberg es una dependencia externa y no se copia dentro de este repositorio. El SDK oficial documenta compilación mediante CMake para Windows, macOS y Linux.
 
 Para el desarrollo local, la configuración del proyecto descargará/obtendrá el SDK externo cuando sea necesario.
 
