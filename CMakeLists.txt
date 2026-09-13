@@ -7,6 +7,7 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 option(SAP_BUILD_VST3 "Build the VST3 plug-in" ON)
 option(SAP_BUILD_TESTS "Build the DSP unit tests" ON)
+option(SAP_BUILD_PROTOTYPE "Build the REAPER prototype CLI" ON)
 
 # The VST3 SDK is intentionally kept as a Git submodule rather than copied into
 # this repository. This keeps the public repository small and preserves the SDK
@@ -68,4 +69,12 @@ if(SAP_BUILD_TESTS)
     )
     target_include_directories(smartalign_engine_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     add_test(NAME SmartAlignEngineTests COMMAND smartalign_engine_tests)
+endif()
+
+if(SAP_BUILD_PROTOTYPE)
+    add_executable(SmartAlignPostPrototype
+        src/prototype_cli.cpp
+        src/align_engine.cpp
+    )
+    target_include_directories(SmartAlignPostPrototype PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 endif()
