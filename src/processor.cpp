@@ -9,12 +9,6 @@ using namespace Steinberg::Vst;
 
 namespace SmartAlignPost {
 
-namespace {
-constexpr SpeakerArrangement kEightChannelArrangement =
-    SpeakerArr::kL | SpeakerArr::kR | SpeakerArr::kC | SpeakerArr::kLfe |
-    SpeakerArr::kLs | SpeakerArr::kRs | SpeakerArr::kSl | SpeakerArr::kSr;
-}
-
 Processor::Processor() {
     setControllerClass(ControllerUID);
 }
@@ -26,8 +20,8 @@ tresult PLUGIN_API Processor::initialize(FUnknown* context) {
     if (r != kResultOk) return r;
 
     // V1 prototype: 8 mono inputs represented as one 8-channel audio bus.
-    addAudioInput(STR16("Smart Align Inputs"), kEightChannelArrangement);
-    addAudioOutput(STR16("Aligned Output"), kEightChannelArrangement);
+    addAudioInput(STR16("Smart Align Inputs"), SpeakerArr::k71Music);
+    addAudioOutput(STR16("Aligned Output"), SpeakerArr::k71Music);
     return kResultOk;
 }
 
@@ -40,8 +34,8 @@ tresult PLUGIN_API Processor::terminate() {
 tresult PLUGIN_API Processor::setBusArrangements(SpeakerArrangement* inputs, int32 numIns,
                                                   SpeakerArrangement* outputs, int32 numOuts) {
     if (numIns == 1 && numOuts == 1 &&
-        inputs[0] == kEightChannelArrangement &&
-        outputs[0] == kEightChannelArrangement)
+        inputs[0] == SpeakerArr::k71Music &&
+        outputs[0] == SpeakerArr::k71Music)
         return AudioEffect::setBusArrangements(inputs, numIns, outputs, numOuts);
     return kResultFalse;
 }
