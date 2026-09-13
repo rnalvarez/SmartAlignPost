@@ -17,7 +17,8 @@ tresult PLUGIN_API Controller::initialize(FUnknown* context) {
         return r;
 
     // MODE: selector STATIC / DYNAMIC.
-    // kIsList tells generic editors that this is a discrete list.
+    // kIsList tells VSTGUI's VST3 editor to build the option menu
+    // from getParamStringByValue() for each step.
     parameters.addParameter(
         STR16("Mode"), nullptr, 1, 0.0,
         ParameterInfo::kCanAutomate | ParameterInfo::kIsList, 0);
@@ -47,7 +48,9 @@ tresult PLUGIN_API Controller::getParamStringByValue(
     if (tag == 0) {
         Steinberg::UString(string, 128).fromAscii(
             valueNormalized < 0.5 ? "STATIC" : "DYNAMIC");
-        return kResultOk;
+        // VSTGUI expects kResultTrue here to use this text when populating
+        // a COptionMenu bound to a stepped/list parameter.
+        return kResultTrue;
     }
     return EditController::getParamStringByValue(tag, valueNormalized, string);
 }
