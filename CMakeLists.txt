@@ -34,8 +34,15 @@ if(SAP_BUILD_VST3)
         src/controller.h
         src/controller.cpp
         src/factory.cpp
-        src/platform_module.cpp
     )
+
+    # VSTGUI uses Steinberg::getPlatformModuleHandle(), whose Windows
+    # moduleHandle is supplied by the SDK platform entry point.
+    if(SMTG_WIN)
+        target_sources(SmartAlignPost PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/extern/vst3sdk/public.sdk/source/main/dllmain.cpp
+        )
+    endif()
 
     target_include_directories(SmartAlignPost PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(SmartAlignPost PRIVATE sdk vstgui_support)
