@@ -9,26 +9,14 @@ BEGIN_FACTORY_DEF("Ramiro N. Alvarez",
                   "https://github.com/rnalvarez/SmartAlignPost",
                   "")
 
-DEF_CLASS2(INLINE_UID_FROM_FUID(SmartAlignPost::ProcessorUID),
-           PClassInfo::kManyInstances,
-           kVstAudioEffectClass,
-           stringPluginName,
-           Vst::kDistributable,
-           "Fx",
-           "Smart microphone alignment",
-           FULL_VERSION_STR,
-           kVstVersionString,
-           SmartAlignPost::Processor::createInstance)
-
-DEF_CLASS2(INLINE_UID_FROM_FUID(SmartAlignPost::ControllerUID),
-           PClassInfo::kManyInstances,
-           kVstComponentControllerClass,
-           stringPluginName,
-           0,
-           "",
-           "",
-           FULL_VERSION_STR,
-           kVstVersionString,
-           SmartAlignPost::Controller::createInstance)
+DEF_VST3_CLASS(
+    stringPluginName,
+    "Fx",
+    Vst::kDistributable,
+    FULL_VERSION_STR,
+    INLINE_UID_FROM_FUID(SmartAlignPost::ProcessorUID),
+    SmartAlignPost::Processor::createInstance,
+    INLINE_UID_FROM_FUID(SmartAlignPost::ControllerUID),
+    SmartAlignPost::Controller::createInstance)
 
 END_FACTORY
