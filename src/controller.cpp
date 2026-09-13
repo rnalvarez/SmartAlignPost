@@ -1,5 +1,6 @@
 #include "controller.h"
 #include "vstgui/plugin-bindings/vst3editor.h"
+#include "pluginterfaces/base/ustring.h"
 
 using namespace Steinberg;
 using namespace Steinberg::Vst;
@@ -35,8 +36,7 @@ tresult PLUGIN_API Controller::initialize(FUnknown* context) {
 }
 
 IPlugView* PLUGIN_API Controller::createView(const char* name) {
-    ConstString viewName(name);
-    if (viewName == ViewType::kEditor) {
+    if (name && FIDStringsEqual(name, ViewType::kEditor)) {
         return new VSTGUI::VST3Editor(this, "view", "smartalignpost.uidesc");
     }
     return nullptr;
@@ -45,7 +45,8 @@ IPlugView* PLUGIN_API Controller::createView(const char* name) {
 tresult PLUGIN_API Controller::getParamStringByValue(
     ParamID tag, ParamValue valueNormalized, String128 string) {
     if (tag == 0) {
-        UString(string, 128).fromAscii(valueNormalized < 0.5 ? "STATIC" : "DYNAMIC");
+        Steinberg::UString(string, 128).fromAscii(
+            valueNormalized < 0.5 ? "STATIC" : "DYNAMIC");
         return kResultOk;
     }
     return EditController::getParamStringByValue(tag, valueNormalized, string);
