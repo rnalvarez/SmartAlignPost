@@ -1,0 +1,4 @@
+[submodule "extern/vst3sdk"]
+	path = extern/vst3sdk
+	url = https://github.com/steinbergmedia/vst3sdk.git
+	branch = master

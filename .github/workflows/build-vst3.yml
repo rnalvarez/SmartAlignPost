@@ -1,0 +1,72 @@
+name: Compilar VST3
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'src/**'
+      - 'CMakeLists.txt'
+      - '.gitmodules'
+      - '.github/workflows/build-vst3.yml'
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Descargar repositorio con submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configurar CMake
+        run: cmake -S . -B build -DSAP_BUILD_TESTS=ON -DSAP_BUILD_VST3=ON
+
+      - name: Compilar
+        run: cmake --build build --config Release --parallel
+
+      - name: Ejecutar pruebas DSP
+        run: ctest --test-dir build --build-config Release --output-on-failure
+
+      - name: Empaquetar VST3
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+          $vst3 = Get-ChildItem -Path build -Filter '*.vst3' -Recurse | Select-Object -First 1
+          if (-not $vst3) { throw 'No se encontró ningún archivo .vst3' }
+          Compress-Archive -Path $vst3.FullName -DestinationPath artifacts/SmartAlignPost-Windows-VST3.zip
+
+      - name: Publicar artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: SmartAlignPost-Windows-VST3
+          path: artifacts/SmartAlignPost-Windows-VST3.zip
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - name: Descargar repositorio con submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configurar CMake
+        run: cmake -S . -B build -DSAP_BUILD_TESTS=ON -DSAP_BUILD_VST3=ON
+
+      - name: Compilar
+        run: cmake --build build --config Release --parallel
+
+      - name: Ejecutar pruebas DSP
+        run: ctest --test-dir build --build-config Release --output-on-failure
+
+      - name: Empaquetar VST3
+        run: |
+          mkdir -p artifacts
+          vst3=$(find build -type d -name '*.vst3' | head -1)
+          test -n "$vst3"
+          ditto -c -k --sequesterRsrc --keepParent "$vst3" artifacts/SmartAlignPost-macOS-VST3.zip
+
+      - name: Publicar artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: SmartAlignPost-macOS-VST3
+          path: artifacts/SmartAlignPost-macOS-VST3.zip
