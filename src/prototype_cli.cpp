@@ -107,7 +107,6 @@ bool loadWav(const std::string& path, WavData& out, std::string& error) {
     if (frameBytes == 0) { error = "Frame WAV inválido: " + path; return false; }
     const size_t frames = dataSize / frameBytes;
 
-    // V1 prototype: analyze at most 10 seconds; enough for static alignment.
     const size_t maxFrames = std::min<size_t>(frames, static_cast<size_t>(out.sampleRate) * 10u);
     out.mono.resize(maxFrames);
 
@@ -157,18 +156,17 @@ int main(int argc, char** argv) {
     settings.sampleRate = static_cast<double>(master.sampleRate);
     settings.maxDelayMs = 12.0;
     settings.analysisWindowMs = 200.0;
-    // STATIC diagnostics are intentionally based on the existing whole-file
-    // scan; no algorithmic behavior changes here beyond reporting where the
-    // winning window was found.
 
     const auto result = sap::AlignEngine::analyze(master.mono, source.mono, settings);
     const double delayMs = result.staticDelaySamples * 1000.0 / settings.sampleRate;
 
-    // Machine-readable one-line output for REAPER Lua.
+    // Machine-readable one-line fields for the REAPER bridge and diagnostics.
     std::cout << "DELAY_MS=" << delayMs << "\n";
     std::cout << "DELAY_SAMPLES=" << result.staticDelaySamples << "\n";
     std::cout << "CONFIDENCE=" << result.staticConfidence << "\n";
     std::cout << "WINDOW_SEC=" << result.staticAnalysisTimeSec << "\n";
     std::cout << "CORRELATION=" << result.staticCorrelation << "\n";
+    std::cout << "SUPPORT_WINDOWS=" << result.staticSupportWindows << "\n";
+    std::cout << "TOTAL_WINDOWS=" << result.staticTotalWindows << "\n";
     return 0;
 }
