@@ -157,6 +157,9 @@ int main(int argc, char** argv) {
     settings.sampleRate = static_cast<double>(master.sampleRate);
     settings.maxDelayMs = 12.0;
     settings.analysisWindowMs = 200.0;
+    // STATIC diagnostics are intentionally based on the existing whole-file
+    // scan; no algorithmic behavior changes here beyond reporting where the
+    // winning window was found.
 
     const auto result = sap::AlignEngine::analyze(master.mono, source.mono, settings);
     const double delayMs = result.staticDelaySamples * 1000.0 / settings.sampleRate;
@@ -165,5 +168,7 @@ int main(int argc, char** argv) {
     std::cout << "DELAY_MS=" << delayMs << "\n";
     std::cout << "DELAY_SAMPLES=" << result.staticDelaySamples << "\n";
     std::cout << "CONFIDENCE=" << result.staticConfidence << "\n";
+    std::cout << "WINDOW_SEC=" << result.staticAnalysisTimeSec << "\n";
+    std::cout << "CORRELATION=" << result.staticCorrelation << "\n";
     return 0;
 }
