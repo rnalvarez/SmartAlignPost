@@ -28,6 +28,8 @@ struct Point {
 struct Result {
     double staticDelaySamples = 0.0;
     double staticConfidence = 0.0;
+    double staticAnalysisTimeSec = 0.0;
+    double staticCorrelation = 0.0;
     std::vector<Point> curve;
 };
 
