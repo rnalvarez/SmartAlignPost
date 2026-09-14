@@ -75,14 +75,16 @@ Result AlignEngine::analyze(const std::vector<float>& master,
         r.staticDelaySamples = estimateDelay(master.data(), source.data(),
                                              n, maxLag, c);
         r.staticConfidence=c;
+        r.staticAnalysisTimeSec = 0.0;
+        r.staticCorrelation = normalizedCorrelation(
+            master.data(), source.data(), n, static_cast<int>(r.staticDelaySamples));
         return r;
     }
 
     const int maxLag = std::max(1, std::min<int>(requestedMaxLag, static_cast<int>(win / 2) - 1));
 
-    // STATIC: search the whole recording in overlapping windows and keep the
-    // strongest, most unambiguous correlation peak. This avoids letting an
-    // arbitrary first 200 ms of silence/ambience decide the alignment.
+    // STATIC: search the recording in overlapping windows and keep the
+    // strongest, most unambiguous correlation peak.
     double bestConfidence = -1.0;
     double bestDelay = 0.0;
     size_t bestPos = 0;
@@ -101,6 +103,12 @@ Result AlignEngine::analyze(const std::vector<float>& master,
 
     r.staticDelaySamples = bestDelay;
     r.staticConfidence = std::max(0.0, bestConfidence);
+    r.staticAnalysisTimeSec = static_cast<double>(bestPos) / settings.sampleRate;
+    r.staticCorrelation = normalizedCorrelation(
+        master.data() + bestPos,
+        source.data() + bestPos,
+        win,
+        static_cast<int>(bestDelay));
 
     if (settings.mode == Mode::Static) return r;
 
@@ -130,7 +138,6 @@ Result AlignEngine::analyze(const std::vector<float>& master,
         r.curve.push_back({static_cast<double>(pos)/settings.sampleRate, d, c});
         previous=d;
     }
-    (void)bestPos;
     return r;
 }
 
