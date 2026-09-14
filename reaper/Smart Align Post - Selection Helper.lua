@@ -2,6 +2,8 @@
 -- V0 STATIC: selected items -> C++ AlignEngine -> move SOURCE item by measured delay.
 -- Primer item seleccionado = MASTER. Segundo = SOURCE.
 
+local MIN_CONFIDENCE = 0.80
+
 local function script_dir()
   local src = debug.getinfo(1, "S").source
   if src:sub(1, 1) == "@" then src = src:sub(2) end
@@ -47,7 +49,6 @@ local sourcePos = reaper.GetMediaItemInfo_Value(sourceItem, "D_POSITION")
 
 -- Windows: el ejecutable debe estar junto a este .lua.
 local exe = script_dir() .. "\\SmartAlignPostPrototype.exe"
-
 local cmd = quote(exe) .. " " .. quote(masterPath) .. " " .. quote(sourcePath)
 
 -- REAPER ExecProcess devuelve un único string:
@@ -97,6 +98,19 @@ end
 --   2) delay acústico medido entre los contenidos WAV
 local timelineDelayMs = (sourcePos - masterPos) * 1000.0
 local totalDelayMs = timelineDelayMs + dspDelayMs
+
+local confidenceText = confidence and string.format("%.3f", confidence) or "N/D"
+
+-- Nunca aplicar un resultado poco confiable.
+if not confidence or confidence < MIN_CONFIDENCE then
+  local msg = string.format(
+    "ANÁLISIS NO CONFIABLE\n\nDelay DSP candidato: %+0.3f ms\nDesfase timeline: %+0.3f ms\nConfidence: %s\n\nUmbral mínimo: %.2f\n\nNo se modificó la posición del SOURCE.",
+    dspDelayMs, timelineDelayMs, confidenceText, MIN_CONFIDENCE
+  )
+  reaper.ShowMessageBox(msg, "Smart Align Post — RECHAZADO", 0)
+  return
+end
+
 local newPos = sourcePos - (totalDelayMs / 1000.0)
 
 reaper.Undo_BeginBlock()
@@ -105,7 +119,6 @@ reaper.UpdateItemInProject(sourceItem)
 reaper.Undo_EndBlock("Smart Align Post - prototype STATIC alignment", -1)
 reaper.UpdateArrange()
 
-local confidenceText = confidence and string.format("%.3f", confidence) or "N/D"
 local msg = string.format(
   "MASTER: BOOM\nSOURCE: CORBATERO\n\nDelay DSP: %+0.3f ms\nDesfase timeline: %+0.3f ms\nCorrección total: %+0.3f ms\nConfidence: %s\n\nSOURCE movido:\n%.6f s → %.6f s\n\nModo: STATIC\nEl archivo WAV original no fue modificado.",
   dspDelayMs, timelineDelayMs, totalDelayMs, confidenceText, sourcePos, newPos
