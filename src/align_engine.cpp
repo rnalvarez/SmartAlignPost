@@ -46,7 +46,6 @@ double AlignEngine::estimateDelay(const float* master,
         else if (c > second) second=c;
     }
 
-    // Confidence combines correlation strength and peak separation.
     confidence = std::clamp((best + 1.0) * 0.5, 0.0, 1.0);
     confidence *= std::clamp(0.5 + (best-second)*2.0, 0.0, 1.0);
 
@@ -78,37 +77,123 @@ Result AlignEngine::analyze(const std::vector<float>& master,
         r.staticAnalysisTimeSec = 0.0;
         r.staticCorrelation = normalizedCorrelation(
             master.data(), source.data(), n, static_cast<int>(r.staticDelaySamples));
+        r.staticSupportWindows = c >= settings.minConfidence ? 1 : 0;
+        r.staticTotalWindows = 1;
         return r;
     }
 
     const int maxLag = std::max(1, std::min<int>(requestedMaxLag, static_cast<int>(win / 2) - 1));
 
-    // STATIC: search the recording in overlapping windows and keep the
-    // strongest, most unambiguous correlation peak.
-    double bestConfidence = -1.0;
-    double bestDelay = 0.0;
-    size_t bestPos = 0;
+    // STATIC: do not trust a single locally strong window. Accumulate the
+    // delays found across the recording and choose the most supported delay.
+    // This is better suited to production sound, where speech/activity appears
+    // in multiple windows but isolated events can create misleading peaks.
+    const int lagSpan = 2 * maxLag + 1;
+    std::vector<double> lagScore(static_cast<size_t>(lagSpan), 0.0);
+    std::vector<double> lagConfidence(static_cast<size_t>(lagSpan), 0.0);
+    std::vector<int> lagCount(static_cast<size_t>(lagSpan), 0);
+    std::vector<double> lagBestTime(static_cast<size_t>(lagSpan), 0.0);
+    std::vector<double> lagBestCorrelation(static_cast<size_t>(lagSpan), -1.0);
+
+    double strongestConfidence = -1.0;
+    double strongestDelay = 0.0;
+    size_t strongestPos = 0;
+    double strongestCorrelation = 0.0;
+    int totalWindows = 0;
 
     for (size_t pos = 0; pos + win <= n; pos += hop) {
         double c = 0.0;
         const double d = estimateDelay(master.data() + pos,
                                        source.data() + pos,
                                        win, maxLag, c);
-        if (c > bestConfidence) {
-            bestConfidence = c;
-            bestDelay = d;
-            bestPos = pos;
+        const int lag = static_cast<int>(d);
+        const double corr = normalizedCorrelation(master.data() + pos,
+                                                  source.data() + pos,
+                                                  win, lag);
+        const int index = lag + maxLag;
+        if (index >= 0 && index < lagSpan) {
+            const double score = c * std::max(0.0, corr);
+            lagScore[static_cast<size_t>(index)] += score;
+            lagConfidence[static_cast<size_t>(index)] += c;
+            lagCount[static_cast<size_t>(index)] += 1;
+            if (corr > lagBestCorrelation[static_cast<size_t>(index)]) {
+                lagBestCorrelation[static_cast<size_t>(index)] = corr;
+                lagBestTime[static_cast<size_t>(index)] =
+                    static_cast<double>(pos) / settings.sampleRate;
+            }
+        }
+
+        if (c > strongestConfidence) {
+            strongestConfidence = c;
+            strongestDelay = d;
+            strongestPos = pos;
+            strongestCorrelation = corr;
+        }
+        ++totalWindows;
+    }
+
+    int bestIndex = maxLag;
+    double bestScore = -1.0;
+    for (int i = 0; i < lagSpan; ++i) {
+        if (lagScore[static_cast<size_t>(i)] > bestScore) {
+            bestScore = lagScore[static_cast<size_t>(i)];
+            bestIndex = i;
         }
     }
 
-    r.staticDelaySamples = bestDelay;
-    r.staticConfidence = std::max(0.0, bestConfidence);
-    r.staticAnalysisTimeSec = static_cast<double>(bestPos) / settings.sampleRate;
-    r.staticCorrelation = normalizedCorrelation(
-        master.data() + bestPos,
-        source.data() + bestPos,
-        win,
-        static_cast<int>(bestDelay));
+    // Include adjacent bins so a real acoustic delay that falls near a sample
+    // boundary is treated as one cluster instead of three unrelated results.
+    double weightedDelay = 0.0;
+    double totalWeight = 0.0;
+    int supportWindows = 0;
+    double supportConfidence = 0.0;
+    int bestSupportIndex = bestIndex;
+    for (int i = std::max(0, bestIndex - 1); i <= std::min(lagSpan - 1, bestIndex + 1); ++i) {
+        const double w = lagScore[static_cast<size_t>(i)];
+        weightedDelay += static_cast<double>(i - maxLag) * w;
+        totalWeight += w;
+        supportWindows += lagCount[static_cast<size_t>(i)];
+        supportConfidence += lagConfidence[static_cast<size_t>(i)];
+        if (lagCount[static_cast<size_t>(i)] > lagCount[static_cast<size_t>(bestSupportIndex)])
+            bestSupportIndex = i;
+    }
+
+    const double consensusDelay = totalWeight > 0.0
+        ? weightedDelay / totalWeight
+        : strongestDelay;
+
+    r.staticDelaySamples = consensusDelay;
+    r.staticAnalysisTimeSec =
+        totalWeight > 0.0 ? lagBestTime[static_cast<size_t>(bestSupportIndex)]
+                          : static_cast<double>(strongestPos) / settings.sampleRate;
+    r.staticCorrelation =
+        totalWeight > 0.0 ? lagBestCorrelation[static_cast<size_t>(bestSupportIndex)]
+                          : strongestCorrelation;
+    r.staticSupportWindows = supportWindows;
+    r.staticTotalWindows = totalWindows;
+
+    const double supportRatio = totalWindows > 0
+        ? static_cast<double>(supportWindows) / static_cast<double>(totalWindows)
+        : 0.0;
+    const double averageSupportConfidence = supportWindows > 0
+        ? supportConfidence / static_cast<double>(supportWindows)
+        : 0.0;
+    // Confidence now reflects both local correlation quality and repeated
+    // support for the same acoustic delay across the recording.
+    r.staticConfidence = std::clamp(
+        averageSupportConfidence * std::clamp(supportRatio * 2.0, 0.0, 1.0),
+        0.0, 1.0);
+
+    // Keep the previous strongest-window fallback characteristics for very
+    // sparse material: if the consensus has almost no support, use the best
+    // individual window rather than inventing confidence.
+    if (supportWindows == 0 || bestScore <= 0.0) {
+        r.staticDelaySamples = strongestDelay;
+        r.staticAnalysisTimeSec = static_cast<double>(strongestPos) / settings.sampleRate;
+        r.staticCorrelation = strongestCorrelation;
+        r.staticConfidence = std::max(0.0, strongestConfidence);
+        r.staticSupportWindows = 1;
+    }
 
     if (settings.mode == Mode::Static) return r;
 
@@ -121,7 +206,6 @@ Result AlignEngine::analyze(const std::vector<float>& master,
         if (c < settings.minConfidence) {
             d = previous;
         } else {
-            // Conservative temporal slew limiting.
             const double maxStep =
                 settings.maxSlewMsPerSecond / 1000.0 *
                 (static_cast<double>(hop) / settings.sampleRate) *
@@ -129,7 +213,6 @@ Result AlignEngine::analyze(const std::vector<float>& master,
             d = std::clamp(d, previous-maxStep, previous+maxStep);
         }
 
-        // Exponential smoothing.
         const double tau = std::max(0.001, settings.smoothingMs/1000.0);
         const double dt = static_cast<double>(hop)/settings.sampleRate;
         const double alpha = 1.0 - std::exp(-dt/tau);
