@@ -47,17 +47,29 @@ local exe = script_dir() .. "\\SmartAlignPostPrototype.exe"
 
 local cmd = quote(exe) .. " " .. quote(masterPath) .. " " .. quote(sourcePath)
 
--- REAPER Lua ExecProcess devuelve UN solo string:
--- "<return_code>\n<salida del programa>"
+-- REAPER ExecProcess devuelve un único string:
+-- primera línea = código de retorno; resto = stdout/stderr del proceso.
 local processResult = reaper.ExecProcess(cmd, 60000)
 if not processResult then
   reaper.ShowMessageBox("ExecProcess falló completamente.\n\nComando:\n" .. cmd, "Smart Align Post — ERROR", 0)
   return
 end
 
-local returnCodeText, output = processResult:match("^([^\r\n]*)[\r\n]+([\\s\\S]*)$")
-local returnCode = tonumber(returnCodeText)
-output = output or ""
+local eol = processResult:find("[\r\n]")
+local returnCode
+local output
+
+if eol then
+  returnCode = tonumber(processResult:sub(1, eol - 1))
+  local outputStart = eol + 1
+  if processResult:sub(eol, eol) == "\r" and processResult:sub(eol + 1, eol + 1) == "\n" then
+    outputStart = eol + 2
+  end
+  output = processResult:sub(outputStart)
+else
+  returnCode = tonumber(processResult)
+  output = ""
+end
 
 if returnCode == nil then
   reaper.ShowMessageBox("No se pudo interpretar la respuesta de ExecProcess.\n\nRespuesta:\n" .. processResult, "Smart Align Post — ERROR", 0)
