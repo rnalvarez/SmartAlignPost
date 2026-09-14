@@ -86,6 +86,8 @@ local dspDelayMs = tonumber(output:match("DELAY_MS=([%+%-]?[%d%.]+)"))
 local confidence = tonumber(output:match("CONFIDENCE=([%+%-]?[%d%.]+)"))
 local windowSec = tonumber(output:match("WINDOW_SEC=([%+%-]?[%d%.]+)"))
 local correlation = tonumber(output:match("CORRELATION=([%+%-]?[%d%.]+)"))
+local supportWindows = tonumber(output:match("SUPPORT_WINDOWS=([%+%-]?[%d%.]+)"))
+local totalWindows = tonumber(output:match("TOTAL_WINDOWS=([%+%-]?[%d%.]+)"))
 
 if not dspDelayMs then
   reaper.ShowMessageBox("El CLI terminó correctamente, pero no devolvió DELAY_MS.\n\nSalida:\n" .. output, "Smart Align Post — ERROR", 0)
@@ -97,11 +99,14 @@ local totalDelayMs = timelineDelayMs + dspDelayMs
 local confidenceText = confidence and string.format("%.3f", confidence) or "N/D"
 local windowText = windowSec and string.format("%.3f s", windowSec) or "N/D"
 local correlationText = correlation and string.format("%.6f", correlation) or "N/D"
+local supportText = (supportWindows and totalWindows)
+  and string.format("%d / %d ventanas", supportWindows, totalWindows)
+  or "N/D"
 
 if not confidence or confidence < MIN_CONFIDENCE then
   local msg = string.format(
-    "ANÁLISIS NO CONFIABLE\n\nDelay DSP candidato: %+0.3f ms\nDesfase timeline: %+0.3f ms\nConfidence: %s\nCorrelación: %s\nVentana analizada: %s\n\nUmbral mínimo: %.2f\n\nNo se modificó la posición del SOURCE.",
-    dspDelayMs, timelineDelayMs, confidenceText, correlationText, windowText, MIN_CONFIDENCE
+    "ANÁLISIS NO CONFIABLE\n\nDelay DSP candidato: %+0.3f ms\nDesfase timeline: %+0.3f ms\nConfidence: %s\nCorrelación: %s\nVentana analizada: %s\nApoyo del delay: %s\n\nUmbral mínimo: %.2f\n\nNo se modificó la posición del SOURCE.",
+    dspDelayMs, timelineDelayMs, confidenceText, correlationText, windowText, supportText, MIN_CONFIDENCE
   )
   reaper.ShowMessageBox(msg, "Smart Align Post — RECHAZADO", 0)
   return
@@ -130,7 +135,8 @@ local msg = string.format(
   "Corrección total:   %+0.6f ms\n" ..
   "Confidence:         %s\n" ..
   "Correlación:        %s\n" ..
-  "Ventana analizada:  %s\n\n" ..
+  "Ventana analizada:  %s\n" ..
+  "Apoyo del delay:    %s\n\n" ..
   "Corrección aplicada: %+0.3f samples\n" ..
   "SOURCE después:     %.9f s  (%.2f samples)\n\n" ..
   "Modo: STATIC\n" ..
@@ -138,7 +144,7 @@ local msg = string.format(
   masterPos, masterSamples,
   sourcePos, sourceBeforeSamples,
   dspDelayMs, timelineDelayMs, totalDelayMs, confidenceText,
-  correlationText, windowText,
+  correlationText, windowText, supportText,
   appliedSamples, stateAfter, sourceAfterSamples
 )
 
