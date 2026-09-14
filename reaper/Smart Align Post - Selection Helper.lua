@@ -42,6 +42,9 @@ if not sourcePath then
   return
 end
 
+local masterPos = reaper.GetMediaItemInfo_Value(masterItem, "D_POSITION")
+local sourcePos = reaper.GetMediaItemInfo_Value(sourceItem, "D_POSITION")
+
 -- Windows: el ejecutable debe estar junto a este .lua.
 local exe = script_dir() .. "\\SmartAlignPostPrototype.exe"
 
@@ -81,16 +84,20 @@ if returnCode ~= 0 then
   return
 end
 
-local delayMs = tonumber(output:match("DELAY_MS=([%+%-]?[%d%.]+)"))
+local dspDelayMs = tonumber(output:match("DELAY_MS=([%+%-]?[%d%.]+)"))
 local confidence = tonumber(output:match("CONFIDENCE=([%+%-]?[%d%.]+)"))
 
-if not delayMs then
+if not dspDelayMs then
   reaper.ShowMessageBox("El CLI terminó correctamente, pero no devolvió DELAY_MS.\n\nSalida:\n" .. output, "Smart Align Post — ERROR", 0)
   return
 end
 
-local pos = reaper.GetMediaItemInfo_Value(sourceItem, "D_POSITION")
-local newPos = pos - (delayMs / 1000.0)
+-- Delay total que debemos compensar en el timeline:
+--   1) desfase ya existente entre SOURCE y MASTER en REAPER
+--   2) delay acústico medido entre los contenidos WAV
+local timelineDelayMs = (sourcePos - masterPos) * 1000.0
+local totalDelayMs = timelineDelayMs + dspDelayMs
+local newPos = sourcePos - (totalDelayMs / 1000.0)
 
 reaper.Undo_BeginBlock()
 reaper.SetMediaItemInfo_Value(sourceItem, "D_POSITION", newPos)
@@ -100,8 +107,8 @@ reaper.UpdateArrange()
 
 local confidenceText = confidence and string.format("%.3f", confidence) or "N/D"
 local msg = string.format(
-  "MASTER: BOOM\nSOURCE: CORBATERO\n\nDelay calculado: %+0.3f ms\nConfidence: %s\n\nSOURCE movido:\n%.6f s → %.6f s\n\nModo: STATIC\nEl archivo WAV original no fue modificado.",
-  delayMs, confidenceText, pos, newPos
+  "MASTER: BOOM\nSOURCE: CORBATERO\n\nDelay DSP: %+0.3f ms\nDesfase timeline: %+0.3f ms\nCorrección total: %+0.3f ms\nConfidence: %s\n\nSOURCE movido:\n%.6f s → %.6f s\n\nModo: STATIC\nEl archivo WAV original no fue modificado.",
+  dspDelayMs, timelineDelayMs, totalDelayMs, confidenceText, sourcePos, newPos
 )
 
 reaper.ShowMessageBox(msg, "Smart Align Post — PROTOTIPO OK", 0)
