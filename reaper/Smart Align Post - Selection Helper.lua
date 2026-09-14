@@ -51,8 +51,6 @@ local sourcePos = reaper.GetMediaItemInfo_Value(sourceItem, "D_POSITION")
 local exe = script_dir() .. "\\SmartAlignPostPrototype.exe"
 local cmd = quote(exe) .. " " .. quote(masterPath) .. " " .. quote(sourcePath)
 
--- REAPER ExecProcess devuelve un único string:
--- primera línea = código de retorno; resto = stdout/stderr del proceso.
 local processResult = reaper.ExecProcess(cmd, 60000)
 if not processResult then
   reaper.ShowMessageBox("ExecProcess falló completamente.\n\nComando:\n" .. cmd, "Smart Align Post — ERROR", 0)
@@ -93,15 +91,10 @@ if not dspDelayMs then
   return
 end
 
--- Delay total que debemos compensar en el timeline:
---   1) desfase ya existente entre SOURCE y MASTER en REAPER
---   2) delay acústico medido entre los contenidos WAV
 local timelineDelayMs = (sourcePos - masterPos) * 1000.0
 local totalDelayMs = timelineDelayMs + dspDelayMs
-
 local confidenceText = confidence and string.format("%.3f", confidence) or "N/D"
 
--- Nunca aplicar un resultado poco confiable.
 if not confidence or confidence < MIN_CONFIDENCE then
   local msg = string.format(
     "ANÁLISIS NO CONFIABLE\n\nDelay DSP candidato: %+0.3f ms\nDesfase timeline: %+0.3f ms\nConfidence: %s\n\nUmbral mínimo: %.2f\n\nNo se modificó la posición del SOURCE.",
@@ -119,9 +112,28 @@ reaper.UpdateItemInProject(sourceItem)
 reaper.Undo_EndBlock("Smart Align Post - prototype STATIC alignment", -1)
 reaper.UpdateArrange()
 
+local stateAfter = reaper.GetMediaItemInfo_Value(sourceItem, "D_POSITION")
+local masterSamples = masterPos * 48000.0
+local sourceBeforeSamples = sourcePos * 48000.0
+local sourceAfterSamples = stateAfter * 48000.0
+local appliedSamples = (sourcePos - stateAfter) * 48000.0
+
 local msg = string.format(
-  "MASTER: BOOM\nSOURCE: CORBATERO\n\nDelay DSP: %+0.3f ms\nDesfase timeline: %+0.3f ms\nCorrección total: %+0.3f ms\nConfidence: %s\n\nSOURCE movido:\n%.6f s → %.6f s\n\nModo: STATIC\nEl archivo WAV original no fue modificado.",
-  dspDelayMs, timelineDelayMs, totalDelayMs, confidenceText, sourcePos, newPos
+  "MASTER / SOURCE — POSICIÓN EXACTA\n\n" ..
+  "MASTER antes:       %.9f s  (%.2f samples)\n" ..
+  "SOURCE antes:       %.9f s  (%.2f samples)\n\n" ..
+  "Delay DSP:          %+0.6f ms\n" ..
+  "Desfase timeline:   %+0.6f ms\n" ..
+  "Corrección total:   %+0.6f ms\n" ..
+  "Confidence:         %s\n\n" ..
+  "Corrección aplicada: %+0.3f samples\n" ..
+  "SOURCE después:     %.9f s  (%.2f samples)\n\n" ..
+  "Modo: STATIC\n" ..
+  "El archivo WAV original no fue modificado.",
+  masterPos, masterSamples,
+  sourcePos, sourceBeforeSamples,
+  dspDelayMs, timelineDelayMs, totalDelayMs, confidenceText,
+  appliedSamples, stateAfter, sourceAfterSamples
 )
 
 reaper.ShowMessageBox(msg, "Smart Align Post — PROTOTIPO OK", 0)
