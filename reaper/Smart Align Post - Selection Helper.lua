@@ -46,19 +46,34 @@ end
 local exe = script_dir() .. "\\SmartAlignPostPrototype.exe"
 
 local cmd = quote(exe) .. " " .. quote(masterPath) .. " " .. quote(sourcePath)
-local rv, output = reaper.ExecProcess(cmd, 60000)
 
-if rv ~= 0 then
-  reaper.ShowMessageBox("El analizador no pudo ejecutarse.\n\nCódigo: " .. tostring(rv) .. "\n\n" .. tostring(output), "Smart Align Post — ERROR", 0)
+-- REAPER Lua ExecProcess devuelve UN solo string:
+-- "<return_code>\n<salida del programa>"
+local processResult = reaper.ExecProcess(cmd, 60000)
+if not processResult then
+  reaper.ShowMessageBox("ExecProcess falló completamente.\n\nComando:\n" .. cmd, "Smart Align Post — ERROR", 0)
   return
 end
 
+local returnCodeText, output = processResult:match("^([^\r\n]*)[\r\n]+([\\s\\S]*)$")
+local returnCode = tonumber(returnCodeText)
 output = output or ""
+
+if returnCode == nil then
+  reaper.ShowMessageBox("No se pudo interpretar la respuesta de ExecProcess.\n\nRespuesta:\n" .. processResult, "Smart Align Post — ERROR", 0)
+  return
+end
+
+if returnCode ~= 0 then
+  reaper.ShowMessageBox("El analizador terminó con error.\n\nCódigo: " .. tostring(returnCode) .. "\n\nSalida:\n" .. output, "Smart Align Post — ERROR", 0)
+  return
+end
+
 local delayMs = tonumber(output:match("DELAY_MS=([%+%-]?[%d%.]+)"))
 local confidence = tonumber(output:match("CONFIDENCE=([%+%-]?[%d%.]+)"))
 
 if not delayMs then
-  reaper.ShowMessageBox("El CLI terminó, pero no devolvió DELAY_MS.\n\nSalida:\n" .. output, "Smart Align Post — ERROR", 0)
+  reaper.ShowMessageBox("El CLI terminó correctamente, pero no devolvió DELAY_MS.\n\nSalida:\n" .. output, "Smart Align Post — ERROR", 0)
   return
 end
 
