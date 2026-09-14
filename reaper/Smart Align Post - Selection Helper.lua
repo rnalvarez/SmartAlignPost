@@ -1,7 +1,6 @@
 -- Smart Align Post - REAPER prototype bridge
--- V0: selected items -> C++ AlignEngine -> move SOURCE item by measured delay.
--- Primer item seleccionado = MASTER. Restantes = SOURCES.
--- Para una primera prueba usamos MASTER + 1 SOURCE.
+-- V0 STATIC: selected items -> C++ AlignEngine -> move SOURCE item by measured delay.
+-- Primer item seleccionado = MASTER. Segundo = SOURCE.
 
 local function script_dir()
   local src = debug.getinfo(1, "S").source
@@ -11,12 +10,6 @@ end
 
 local function quote(s)
   return '"' .. tostring(s):gsub('"', '\\"') .. '"'
-end
-
-local function parse_output(text)
-  local delay = tonumber(text:match("DELAY_MS=([%+%-]?[%d%.]+)"))
-  local confidence = tonumber(text:match("CONFIDENCE=([%+%-]?[%d%.]+)"))
-  return delay, confidence
 end
 
 local function take_source_path(item)
@@ -30,68 +23,58 @@ local function take_source_path(item)
 end
 
 local n = reaper.CountSelectedMediaItems(0)
-if n < 2 then
-  reaper.ShowMessageBox("Seleccioná MASTER + al menos 1 SOURCE.", "Smart Align Post", 0)
+if n ~= 2 then
+  reaper.ShowMessageBox("Para esta primera prueba seleccioná exactamente 2 items: primero BOOM (MASTER), segundo CORBATERO (SOURCE).", "Smart Align Post", 0)
   return
 end
 
 local masterItem = reaper.GetSelectedMediaItem(0, 0)
+local sourceItem = reaper.GetSelectedMediaItem(0, 1)
 local masterPath, masterErr = take_source_path(masterItem)
+local sourcePath, sourceErr = take_source_path(sourceItem)
+
 if not masterPath then
   reaper.ShowMessageBox("MASTER: " .. masterErr, "Smart Align Post", 0)
   return
 end
-
-local exe = script_dir() .. "\\SmartAlignPostPrototype.exe"
-
-reaper.Undo_BeginBlock()
-reaper.PreventUIRefresh(1)
-
-local report = {}
-local failures = 0
-
-for i = 1, n - 1 do
-  local sourceItem = reaper.GetSelectedMediaItem(0, i)
-  local sourcePath, sourceErr = take_source_path(sourceItem)
-
-  if not sourcePath then
-    report[#report + 1] = string.format("SOURCE %d: ERROR %s", i, sourceErr)
-    failures = failures + 1
-  else
-    local cmd = quote(exe) .. " " .. quote(masterPath) .. " " .. quote(sourcePath)
-    local rv, output = reaper.ExecProcess(cmd, 60000)
-
-    if rv ~= 0 then
-      report[#report + 1] = string.format("SOURCE %d: ERROR ejecutando analizador (code %s)\n%s", i, tostring(rv), tostring(output))
-      failures = failures + 1
-    else
-      local delayMs, confidence = parse_output(output or "")
-      if not delayMs or not confidence then
-        report[#report + 1] = string.format("SOURCE %d: ERROR salida inesperada\n%s", i, tostring(output))
-        failures = failures + 1
-      else
-        -- Positive delay means SOURCE is late relative to MASTER.
-        -- Move the SOURCE item earlier by that amount on the REAPER timeline.
-        local pos = reaper.GetMediaItemInfo_Value(sourceItem, "D_POSITION")
-        local newPos = pos - (delayMs / 1000.0)
-        reaper.SetMediaItemInfo_Value(sourceItem, "D_POSITION", newPos)
-        reaper.UpdateItemInProject(sourceItem)
-
-        report[#report + 1] = string.format(
-          "SOURCE %d: %+0.3f ms | confidence %.3f | item %.3f -> %.3f s",
-          i, delayMs, confidence, pos, newPos)
-      end
-    end
-  end
+if not sourcePath then
+  reaper.ShowMessageBox("SOURCE: " .. sourceErr, "Smart Align Post", 0)
+  return
 end
 
-reaper.PreventUIRefresh(-1)
-reaper.Undo_EndBlock("Smart Align Post - prototype alignment", -1)
+-- Windows: el ejecutable debe estar junto a este .lua.
+local exe = script_dir() .. "\\SmartAlignPostPrototype.exe"
+
+local cmd = quote(exe) .. " " .. quote(masterPath) .. " " .. quote(sourcePath)
+local rv, output = reaper.ExecProcess(cmd, 60000)
+
+if rv ~= 0 then
+  reaper.ShowMessageBox("El analizador no pudo ejecutarse.\n\nCódigo: " .. tostring(rv) .. "\n\n" .. tostring(output), "Smart Align Post — ERROR", 0)
+  return
+end
+
+output = output or ""
+local delayMs = tonumber(output:match("DELAY_MS=([%+%-]?[%d%.]+)"))
+local confidence = tonumber(output:match("CONFIDENCE=([%+%-]?[%d%.]+)"))
+
+if not delayMs then
+  reaper.ShowMessageBox("El CLI terminó, pero no devolvió DELAY_MS.\n\nSalida:\n" .. output, "Smart Align Post — ERROR", 0)
+  return
+end
+
+local pos = reaper.GetMediaItemInfo_Value(sourceItem, "D_POSITION")
+local newPos = pos - (delayMs / 1000.0)
+
+reaper.Undo_BeginBlock()
+reaper.SetMediaItemInfo_Value(sourceItem, "D_POSITION", newPos)
+reaper.UpdateItemInProject(sourceItem)
+reaper.Undo_EndBlock("Smart Align Post - prototype STATIC alignment", -1)
 reaper.UpdateArrange()
 
-local title = failures == 0 and "Smart Align Post — PROTOTIPO OK" or "Smart Align Post — PROTOTIPO CON ERRORES"
-local msg = "MASTER:\n" .. masterPath .. "\n\n" .. table.concat(report, "\n") ..
-  "\n\nV0: STATIC alignment mediante AlignEngine C++.\n" ..
-  "El SOURCE se mueve en el timeline; no se modifica el archivo de audio."
+local confidenceText = confidence and string.format("%.3f", confidence) or "N/D"
+local msg = string.format(
+  "MASTER: BOOM\nSOURCE: CORBATERO\n\nDelay calculado: %+0.3f ms\nConfidence: %s\n\nSOURCE movido:\n%.6f s → %.6f s\n\nModo: STATIC\nEl archivo WAV original no fue modificado.",
+  delayMs, confidenceText, pos, newPos
+)
 
-reaper.ShowMessageBox(msg, title, 0)
+reaper.ShowMessageBox(msg, "Smart Align Post — PROTOTIPO OK", 0)
