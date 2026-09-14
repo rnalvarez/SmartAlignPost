@@ -104,15 +104,6 @@ local supportText = (supportWindows and totalWindows)
   and string.format("%d / %d ventanas", supportWindows, totalWindows)
   or "N/D"
 
-if not confidence or confidence < MIN_CONFIDENCE then
-  local msg = string.format(
-    "ANÁLISIS NO CONFIABLE\n\nDelay DSP candidato: %+0.3f ms\nDesfase timeline: %+0.3f ms\nConfidence: %s\nCorrelación: %s\nVentana analizada: %s\nApoyo del delay: %s\n\nUmbral mínimo: %.2f\n\nNo se modificó la posición del SOURCE.",
-    dspDelayMs, timelineDelayMs, confidenceText, correlationText, windowText, supportText, MIN_CONFIDENCE
-  )
-  reaper.ShowMessageBox(msg, "Smart Align Post — RECHAZADO", 0)
-  return
-end
-
 local newPos = sourcePos - (totalDelayMs / 1000.0)
 local expectedAppliedSamples = (sourcePos - newPos) * 48000.0
 
@@ -136,9 +127,34 @@ local analysisMsg = string.format(
 )
 
 local answer = reaper.ShowMessageBox(analysisMsg, "Smart Align Post — ANALIZAR", 4)
-if answer ~= 6 then
-  reaper.ShowMessageBox("No se modificó la posición del SOURCE.", "Smart Align Post — CANCELADO", 0)
-  return
+
+-- Confidence below threshold does not hide the candidate anymore. The user can
+-- explicitly choose whether to apply it for testing/creative judgment.
+if not confidence or confidence < MIN_CONFIDENCE then
+  local lowConfidenceMsg = string.format(
+    "ADVERTENCIA — CONFIANZA BAJA\n\n" ..
+    "Confidence: %s (mínimo automático: %.2f)\n" ..
+    "Correlación: %s\n" ..
+    "Apoyo del delay: %s\n\n" ..
+    "El candidato es: %+0.6f ms\n" ..
+    "Corrección propuesta: %+0.3f samples\n\n" ..
+    "Sí = APPLICAR DE TODOS MODOS\n" ..
+    "No = CANCELAR",
+    confidenceText, MIN_CONFIDENCE,
+    correlationText, supportText,
+    totalDelayMs, expectedAppliedSamples
+  )
+
+  local lowAnswer = reaper.ShowMessageBox(lowConfidenceMsg, "Smart Align Post — CONFIDENCE BAJO", 4)
+  if lowAnswer ~= 6 then
+    reaper.ShowMessageBox("No se modificó la posición del SOURCE.", "Smart Align Post — CANCELADO", 0)
+    return
+  end
+else
+  if answer ~= 6 then
+    reaper.ShowMessageBox("No se modificó la posición del SOURCE.", "Smart Align Post — CANCELADO", 0)
+    return
+  end
 end
 
 -- APPLY: one undoable timeline edit.
