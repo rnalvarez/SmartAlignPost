@@ -84,13 +84,10 @@ Result AlignEngine::analyze(const std::vector<float>& master,
 
     const int maxLag = std::max(1, std::min<int>(requestedMaxLag, static_cast<int>(win / 2) - 1));
 
-    // STATIC: do not trust a single locally strong window. Accumulate the
-    // delays found across the recording and choose the most supported delay.
-    // This is better suited to production sound, where speech/activity appears
-    // in multiple windows but isolated events can create misleading peaks.
     const int lagSpan = 2 * maxLag + 1;
     std::vector<double> lagScore(static_cast<size_t>(lagSpan), 0.0);
     std::vector<double> lagConfidence(static_cast<size_t>(lagSpan), 0.0);
+    std::vector<double> lagCorrelationSum(static_cast<size_t>(lagSpan), 0.0);
     std::vector<int> lagCount(static_cast<size_t>(lagSpan), 0);
     std::vector<double> lagBestTime(static_cast<size_t>(lagSpan), 0.0);
     std::vector<double> lagBestCorrelation(static_cast<size_t>(lagSpan), -1.0);
@@ -115,6 +112,7 @@ Result AlignEngine::analyze(const std::vector<float>& master,
             const double score = c * std::max(0.0, corr);
             lagScore[static_cast<size_t>(index)] += score;
             lagConfidence[static_cast<size_t>(index)] += c;
+            lagCorrelationSum[static_cast<size_t>(index)] += std::max(0.0, corr);
             lagCount[static_cast<size_t>(index)] += 1;
             if (corr > lagBestCorrelation[static_cast<size_t>(index)]) {
                 lagBestCorrelation[static_cast<size_t>(index)] = corr;
@@ -141,12 +139,11 @@ Result AlignEngine::analyze(const std::vector<float>& master,
         }
     }
 
-    // Include adjacent bins so a real acoustic delay that falls near a sample
-    // boundary is treated as one cluster instead of three unrelated results.
     double weightedDelay = 0.0;
     double totalWeight = 0.0;
     int supportWindows = 0;
     double supportConfidence = 0.0;
+    double supportCorrelation = 0.0;
     int bestSupportIndex = bestIndex;
     for (int i = std::max(0, bestIndex - 1); i <= std::min(lagSpan - 1, bestIndex + 1); ++i) {
         const double w = lagScore[static_cast<size_t>(i)];
@@ -154,6 +151,7 @@ Result AlignEngine::analyze(const std::vector<float>& master,
         totalWeight += w;
         supportWindows += lagCount[static_cast<size_t>(i)];
         supportConfidence += lagConfidence[static_cast<size_t>(i)];
+        supportCorrelation += lagCorrelationSum[static_cast<size_t>(i)];
         if (lagCount[static_cast<size_t>(i)] > lagCount[static_cast<size_t>(bestSupportIndex)])
             bestSupportIndex = i;
     }
@@ -178,15 +176,20 @@ Result AlignEngine::analyze(const std::vector<float>& master,
     const double averageSupportConfidence = supportWindows > 0
         ? supportConfidence / static_cast<double>(supportWindows)
         : 0.0;
-    // Confidence now reflects both local correlation quality and repeated
-    // support for the same acoustic delay across the recording.
+    const double averageSupportCorrelation = supportWindows > 0
+        ? supportCorrelation / static_cast<double>(supportWindows)
+        : 0.0;
+
+    // For consensus mode, repeated agreement across windows is the primary
+    // reliability signal. A perfect correlation repeated throughout the clip
+    // should be trusted even when the local second-peak separation is small.
+    const double supportStrength = std::clamp(supportRatio * 2.0, 0.0, 1.0);
+    const double correlationStrength = std::clamp(averageSupportCorrelation, 0.0, 1.0);
+    const double localPeakStrength = std::clamp(averageSupportConfidence, 0.0, 1.0);
     r.staticConfidence = std::clamp(
-        averageSupportConfidence * std::clamp(supportRatio * 2.0, 0.0, 1.0),
+        correlationStrength * supportStrength * (0.75 + 0.25 * localPeakStrength),
         0.0, 1.0);
 
-    // Keep the previous strongest-window fallback characteristics for very
-    // sparse material: if the consensus has almost no support, use the best
-    // individual window rather than inventing confidence.
     if (supportWindows == 0 || bestScore <= 0.0) {
         r.staticDelaySamples = strongestDelay;
         r.staticAnalysisTimeSec = static_cast<double>(strongestPos) / settings.sampleRate;
