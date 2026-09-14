@@ -30,6 +30,8 @@ struct Result {
     double staticConfidence = 0.0;
     double staticAnalysisTimeSec = 0.0;
     double staticCorrelation = 0.0;
+    int staticSupportWindows = 0;
+    int staticTotalWindows = 0;
     std::vector<Point> curve;
 };
 
