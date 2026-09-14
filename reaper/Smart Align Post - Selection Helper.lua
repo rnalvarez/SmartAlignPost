@@ -1,5 +1,5 @@
 -- Smart Align Post - REAPER prototype bridge
--- V0 STATIC: selected items -> C++ AlignEngine -> move SOURCE item by measured delay.
+-- STATIC: selected items -> C++ AlignEngine -> analyze -> confirm -> move SOURCE.
 -- Primer item seleccionado = MASTER. Segundo = SOURCE.
 
 local MIN_CONFIDENCE = 0.80
@@ -26,7 +26,7 @@ end
 
 local n = reaper.CountSelectedMediaItems(0)
 if n ~= 2 then
-  reaper.ShowMessageBox("Para esta primera prueba seleccioná exactamente 2 items: primero BOOM (MASTER), segundo CORBATERO (SOURCE).", "Smart Align Post", 0)
+  reaper.ShowMessageBox("Seleccioná exactamente 2 items: primero MASTER (BOOM), segundo SOURCE (CORBATERO).", "Smart Align Post", 0)
   return
 end
 
@@ -50,6 +50,7 @@ local sourcePos = reaper.GetMediaItemInfo_Value(sourceItem, "D_POSITION")
 local exe = script_dir() .. "\\SmartAlignPostPrototype.exe"
 local cmd = quote(exe) .. " " .. quote(masterPath) .. " " .. quote(sourcePath)
 
+-- ANALYZE only: no timeline modification yet.
 local processResult = reaper.ExecProcess(cmd, 60000)
 if not processResult then
   reaper.ShowMessageBox("ExecProcess falló completamente.\n\nComando:\n" .. cmd, "Smart Align Post — ERROR", 0)
@@ -113,11 +114,38 @@ if not confidence or confidence < MIN_CONFIDENCE then
 end
 
 local newPos = sourcePos - (totalDelayMs / 1000.0)
+local expectedAppliedSamples = (sourcePos - newPos) * 48000.0
 
+-- ANALYZE result shown before APPLY.
+local analysisMsg = string.format(
+  "ANÁLISIS STATIC\n\n" ..
+  "Delay DSP candidato: %+0.6f ms\n" ..
+  "Desfase timeline:   %+0.6f ms\n" ..
+  "Corrección total:   %+0.6f ms\n\n" ..
+  "Confidence:         %s\n" ..
+  "Correlación:        %s\n" ..
+  "Ventana analizada:  %s\n" ..
+  "Apoyo del delay:    %s\n\n" ..
+  "Corrección propuesta: %+0.3f samples\n" ..
+  "SOURCE actual:       %.9f s\n" ..
+  "SOURCE propuesto:    %.9f s\n\n" ..
+  "¿Aplicar alineamiento?",
+  dspDelayMs, timelineDelayMs, totalDelayMs,
+  confidenceText, correlationText, windowText, supportText,
+  expectedAppliedSamples, sourcePos, newPos
+)
+
+local answer = reaper.ShowMessageBox(analysisMsg, "Smart Align Post — ANALIZAR", 4)
+if answer ~= 6 then
+  reaper.ShowMessageBox("No se modificó la posición del SOURCE.", "Smart Align Post — CANCELADO", 0)
+  return
+end
+
+-- APPLY: one undoable timeline edit.
 reaper.Undo_BeginBlock()
 reaper.SetMediaItemInfo_Value(sourceItem, "D_POSITION", newPos)
 reaper.UpdateItemInProject(sourceItem)
-reaper.Undo_EndBlock("Smart Align Post - prototype STATIC alignment", -1)
+reaper.Undo_EndBlock("Smart Align Post - STATIC APPLY", -1)
 reaper.UpdateArrange()
 
 local stateAfter = reaper.GetMediaItemInfo_Value(sourceItem, "D_POSITION")
@@ -127,7 +155,7 @@ local sourceAfterSamples = stateAfter * 48000.0
 local appliedSamples = (sourcePos - stateAfter) * 48000.0
 
 local msg = string.format(
-  "MASTER / SOURCE — POSICIÓN EXACTA\n\n" ..
+  "STATIC — APLICADO\n\n" ..
   "MASTER antes:       %.9f s  (%.2f samples)\n" ..
   "SOURCE antes:       %.9f s  (%.2f samples)\n\n" ..
   "Delay DSP:          %+0.6f ms\n" ..
@@ -135,17 +163,16 @@ local msg = string.format(
   "Corrección total:   %+0.6f ms\n" ..
   "Confidence:         %s\n" ..
   "Correlación:        %s\n" ..
-  "Ventana analizada:  %s\n" ..
   "Apoyo del delay:    %s\n\n" ..
   "Corrección aplicada: %+0.3f samples\n" ..
   "SOURCE después:     %.9f s  (%.2f samples)\n\n" ..
-  "Modo: STATIC\n" ..
+  "Undo disponible en REAPER.\n" ..
   "El archivo WAV original no fue modificado.",
   masterPos, masterSamples,
   sourcePos, sourceBeforeSamples,
   dspDelayMs, timelineDelayMs, totalDelayMs, confidenceText,
-  correlationText, windowText, supportText,
+  correlationText, supportText,
   appliedSamples, stateAfter, sourceAfterSamples
 )
 
-reaper.ShowMessageBox(msg, "Smart Align Post — PROTOTIPO OK", 0)
+reaper.ShowMessageBox(msg, "Smart Align Post — APPLY OK", 0)
