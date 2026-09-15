@@ -141,7 +141,10 @@ double gccPhatDelay(const float* master,
         peakCorrelation * (0.65 + 0.35 * separation),
         0.0, 1.0);
 
-    return refinedLag;
+    // Positive delay means SOURCE occurs later than MASTER. The
+    // A*conj(B) cross-spectrum produces the opposite lag convention,
+    // therefore invert the sign before returning the public delay.
+    return -refinedLag;
 }
 
 } // namespace
