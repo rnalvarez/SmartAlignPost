@@ -1,7 +1,7 @@
 -- Smart Align Post - REAPER STATIC bridge
 -- Primer item seleccionado = MASTER. Segundo = SOURCE.
 -- El delay DSP es la diferencia temporal entre el contenido de ambos WAV.
--- Por eso la posición final del SOURCE se calcula directamente desde MASTER:
+-- La posición final del SOURCE se calcula directamente desde MASTER:
 --     sourceTarget = masterPos - delayDSP
 -- No se suma nuevamente el desfase actual del item.
 
@@ -59,23 +59,23 @@ if not processResult then
   return
 end
 
-local eol = processResult:find("[\\r\\n]")
+-- REAPER devuelve: primera línea = exit code; resto = stdout.
+-- Normalizamos saltos de línea para que funcione con CRLF/LF/CR.
+local normalized = processResult:gsub("\r\n", "\n"):gsub("\r", "\n")
+local eol = normalized:find("\n", 1, true)
 local returnCode
 local output
+
 if eol then
-  returnCode = tonumber(processResult:sub(1, eol - 1))
-  local outputStart = eol + 1
-  if processResult:sub(eol, eol) == "\\r" and processResult:sub(eol + 1, eol + 1) == "\\n" then
-    outputStart = eol + 2
-  end
-  output = processResult:sub(outputStart)
+  returnCode = tonumber((normalized:sub(1, eol - 1)):match("^%s*(%-?%d+)%s*$"))
+  output = normalized:sub(eol + 1)
 else
-  returnCode = tonumber(processResult)
+  returnCode = tonumber(normalized:match("^%s*(%-?%d+)%s*$"))
   output = ""
 end
 
 if returnCode == nil then
-  reaper.ShowMessageBox("No se pudo interpretar ExecProcess.\n\n" .. processResult, "Smart Align Post — ERROR", 0)
+  reaper.ShowMessageBox("No se pudo interpretar ExecProcess.\n\nRespuesta recibida:\n" .. normalized, "Smart Align Post — ERROR", 0)
   return
 end
 
@@ -96,13 +96,13 @@ if not dspDelayMs then
   return
 end
 
+local sampleRate = 48000.0
+
 -- POSICIÓN ABSOLUTA CORRECTA:
 -- MASTER representa el tiempo de referencia del contenido.
--- SOURCE debe quedar retrasado/adelantado respecto del MASTER únicamente por
--- el delay que existe dentro de sus WAV.
+-- SOURCE debe quedar desplazado desde MASTER únicamente por el delay DSP.
 local targetPos = masterPos - (dspDelayMs / 1000.0)
 local targetDeltaMs = (targetPos - sourcePos) * 1000.0
-local sampleRate = 48000.0
 local appliedDeltaSamples = (targetPos - sourcePos) * sampleRate
 
 local confidenceText = confidence and string.format("%.3f", confidence) or "N/D"
@@ -142,6 +142,7 @@ else
 end
 
 reaper.Undo_BeginBlock()
+local beforeApplyPos = reaper.GetMediaItemInfo_Value(sourceItem, "D_POSITION")
 reaper.SetMediaItemPosition(sourceItem, targetPos, true)
 reaper.UpdateItemInProject(sourceItem)
 reaper.UpdateArrange()
@@ -153,7 +154,7 @@ if math.abs(stateAfter - targetPos) > tolerance then
   reaper.ShowMessageBox(
     string.format(
       "APPLY FALLÓ\n\nAntes:      %.9f s\nObjetivo:   %.9f s\nDespués:   %.9f s\n\nREAPER no dejó el item en la posición objetivo.",
-      sourcePos, targetPos, stateAfter
+      beforeApplyPos, targetPos, stateAfter
     ),
     "Smart Align Post — ERROR APPLY", 0)
   return
@@ -168,7 +169,7 @@ reaper.ShowMessageBox(
     "Delay DSP:      %+0.6f ms\n" ..
     "Movimiento:     %+0.3f samples\n\n" ..
     "Undo disponible.",
-    masterPos, sourcePos, stateAfter,
+    masterPos, beforeApplyPos, stateAfter,
     dspDelayMs, appliedDeltaSamples
   ),
   "Smart Align Post — APPLY OK", 0)
