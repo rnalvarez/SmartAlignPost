@@ -1,9 +1,7 @@
 -- Smart Align Post - REAPER STATIC bridge
 -- Primer item seleccionado = MASTER. Segundo = SOURCE.
--- El delay DSP es la diferencia temporal entre el contenido de ambos WAV.
--- La posición final del SOURCE se calcula directamente desde MASTER:
---     sourceTarget = masterPos - delayDSP
--- No se suma nuevamente el desfase actual del item.
+-- STATIC corrige el desfase de contenido mediante D_STARTOFFS del SOURCE.
+-- La posición D_POSITION de los items NO se modifica.
 
 local MIN_CONFIDENCE = 0.80
 
@@ -19,12 +17,12 @@ end
 
 local function take_source_path(item)
   local take = reaper.GetActiveTake(item)
-  if not take then return nil, "sin take" end
+  if not take then return nil, nil, "sin take" end
   local src = reaper.GetMediaItemTake_Source(take)
-  if not src then return nil, "sin source" end
+  if not src then return nil, take, "sin source" end
   local path = reaper.GetMediaSourceFileName(src, "")
-  if not path or path == "" then return nil, "source sin archivo" end
-  return path
+  if not path or path == "" then return nil, take, "source sin archivo" end
+  return path, take
 end
 
 local n = reaper.CountSelectedMediaItems(0)
@@ -35,8 +33,8 @@ end
 
 local masterItem = reaper.GetSelectedMediaItem(0, 0)
 local sourceItem = reaper.GetSelectedMediaItem(0, 1)
-local masterPath, masterErr = take_source_path(masterItem)
-local sourcePath, sourceErr = take_source_path(sourceItem)
+local masterPath, masterTake, masterErr = take_source_path(masterItem)
+local sourcePath, sourceTake, sourceErr = take_source_path(sourceItem)
 
 if not masterPath then
   reaper.ShowMessageBox("MASTER: " .. masterErr, "Smart Align Post", 0)
@@ -49,6 +47,15 @@ end
 
 local masterPos = reaper.GetMediaItemInfo_Value(masterItem, "D_POSITION")
 local sourcePos = reaper.GetMediaItemInfo_Value(sourceItem, "D_POSITION")
+local masterOffs = reaper.GetMediaItemTakeInfo_Value(masterTake, "D_STARTOFFS")
+local sourceOffs = reaper.GetMediaItemTakeInfo_Value(sourceTake, "D_STARTOFFS")
+local masterRate = reaper.GetMediaItemTakeInfo_Value(masterTake, "D_PLAYRATE")
+local sourceRate = reaper.GetMediaItemTakeInfo_Value(sourceTake, "D_PLAYRATE")
+
+if masterRate <= 0 or sourceRate <= 0 then
+  reaper.ShowMessageBox("PLAYRATE inválido en uno de los takes.", "Smart Align Post — ERROR", 0)
+  return
+end
 
 local exe = script_dir() .. "\\SmartAlignPostPrototype.exe"
 local cmd = quote(exe) .. " " .. quote(masterPath) .. " " .. quote(sourcePath)
@@ -59,13 +66,10 @@ if not processResult then
   return
 end
 
--- REAPER devuelve: primera línea = exit code; resto = stdout.
--- Normalizamos saltos de línea para que funcione con CRLF/LF/CR.
 local normalized = processResult:gsub("\r\n", "\n"):gsub("\r", "\n")
 local eol = normalized:find("\n", 1, true)
 local returnCode
 local output
-
 if eol then
   returnCode = tonumber((normalized:sub(1, eol - 1)):match("^%s*(%-?%d+)%s*$"))
   output = normalized:sub(eol + 1)
@@ -96,14 +100,13 @@ if not dspDelayMs then
   return
 end
 
-local sampleRate = 48000.0
+local delaySeconds = dspDelayMs / 1000.0
 
--- POSICIÓN ABSOLUTA CORRECTA:
--- MASTER representa el tiempo de referencia del contenido.
--- SOURCE debe quedar desplazado desde MASTER únicamente por el delay DSP.
-local targetPos = masterPos - (dspDelayMs / 1000.0)
-local targetDeltaMs = (targetPos - sourcePos) * 1000.0
-local appliedDeltaSamples = (targetPos - sourcePos) * sampleRate
+-- Mantenemos los items donde están. Ajustamos únicamente el inicio de lectura
+-- del SOURCE dentro de su WAV para compensar el retardo detectado.
+local targetSourceOffs = masterOffs + (delaySeconds * sourceRate / masterRate)
+local appliedOffsetSeconds = targetSourceOffs - sourceOffs
+local appliedOffsetSamples = appliedOffsetSeconds * sourceRate
 
 local confidenceText = confidence and string.format("%.3f", confidence) or "N/D"
 local correlationText = correlation and string.format("%.6f", correlation) or "N/D"
@@ -113,21 +116,26 @@ local supportText = (supportWindows and totalWindows)
 
 local analysisMsg = string.format(
   "ANÁLISIS STATIC\n\n" ..
-  "Delay DSP:             %+0.6f ms\n" ..
-  "Delay DSP:             %+0.3f samples\n\n" ..
-  "MASTER actual:         %.9f s\n" ..
-  "SOURCE actual:         %.9f s\n" ..
-  "SOURCE objetivo:       %.9f s\n\n" ..
-  "Movimiento del item:   %+0.6f ms\n" ..
-  "Movimiento del item:   %+0.3f samples\n\n" ..
-  "Confidence:            %s\n" ..
-  "Correlación:           %s\n" ..
-  "Apoyo del delay:       %s\n\n" ..
+  "Delay DSP:                 %+0.6f ms\n" ..
+  "Delay DSP:                 %+0.3f samples\n\n" ..
+  "MASTER item:                %.9f s\n" ..
+  "SOURCE item:                %.9f s\n" ..
+  "(los items NO se moverán)\n\n" ..
+  "MASTER STARTOFFS:           %.9f s\n" ..
+  "SOURCE STARTOFFS actual:    %.9f s\n" ..
+  "SOURCE STARTOFFS objetivo:  %.9f s\n\n" ..
+  "Cambio de STARTOFFS:         %+0.3f samples\n" ..
+  "Cambio temporal:            %+0.6f ms\n\n" ..
+  "Confidence:                 %s\n" ..
+  "Correlación:                %s\n" ..
+  "Apoyo del delay:            %s\n\n" ..
   "¿Aplicar?",
   dspDelayMs,
-  dspDelaySamples or (dspDelayMs * sampleRate / 1000.0),
-  masterPos, sourcePos, targetPos,
-  targetDeltaMs, appliedDeltaSamples,
+  dspDelaySamples or (dspDelayMs * 48000.0 / 1000.0),
+  masterPos, sourcePos,
+  masterOffs, sourceOffs, targetSourceOffs,
+  appliedOffsetSamples,
+  appliedOffsetSeconds * 1000.0,
   confidenceText, correlationText, supportText
 )
 
@@ -142,19 +150,28 @@ else
 end
 
 reaper.Undo_BeginBlock()
-local beforeApplyPos = reaper.GetMediaItemInfo_Value(sourceItem, "D_POSITION")
-reaper.SetMediaItemPosition(sourceItem, targetPos, true)
+local beforeOffs = reaper.GetMediaItemTakeInfo_Value(sourceTake, "D_STARTOFFS")
+local beforePos = reaper.GetMediaItemInfo_Value(sourceItem, "D_POSITION")
+reaper.SetMediaItemTakeInfo_Value(sourceTake, "D_STARTOFFS", targetSourceOffs)
 reaper.UpdateItemInProject(sourceItem)
 reaper.UpdateArrange()
-local stateAfter = reaper.GetMediaItemInfo_Value(sourceItem, "D_POSITION")
-reaper.Undo_EndBlock("Smart Align Post - STATIC APPLY", -1)
+local afterOffs = reaper.GetMediaItemTakeInfo_Value(sourceTake, "D_STARTOFFS")
+local afterPos = reaper.GetMediaItemInfo_Value(sourceItem, "D_POSITION")
+reaper.Undo_EndBlock("Smart Align Post - STATIC TAKE ALIGN", -1)
 
-local tolerance = 1e-8
-if math.abs(stateAfter - targetPos) > tolerance then
+local offsTolerance = 1e-8
+local posTolerance = 1e-8
+if math.abs(afterOffs - targetSourceOffs) > offsTolerance or math.abs(afterPos - beforePos) > posTolerance then
   reaper.ShowMessageBox(
     string.format(
-      "APPLY FALLÓ\n\nAntes:      %.9f s\nObjetivo:   %.9f s\nDespués:   %.9f s\n\nREAPER no dejó el item en la posición objetivo.",
-      beforeApplyPos, targetPos, stateAfter
+      "APPLY FALLÓ\n\n" ..
+      "SOURCE posición antes:  %.9f s\n" ..
+      "SOURCE posición después: %.9f s\n\n" ..
+      "STARTOFFS antes:     %.9f s\n" ..
+      "STARTOFFS objetivo:  %.9f s\n" ..
+      "STARTOFFS después:   %.9f s\n\n" ..
+      "No se considera aplicado.",
+      beforePos, afterPos, beforeOffs, targetSourceOffs, afterOffs
     ),
     "Smart Align Post — ERROR APPLY", 0)
   return
@@ -163,13 +180,15 @@ end
 reaper.ShowMessageBox(
   string.format(
     "STATIC — APLICADO\n\n" ..
-    "MASTER:         %.9f s\n" ..
-    "SOURCE antes:   %.9f s\n" ..
-    "SOURCE después: %.9f s\n\n" ..
-    "Delay DSP:      %+0.6f ms\n" ..
-    "Movimiento:     %+0.3f samples\n\n" ..
+    "MASTER item:          %.9f s\n" ..
+    "SOURCE item:          %.9f s\n\n" ..
+    "STARTOFFS antes:      %.9f s\n" ..
+    "STARTOFFS después:    %.9f s\n\n" ..
+    "Delay DSP:            %+0.6f ms\n" ..
+    "Cambio STARTOFFS:     %+0.3f samples\n\n" ..
+    "Los items permanecen en su posición original.\n" ..
     "Undo disponible.",
-    masterPos, beforeApplyPos, stateAfter,
-    dspDelayMs, appliedDeltaSamples
+    masterPos, sourcePos, beforeOffs, afterOffs,
+    dspDelayMs, appliedOffsetSamples
   ),
   "Smart Align Post — APPLY OK", 0)
