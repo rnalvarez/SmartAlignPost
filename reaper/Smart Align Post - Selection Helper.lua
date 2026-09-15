@@ -159,12 +159,29 @@ end
 
 -- APPLY: one undoable timeline edit.
 reaper.Undo_BeginBlock()
-reaper.SetMediaItemInfo_Value(sourceItem, "D_POSITION", newPos)
+local beforeApplyPos = reaper.GetMediaItemInfo_Value(sourceItem, "D_POSITION")
+local setOk = reaper.SetMediaItemPosition(sourceItem, newPos, true)
 reaper.UpdateItemInProject(sourceItem)
-reaper.Undo_EndBlock("Smart Align Post - STATIC APPLY", -1)
 reaper.UpdateArrange()
-
 local stateAfter = reaper.GetMediaItemInfo_Value(sourceItem, "D_POSITION")
+reaper.Undo_EndBlock("Smart Align Post - STATIC APPLY", -1)
+
+local positionTolerance = 0.0000001
+if not setOk or math.abs(stateAfter - newPos) > positionTolerance then
+  reaper.ShowMessageBox(
+    string.format(
+      "ERROR DE APPLY\n\n" ..
+      "REAPER no confirmó la posición solicitada.\n\n" ..
+      "Antes:       %.9f s\n" ..
+      "Solicitada:  %.9f s\n" ..
+      "Después:     %.9f s\n\n" ..
+      "No se considera aplicado.",
+      beforeApplyPos, newPos, stateAfter
+    ),
+    "Smart Align Post — ERROR APPLY", 0)
+  return
+end
+
 local masterSamples = masterPos * 48000.0
 local sourceBeforeSamples = sourcePos * 48000.0
 local sourceAfterSamples = stateAfter * 48000.0
