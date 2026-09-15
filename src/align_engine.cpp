@@ -1,6 +1,167 @@
 #include "align_engine.h"
 
+#include <algorithm>
+#include <complex>
+#include <cstddef>
+#include <cmath>
+#include <vector>
+
 namespace sap {
+
+namespace {
+
+using Complex = std::complex<double>;
+
+void fft(std::vector<Complex>& x, bool inverse)
+{
+    const size_t n = x.size();
+    if (n < 2) return;
+
+    // Iterative radix-2 Cooley-Tukey FFT. The analysis window is zero-padded
+    // to a power of two before entering this routine.
+    for (size_t i = 1, j = 0; i < n; ++i) {
+        size_t bit = n >> 1;
+        for (; j & bit; bit >>= 1) j ^= bit;
+        j ^= bit;
+        if (i < j) std::swap(x[i], x[j]);
+    }
+
+    for (size_t len = 2; len <= n; len <<= 1) {
+        const double angle = (inverse ? 2.0 : -2.0) * M_PI / static_cast<double>(len);
+        const Complex wlen(std::cos(angle), std::sin(angle));
+        for (size_t i = 0; i < n; i += len) {
+            Complex w(1.0, 0.0);
+            const size_t half = len >> 1;
+            for (size_t j = 0; j < half; ++j) {
+                const Complex u = x[i + j];
+                const Complex v = x[i + j + half] * w;
+                x[i + j] = u + v;
+                x[i + j + half] = u - v;
+                w *= wlen;
+            }
+        }
+    }
+
+    if (inverse) {
+        const double invN = 1.0 / static_cast<double>(n);
+        for (auto& v : x) v *= invN;
+    }
+}
+
+size_t nextPowerOfTwo(size_t n)
+{
+    size_t p = 1;
+    while (p < n) p <<= 1;
+    return p;
+}
+
+// GCC-PHAT delay estimator.
+// Sign convention matches the existing AlignEngine API:
+// a positive result means SOURCE is delayed relative to MASTER.
+double gccPhatDelay(const float* master,
+                     const float* source,
+                     size_t n,
+                     int maxLag,
+                     double sampleRate,
+                     double& confidence,
+                     double& peakCorrelation)
+{
+    confidence = 0.0;
+    peakCorrelation = 0.0;
+    if (n < 32 || sampleRate <= 0.0) return 0.0;
+
+    // Remove DC and apply a Hann window before the FFT. This keeps the PHAT
+    // estimate focused on the relative arrival time rather than level/spectral
+    // coloration differences between two different microphones.
+    const size_t fftSize = nextPowerOfTwo(n);
+    std::vector<Complex> A(fftSize, Complex(0.0, 0.0));
+    std::vector<Complex> B(fftSize, Complex(0.0, 0.0));
+
+    double meanA = 0.0;
+    double meanB = 0.0;
+    for (size_t i = 0; i < n; ++i) {
+        meanA += master[i];
+        meanB += source[i];
+    }
+    meanA /= static_cast<double>(n);
+    meanB /= static_cast<double>(n);
+
+    for (size_t i = 0; i < n; ++i) {
+        const double u = static_cast<double>(i) / static_cast<double>(n - 1);
+        const double window = 0.5 - 0.5 * std::cos(2.0 * M_PI * u);
+        A[i] = Complex((static_cast<double>(master[i]) - meanA) * window, 0.0);
+        B[i] = Complex((static_cast<double>(source[i]) - meanB) * window, 0.0);
+    }
+
+    fft(A, false);
+    fft(B, false);
+
+    // Cross-spectrum with phase-only weighting (PHAT).
+    for (size_t k = 0; k < fftSize; ++k) {
+        const Complex cross = A[k] * std::conj(B[k]);
+        const double mag = std::abs(cross);
+        A[k] = mag > 1e-12 ? cross / mag : Complex(0.0, 0.0);
+    }
+
+    fft(A, true);
+
+    // Search only the physically meaningful lag range.
+    double best = -1.0;
+    double second = -1.0;
+    int bestLag = 0;
+    const int span = std::min(maxLag, static_cast<int>(fftSize / 2) - 1);
+
+    for (int lag = -span; lag <= span; ++lag) {
+        const size_t index = lag >= 0
+            ? static_cast<size_t>(lag)
+            : fftSize - static_cast<size_t>(-lag);
+        const double value = std::abs(A[index].real());
+        if (value > best) {
+            second = best;
+            best = value;
+            bestLag = lag;
+        } else if (value > second) {
+            second = value;
+        }
+    }
+
+    // Sub-sample peak interpolation using the neighboring PHAT correlation
+    // values. This improves the correction when the physical delay is between
+    // integer samples.
+    double refinedLag = static_cast<double>(bestLag);
+    if (bestLag > -span && bestLag < span) {
+        const auto valueAt = [&](int lag) -> double {
+            const size_t index = lag >= 0
+                ? static_cast<size_t>(lag)
+                : fftSize - static_cast<size_t>(-lag);
+            return std::abs(A[index].real());
+        };
+        const double ym = valueAt(bestLag - 1);
+        const double y0 = valueAt(bestLag);
+        const double yp = valueAt(bestLag + 1);
+        const double denom = ym - 2.0 * y0 + yp;
+        if (std::abs(denom) > 1e-12) {
+            const double offset = 0.5 * (ym - yp) / denom;
+            refinedLag += std::clamp(offset, -0.5, 0.5);
+        }
+    }
+
+    const double totalEnergy = std::sqrt(
+        std::inner_product(master, master + n, master, 0.0) +
+        std::inner_product(source, source + n, source, 0.0));
+    (void)totalEnergy;
+
+    peakCorrelation = best;
+    const double prominence = std::max(0.0, best - std::max(0.0, second));
+    const double separation = best > 1e-12 ? prominence / best : 0.0;
+    // PHAT peak strength and peak separation are complementary signals. The
+    // consensus layer below will further require the same delay to repeat.
+    confidence = std::clamp(best * (0.65 + 0.35 * separation), 0.0, 1.0);
+
+    return refinedLag;
+}
+
+} // namespace
 
 double AlignEngine::normalizedCorrelation(const float* a, const float* b,
                                           size_t n, int lag)
@@ -37,19 +198,8 @@ double AlignEngine::estimateDelay(const float* master,
                                    int maxLag,
                                    double& confidence)
 {
-    double best=-2.0, second=-2.0;
-    int bestLag=0;
-
-    for (int lag=-maxLag; lag<=maxLag; ++lag) {
-        const double c = normalizedCorrelation(master, source, n, lag);
-        if (c > best) { second=best; best=c; bestLag=lag; }
-        else if (c > second) second=c;
-    }
-
-    confidence = std::clamp((best + 1.0) * 0.5, 0.0, 1.0);
-    confidence *= std::clamp(0.5 + (best-second)*2.0, 0.0, 1.0);
-
-    return static_cast<double>(bestLag);
+    double peak = 0.0;
+    return gccPhatDelay(master, source, n, maxLag, 48000.0, confidence, peak);
 }
 
 Result AlignEngine::analyze(const std::vector<float>& master,
@@ -70,13 +220,13 @@ Result AlignEngine::analyze(const std::vector<float>& master,
 
     if (n < win) {
         double c=0.0;
+        double peak=0.0;
         const int maxLag = std::max(1, std::min<int>(requestedMaxLag, static_cast<int>(n / 2)));
-        r.staticDelaySamples = estimateDelay(master.data(), source.data(),
-                                             n, maxLag, c);
+        r.staticDelaySamples = gccPhatDelay(master.data(), source.data(),
+                                             n, maxLag, settings.sampleRate, c, peak);
         r.staticConfidence=c;
         r.staticAnalysisTimeSec = 0.0;
-        r.staticCorrelation = normalizedCorrelation(
-            master.data(), source.data(), n, static_cast<int>(r.staticDelaySamples));
+        r.staticCorrelation = peak;
         r.staticSupportWindows = c >= settings.minConfidence ? 1 : 0;
         r.staticTotalWindows = 1;
         return r;
@@ -100,22 +250,20 @@ Result AlignEngine::analyze(const std::vector<float>& master,
 
     for (size_t pos = 0; pos + win <= n; pos += hop) {
         double c = 0.0;
-        const double d = estimateDelay(master.data() + pos,
+        double peak = 0.0;
+        const double d = gccPhatDelay(master.data() + pos,
                                        source.data() + pos,
-                                       win, maxLag, c);
-        const int lag = static_cast<int>(d);
-        const double corr = normalizedCorrelation(master.data() + pos,
-                                                  source.data() + pos,
-                                                  win, lag);
+                                       win, maxLag, settings.sampleRate, c, peak);
+        const int lag = static_cast<int>(std::llround(d));
         const int index = lag + maxLag;
         if (index >= 0 && index < lagSpan) {
-            const double score = c * std::max(0.0, corr);
+            const double score = c * std::max(0.0, peak);
             lagScore[static_cast<size_t>(index)] += score;
             lagConfidence[static_cast<size_t>(index)] += c;
-            lagCorrelationSum[static_cast<size_t>(index)] += std::max(0.0, corr);
+            lagCorrelationSum[static_cast<size_t>(index)] += std::max(0.0, peak);
             lagCount[static_cast<size_t>(index)] += 1;
-            if (corr > lagBestCorrelation[static_cast<size_t>(index)]) {
-                lagBestCorrelation[static_cast<size_t>(index)] = corr;
+            if (peak > lagBestCorrelation[static_cast<size_t>(index)]) {
+                lagBestCorrelation[static_cast<size_t>(index)] = peak;
                 lagBestTime[static_cast<size_t>(index)] =
                     static_cast<double>(pos) / settings.sampleRate;
             }
@@ -125,7 +273,7 @@ Result AlignEngine::analyze(const std::vector<float>& master,
             strongestConfidence = c;
             strongestDelay = d;
             strongestPos = pos;
-            strongestCorrelation = corr;
+            strongestCorrelation = peak;
         }
         ++totalWindows;
     }
@@ -180,14 +328,11 @@ Result AlignEngine::analyze(const std::vector<float>& master,
         ? supportCorrelation / static_cast<double>(supportWindows)
         : 0.0;
 
-    // For consensus mode, repeated agreement across windows is the primary
-    // reliability signal. A perfect correlation repeated throughout the clip
-    // should be trusted even when the local second-peak separation is small.
     const double supportStrength = std::clamp(supportRatio * 2.0, 0.0, 1.0);
-    const double correlationStrength = std::clamp(averageSupportCorrelation, 0.0, 1.0);
-    const double localPeakStrength = std::clamp(averageSupportConfidence, 0.0, 1.0);
+    const double peakStrength = std::clamp(averageSupportCorrelation, 0.0, 1.0);
+    const double confidenceStrength = std::clamp(averageSupportConfidence, 0.0, 1.0);
     r.staticConfidence = std::clamp(
-        correlationStrength * supportStrength * (0.75 + 0.25 * localPeakStrength),
+        peakStrength * supportStrength * (0.70 + 0.30 * confidenceStrength),
         0.0, 1.0);
 
     if (supportWindows == 0 || bestScore <= 0.0) {
@@ -203,8 +348,9 @@ Result AlignEngine::analyze(const std::vector<float>& master,
     double previous = r.staticDelaySamples;
     for (size_t pos=0; pos+win<=n; pos+=hop) {
         double c=0.0;
-        double d = estimateDelay(master.data()+pos, source.data()+pos,
-                                 win, maxLag, c);
+        double peak=0.0;
+        double d = gccPhatDelay(master.data()+pos, source.data()+pos,
+                                win, maxLag, settings.sampleRate, c, peak);
 
         if (c < settings.minConfidence) {
             d = previous;
