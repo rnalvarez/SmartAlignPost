@@ -2,6 +2,7 @@
 -- Primer item seleccionado = MASTER. Los siguientes = SOURCES.
 -- Cada SOURCE conserva su D_POSITION y se alinea modificando D_STARTOFFS.
 -- Esto permite trabajar con varios micrófonos grabados simultáneamente.
+-- La posición relativa de cada item también forma parte del cálculo.
 
 local MIN_CONFIDENCE = 0.80
 
@@ -59,6 +60,7 @@ for i = 1, n - 1 do
     return
   end
 
+  local sourcePos = reaper.GetMediaItemInfo_Value(sourceItem, "D_POSITION")
   local sourceOffs = reaper.GetMediaItemTakeInfo_Value(sourceTake, "D_STARTOFFS")
   local sourceRate = reaper.GetMediaItemTakeInfo_Value(sourceTake, "D_PLAYRATE")
   if sourceRate <= 0 then
@@ -104,10 +106,16 @@ for i = 1, n - 1 do
   end
 
   local delaySeconds = dspDelayMs / 1000.0
-  local targetSourceOffs = masterOffs + (delaySeconds * sourceRate / masterRate)
+  -- Importante: D_STARTOFFS está en tiempo de media source. Si MASTER y SOURCE
+  -- no arrancan en la misma posición del timeline, hay que compensar también
+  -- esa diferencia. Con esto, items en 0 y items empezando más adelante siguen
+  -- usando la misma referencia temporal real.
+  local targetSourceOffs = masterOffs
+    + ((sourcePos - masterPos) * sourceRate)
+    + (delaySeconds * sourceRate / masterRate)
+
   local appliedOffsetSeconds = targetSourceOffs - sourceOffs
   local appliedOffsetSamples = appliedOffsetSeconds * sourceRate
-  local sourcePos = reaper.GetMediaItemInfo_Value(sourceItem, "D_POSITION")
 
   if not confidence or confidence < MIN_CONFIDENCE then
     anyLowConfidence = true
@@ -131,11 +139,13 @@ for i = 1, n - 1 do
   analysisLines[#analysisLines + 1] = string.format(
     "SOURCE %d\n" ..
     "  Delay: %+0.6f ms (%+.3f samples)\n" ..
+    "  Timeline: %.6f s → %.6f s\n" ..
     "  Confidence: %.3f   Correlación: %.6f\n" ..
     "  STARTOFFS: %.9f s → %.9f s\n" ..
     "  Cambio: %+.3f samples\n" ..
     "  Soporte: %d / %d ventanas",
     i, dspDelayMs, dspDelaySamples or (dspDelayMs * 48.0),
+    masterPos, sourcePos,
     confidence or 0.0, correlation or 0.0,
     sourceOffs, targetSourceOffs, appliedOffsetSamples,
     supportWindows or 0, totalWindows or 0)
