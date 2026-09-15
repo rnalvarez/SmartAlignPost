@@ -50,7 +50,6 @@ local sourcePos = reaper.GetMediaItemInfo_Value(sourceItem, "D_POSITION")
 local exe = script_dir() .. "\\SmartAlignPostPrototype.exe"
 local cmd = quote(exe) .. " " .. quote(masterPath) .. " " .. quote(sourcePath)
 
--- ANALYZE only: no timeline modification yet.
 local processResult = reaper.ExecProcess(cmd, 60000)
 if not processResult then
   reaper.ShowMessageBox("ExecProcess falló completamente.\n\nComando:\n" .. cmd, "Smart Align Post — ERROR", 0)
@@ -95,8 +94,13 @@ if not dspDelayMs then
   return
 end
 
+-- IMPORTANTE: DELAY_MS ya representa el desfase temporal total entre ambos
+-- WAV en las condiciones actuales, incluyendo cualquier desfase previo en el
+-- timeline. No volver a sumarle (sourcePos-masterPos), porque eso duplica la
+-- corrección cuando el usuario ya desplazó manualmente el item.
 local timelineDelayMs = (sourcePos - masterPos) * 1000.0
-local totalDelayMs = timelineDelayMs + dspDelayMs
+local totalDelayMs = dspDelayMs
+local correctionMs = dspDelayMs
 local confidenceText = confidence and string.format("%.3f", confidence) or "N/D"
 local windowText = windowSec and string.format("%.3f s", windowSec) or "N/D"
 local correlationText = correlation and string.format("%.6f", correlation) or "N/D"
@@ -104,15 +108,15 @@ local supportText = (supportWindows and totalWindows)
   and string.format("%d / %d ventanas", supportWindows, totalWindows)
   or "N/D"
 
-local newPos = sourcePos - (totalDelayMs / 1000.0)
+-- Mover SOURCE hacia atrás exactamente el delay detectado por el DSP.
+local newPos = sourcePos - (correctionMs / 1000.0)
 local expectedAppliedSamples = (sourcePos - newPos) * 48000.0
 
--- ANALYZE result shown before APPLY.
 local analysisMsg = string.format(
   "ANÁLISIS STATIC\n\n" ..
-  "Delay DSP candidato: %+0.6f ms\n" ..
-  "Desfase timeline:   %+0.6f ms\n" ..
-  "Corrección total:   %+0.6f ms\n\n" ..
+  "Delay DSP detectado: %+0.6f ms\n" ..
+  "Desfase actual en timeline: %+0.6f ms\n\n" ..
+  "Corrección a aplicar: %+0.6f ms\n\n" ..
   "Confidence:         %s\n" ..
   "Correlación:        %s\n" ..
   "Ventana analizada:  %s\n" ..
@@ -121,15 +125,14 @@ local analysisMsg = string.format(
   "SOURCE actual:       %.9f s\n" ..
   "SOURCE propuesto:    %.9f s\n\n" ..
   "¿Aplicar alineamiento?",
-  dspDelayMs, timelineDelayMs, totalDelayMs,
+  dspDelayMs, timelineDelayMs,
+  correctionMs,
   confidenceText, correlationText, windowText, supportText,
   expectedAppliedSamples, sourcePos, newPos
 )
 
 local answer = reaper.ShowMessageBox(analysisMsg, "Smart Align Post — ANALIZAR", 4)
 
--- Confidence below threshold does not hide the candidate anymore. The user can
--- explicitly choose whether to apply it for testing/creative judgment.
 if not confidence or confidence < MIN_CONFIDENCE then
   local lowConfidenceMsg = string.format(
     "ADVERTENCIA — CONFIANZA BAJA\n\n" ..
@@ -138,11 +141,11 @@ if not confidence or confidence < MIN_CONFIDENCE then
     "Apoyo del delay: %s\n\n" ..
     "El candidato es: %+0.6f ms\n" ..
     "Corrección propuesta: %+0.3f samples\n\n" ..
-    "Sí = APPLICAR DE TODOS MODOS\n" ..
+    "Sí = APLICAR DE TODOS MODOS\n" ..
     "No = CANCELAR",
     confidenceText, MIN_CONFIDENCE,
     correlationText, supportText,
-    totalDelayMs, expectedAppliedSamples
+    correctionMs, expectedAppliedSamples
   )
 
   local lowAnswer = reaper.ShowMessageBox(lowConfidenceMsg, "Smart Align Post — CONFIDENCE BAJO", 4)
@@ -157,7 +160,6 @@ else
   end
 end
 
--- APPLY: one undoable timeline edit.
 reaper.Undo_BeginBlock()
 local beforeApplyPos = reaper.GetMediaItemInfo_Value(sourceItem, "D_POSITION")
 local setOk = reaper.SetMediaItemPosition(sourceItem, newPos, true)
@@ -193,7 +195,7 @@ local msg = string.format(
   "SOURCE antes:       %.9f s  (%.2f samples)\n\n" ..
   "Delay DSP:          %+0.6f ms\n" ..
   "Desfase timeline:   %+0.6f ms\n" ..
-  "Corrección total:   %+0.6f ms\n" ..
+  "Corrección aplicada: %+0.6f ms\n" ..
   "Confidence:         %s\n" ..
   "Correlación:        %s\n" ..
   "Apoyo del delay:    %s\n\n" ..
@@ -203,8 +205,8 @@ local msg = string.format(
   "El archivo WAV original no fue modificado.",
   masterPos, masterSamples,
   sourcePos, sourceBeforeSamples,
-  dspDelayMs, timelineDelayMs, totalDelayMs, confidenceText,
-  correlationText, supportText,
+  dspDelayMs, timelineDelayMs, correctionMs,
+  confidenceText, correlationText, supportText,
   appliedSamples, stateAfter, sourceAfterSamples
 )
 
