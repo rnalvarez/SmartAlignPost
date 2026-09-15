@@ -11,14 +11,13 @@ namespace sap {
 namespace {
 
 using Complex = std::complex<double>;
+constexpr double kPi = 3.1415926535897932384626433832795;
 
 void fft(std::vector<Complex>& x, bool inverse)
 {
     const size_t n = x.size();
     if (n < 2) return;
 
-    // Iterative radix-2 Cooley-Tukey FFT. The analysis window is zero-padded
-    // to a power of two before entering this routine.
     for (size_t i = 1, j = 0; i < n; ++i) {
         size_t bit = n >> 1;
         for (; j & bit; bit >>= 1) j ^= bit;
@@ -27,7 +26,7 @@ void fft(std::vector<Complex>& x, bool inverse)
     }
 
     for (size_t len = 2; len <= n; len <<= 1) {
-        const double angle = (inverse ? 2.0 : -2.0) * M_PI / static_cast<double>(len);
+        const double angle = (inverse ? 2.0 : -2.0) * kPi / static_cast<double>(len);
         const Complex wlen(std::cos(angle), std::sin(angle));
         for (size_t i = 0; i < n; i += len) {
             Complex w(1.0, 0.0);
@@ -55,9 +54,6 @@ size_t nextPowerOfTwo(size_t n)
     return p;
 }
 
-// GCC-PHAT delay estimator.
-// Sign convention matches the existing AlignEngine API:
-// a positive result means SOURCE is delayed relative to MASTER.
 double gccPhatDelay(const float* master,
                      const float* source,
                      size_t n,
@@ -70,9 +66,6 @@ double gccPhatDelay(const float* master,
     peakCorrelation = 0.0;
     if (n < 32 || sampleRate <= 0.0) return 0.0;
 
-    // Remove DC and apply a Hann window before the FFT. This keeps the PHAT
-    // estimate focused on the relative arrival time rather than level/spectral
-    // coloration differences between two different microphones.
     const size_t fftSize = nextPowerOfTwo(n);
     std::vector<Complex> A(fftSize, Complex(0.0, 0.0));
     std::vector<Complex> B(fftSize, Complex(0.0, 0.0));
@@ -88,7 +81,7 @@ double gccPhatDelay(const float* master,
 
     for (size_t i = 0; i < n; ++i) {
         const double u = static_cast<double>(i) / static_cast<double>(n - 1);
-        const double window = 0.5 - 0.5 * std::cos(2.0 * M_PI * u);
+        const double window = 0.5 - 0.5 * std::cos(2.0 * kPi * u);
         A[i] = Complex((static_cast<double>(master[i]) - meanA) * window, 0.0);
         B[i] = Complex((static_cast<double>(source[i]) - meanB) * window, 0.0);
     }
@@ -96,7 +89,6 @@ double gccPhatDelay(const float* master,
     fft(A, false);
     fft(B, false);
 
-    // Cross-spectrum with phase-only weighting (PHAT).
     for (size_t k = 0; k < fftSize; ++k) {
         const Complex cross = A[k] * std::conj(B[k]);
         const double mag = std::abs(cross);
@@ -105,7 +97,6 @@ double gccPhatDelay(const float* master,
 
     fft(A, true);
 
-    // Search only the physically meaningful lag range.
     double best = -1.0;
     double second = -1.0;
     int bestLag = 0;
@@ -125,9 +116,6 @@ double gccPhatDelay(const float* master,
         }
     }
 
-    // Sub-sample peak interpolation using the neighboring PHAT correlation
-    // values. This improves the correction when the physical delay is between
-    // integer samples.
     double refinedLag = static_cast<double>(bestLag);
     if (bestLag > -span && bestLag < span) {
         const auto valueAt = [&](int lag) -> double {
@@ -146,17 +134,12 @@ double gccPhatDelay(const float* master,
         }
     }
 
-    const double totalEnergy = std::sqrt(
-        std::inner_product(master, master + n, master, 0.0) +
-        std::inner_product(source, source + n, source, 0.0));
-    (void)totalEnergy;
-
-    peakCorrelation = best;
+    peakCorrelation = std::clamp(best, 0.0, 1.0);
     const double prominence = std::max(0.0, best - std::max(0.0, second));
     const double separation = best > 1e-12 ? prominence / best : 0.0;
-    // PHAT peak strength and peak separation are complementary signals. The
-    // consensus layer below will further require the same delay to repeat.
-    confidence = std::clamp(best * (0.65 + 0.35 * separation), 0.0, 1.0);
+    confidence = std::clamp(
+        peakCorrelation * (0.65 + 0.35 * separation),
+        0.0, 1.0);
 
     return refinedLag;
 }
@@ -257,10 +240,10 @@ Result AlignEngine::analyze(const std::vector<float>& master,
         const int lag = static_cast<int>(std::llround(d));
         const int index = lag + maxLag;
         if (index >= 0 && index < lagSpan) {
-            const double score = c * std::max(0.0, peak);
+            const double score = c * peak;
             lagScore[static_cast<size_t>(index)] += score;
             lagConfidence[static_cast<size_t>(index)] += c;
-            lagCorrelationSum[static_cast<size_t>(index)] += std::max(0.0, peak);
+            lagCorrelationSum[static_cast<size_t>(index)] += peak;
             lagCount[static_cast<size_t>(index)] += 1;
             if (peak > lagBestCorrelation[static_cast<size_t>(index)]) {
                 lagBestCorrelation[static_cast<size_t>(index)] = peak;
