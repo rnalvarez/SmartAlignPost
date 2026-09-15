@@ -50,6 +50,13 @@ public:
 private:
     static double normalizedCorrelation(const float* a, const float* b,
                                         size_t n, int lag);
+
+    static double gccPhatDelay(const float* master,
+                               const float* source,
+                               size_t n,
+                               int maxLag,
+                               double& confidence,
+                               double& correlation);
 };
 
 }
