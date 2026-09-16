@@ -1,7 +1,7 @@
 -- Smart Align Post - STATIC MULTI UI v2
 -- Primera selección = MASTER. Siguientes = SOURCES.
--- Analiza offline y aplica D_STARTOFFS sin mover D_POSITION.
--- Corrige también la posición relativa de los items en el timeline.
+-- Analiza el contenido representado por cada take desde su D_STARTOFFS.
+-- Aplica D_STARTOFFS sin mover D_POSITION.
 
 local MIN_CONFIDENCE = 0.80
 local WIN_W, WIN_H = 780, 520
@@ -96,7 +96,11 @@ local function analyze_selection()
     local sourceRate = reaper.GetMediaItemTakeInfo_Value(sourceTake, "D_PLAYRATE")
     if sourceRate <= 0 then fail("PLAYRATE inválido en SOURCE #" .. i .. "."); return end
 
+    -- Analizar exactamente el contenido que aparece en REAPER al comienzo del take.
     local cmd = quote(exe) .. " " .. quote(masterPath) .. " " .. quote(sourcePath)
+      .. " " .. quote(string.format("%.12f", masterOffs))
+      .. " " .. quote(string.format("%.12f", sourceOffs))
+
     local returnCode, output, normalized = parse_process_output(reaper.ExecProcess(cmd, 60000))
     if returnCode ~= 0 then
       fail("El analizador falló en SOURCE #" .. i .. ".\n" .. tostring(normalized))
@@ -111,6 +115,8 @@ local function analyze_selection()
     local total = tonumber(output:match("TOTAL_WINDOWS=([%+%-]?[%d%.]+)"))
     if not delayMs then fail("SOURCE #" .. i .. " no devolvió DELAY_MS."); return end
 
+    -- El DSP mide el desfase acústico entre los contenidos que comienzan en
+    -- cada take. La posición de timeline queda incorporada por separado.
     local targetOffs = masterOffs
       + ((sourcePos - masterPos) * sourceRate)
       + ((delayMs / 1000.0) * sourceRate / masterRate)
@@ -175,7 +181,7 @@ local function draw_ui()
   text(24, 18, "SMART ALIGN POST", 25, 245, 245, 250)
   text(24, 49, "STATIC · MULTI SOURCE", 15, 160, 170, 185)
   text(24, 73, "MASTER = primer item seleccionado", 14, 195, 200, 210)
-  text(24, 92, "Corrección: D_STARTOFFS · D_POSITION no se modifica", 14, 145, 155, 170)
+  text(24, 92, "Análisis desde D_STARTOFFS · corrección en D_STARTOFFS", 14, 145, 155, 170)
   local n = reaper.CountSelectedMediaItems(0)
   text(500, 24, "Seleccionados: " .. n, 15, 205, 210, 220)
   text(500, 48, "MASTER: " .. (masterItem and "OK" or "—"), 14, 160, 175, 185)
