@@ -186,8 +186,8 @@ int main(int argc, char** argv) {
         if (!parseNonNegative(argv[5], "DURATION_SEC", duration, error)) {
             emitError(error); return 6;
         }
-        if (duration < 0.5 || duration > 60.0) {
-            emitError("DURATION_SEC debe estar entre 0.5 y 60 segundos.");
+        if (duration < 0.5 || duration > 180.0) {
+            emitError("DURATION_SEC debe estar entre 0.5 y 180 segundos.");
             return 6;
         }
     }
@@ -216,10 +216,10 @@ int main(int argc, char** argv) {
     settings.sampleRate = static_cast<double>(master.sampleRate);
     settings.maxDelayMs = 12.0;
     settings.analysisWindowMs = 200.0;
-    settings.hopMs = 50.0;
+    settings.hopMs = 100.0;
     settings.minConfidence = 0.80;
-    settings.smoothingMs = 180.0;
-    settings.maxSlewMsPerSecond = 8.0;
+    settings.smoothingMs = 120.0;
+    settings.maxSlewMsPerSecond = 12.0;
 
     const bool dynamic = (argc == 6);
     settings.mode = dynamic ? sap::Mode::Dynamic : sap::Mode::Static;
