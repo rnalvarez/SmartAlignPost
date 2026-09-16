@@ -63,8 +63,10 @@ float pcmSample(const uint8_t* p, int bits, uint16_t format) {
 bool loadWav(const std::string& path,
              WavData& out,
              std::string& error,
-             double startSeconds = 0.0) {
+             double startSeconds = 0.0,
+             double durationSeconds = 60.0) {
     if (startSeconds < 0.0) startSeconds = 0.0;
+    if (durationSeconds <= 0.0) durationSeconds = 60.0;
 
     std::ifstream f(path, std::ios::binary);
     if (!f) { error = "No se pudo abrir: " + path; return false; }
@@ -120,8 +122,8 @@ bool loadWav(const std::string& path,
         return false;
     }
 
-    const size_t maxFrames = std::min<size_t>(frames - requestedStart,
-                                               static_cast<size_t>(out.sampleRate) * 10u);
+    const size_t requestedFrames = static_cast<size_t>(durationSeconds * static_cast<double>(out.sampleRate));
+    const size_t maxFrames = std::min<size_t>(frames - requestedStart, requestedFrames);
     out.mono.resize(maxFrames);
 
     f.clear();
@@ -156,40 +158,46 @@ bool parseNonNegative(const char* text, const char* name, double& value, std::st
 }
 
 void emitError(const std::string& message) {
-    // ExecProcess/REAPER debe poder mostrar el diagnóstico también por stdout.
     std::cout << "ERROR=" << message << "\n";
 }
 
 } // namespace
 
 int main(int argc, char** argv) {
-    if (argc != 3 && argc != 5) {
-        emitError("Uso: SmartAlignPostPrototype.exe <MASTER.wav> <SOURCE.wav> [MASTER_START_SEC SOURCE_START_SEC]");
+    if (argc != 3 && argc != 5 && argc != 6) {
+        emitError("Uso: SmartAlignPostPrototype.exe <MASTER.wav> <SOURCE.wav> [MASTER_START_SEC SOURCE_START_SEC [DURATION_SEC]]");
         return 2;
     }
 
     double masterStart = 0.0;
     double sourceStart = 0.0;
+    double duration = 60.0;
     std::string error;
-    if (argc == 5) {
+
+    if (argc == 5 || argc == 6) {
         if (!parseNonNegative(argv[3], "MASTER_START_SEC", masterStart, error)) {
-            emitError(error);
-            return 6;
+            emitError(error); return 6;
         }
         if (!parseNonNegative(argv[4], "SOURCE_START_SEC", sourceStart, error)) {
-            emitError(error);
+            emitError(error); return 6;
+        }
+    }
+    if (argc == 6) {
+        if (!parseNonNegative(argv[5], "DURATION_SEC", duration, error)) {
+            emitError(error); return 6;
+        }
+        if (duration < 0.5 || duration > 60.0) {
+            emitError("DURATION_SEC debe estar entre 0.5 y 60 segundos.");
             return 6;
         }
     }
 
     WavData master, source;
-    if (!loadWav(argv[1], master, error, masterStart)) {
-        emitError(error);
-        return 3;
+    if (!loadWav(argv[1], master, error, masterStart, duration)) {
+        emitError(error); return 3;
     }
-    if (!loadWav(argv[2], source, error, sourceStart)) {
-        emitError(error);
-        return 3;
+    if (!loadWav(argv[2], source, error, sourceStart, duration)) {
+        emitError(error); return 3;
     }
 
     if (master.sampleRate != source.sampleRate) {
@@ -205,20 +213,35 @@ int main(int argc, char** argv) {
     }
 
     sap::Settings settings;
-    settings.mode = sap::Mode::Static;
     settings.sampleRate = static_cast<double>(master.sampleRate);
     settings.maxDelayMs = 12.0;
     settings.analysisWindowMs = 200.0;
+    settings.hopMs = 50.0;
+    settings.minConfidence = 0.80;
+    settings.smoothingMs = 180.0;
+    settings.maxSlewMsPerSecond = 8.0;
+
+    const bool dynamic = (argc == 6);
+    settings.mode = dynamic ? sap::Mode::Dynamic : sap::Mode::Static;
 
     const auto result = sap::AlignEngine::analyze(master.mono, source.mono, settings);
-    const double delayMs = result.staticDelaySamples * 1000.0 / settings.sampleRate;
+    const double staticDelayMs = result.staticDelaySamples * 1000.0 / settings.sampleRate;
 
-    std::cout << "DELAY_MS=" << delayMs << "\n";
+    std::cout << "MODE=" << (dynamic ? "DYNAMIC" : "STATIC") << "\n";
+    std::cout << "DELAY_MS=" << staticDelayMs << "\n";
     std::cout << "DELAY_SAMPLES=" << result.staticDelaySamples << "\n";
     std::cout << "CONFIDENCE=" << result.staticConfidence << "\n";
     std::cout << "WINDOW_SEC=" << result.staticAnalysisTimeSec << "\n";
     std::cout << "CORRELATION=" << result.staticCorrelation << "\n";
     std::cout << "SUPPORT_WINDOWS=" << result.staticSupportWindows << "\n";
     std::cout << "TOTAL_WINDOWS=" << result.staticTotalWindows << "\n";
+
+    if (dynamic) {
+        std::cout << "CURVE_COUNT=" << result.curve.size() << "\n";
+        for (const auto& p : result.curve) {
+            std::cout << "POINT=" << p.timeSec << "," << p.delaySamples << "," << p.confidence << "\n";
+        }
+    }
+
     return 0;
 }
