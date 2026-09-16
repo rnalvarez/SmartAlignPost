@@ -1,11 +1,11 @@
 -- Smart Align Post - STATIC MULTI UI v2
 -- Primera selección = MASTER. Siguientes = SOURCES.
--- Analiza el contenido representado por cada take desde su D_STARTOFFS.
--- Aplica D_STARTOFFS sin mover D_POSITION.
+-- El análisis compara muestras correspondientes al MISMO INSTANTE DEL TIMELINE.
+-- La aplicación corrige D_STARTOFFS y no mueve D_POSITION.
 
 local MIN_CONFIDENCE = 0.80
-local WIN_W, WIN_H = 780, 520
-local ROW_H, HEADER_H, BUTTON_H = 34, 118, 38
+local MIN_ANALYSIS_SEC = 0.25
+local WIN_W, WIN_H = 820, 560
 
 local function script_dir()
   local src = debug.getinfo(1, "S").source
@@ -35,23 +35,26 @@ local function text(x, y, s, size, r, g, b)
   gfx.x, gfx.y = x, y
   gfx.drawstr(tostring(s))
 end
-local function clamp(v, a, b) return math.max(a, math.min(b, v)) end
-local function inside(x, y, w, h, mx, my) return mx >= x and mx <= x + w and my >= y and my <= y + h end
+local function inside(x, y, w, h, mx, my)
+  return mx >= x and mx <= x + w and my >= y and my <= y + h
+end
 
 local results = {}
 local selectedCount = 0
 local masterItem, masterTake, masterPath = nil, nil, nil
-local masterPos, masterOffs, masterRate = 0, 0, 1
+local masterPos, masterOffs, masterRate, masterLength = 0, 0, 1, 0
 local status, statusKind = "Esperando selección de REAPER.", "info"
 local analyzed, applied = false, false
-local scroll, lastMouseDown = 0, false
+local lastMouseDown = false
 
 local function set_status(msg, kind)
   status, statusKind = msg or "", kind or "info"
 end
 
 local function fail(msg)
-  results, analyzed, applied = {}, false, false
+  results = {}
+  analyzed = false
+  applied = false
   set_status(msg, "error")
 end
 
@@ -67,7 +70,9 @@ local function parse_process_output(processResult)
 end
 
 local function analyze_selection()
-  results, analyzed, applied = {}, false, false
+  results = {}
+  analyzed = false
+  applied = false
   selectedCount = reaper.CountSelectedMediaItems(0)
   if selectedCount < 2 then
     fail("Seleccioná al menos 2 items: MASTER primero + uno o más SOURCES.")
@@ -75,10 +80,11 @@ local function analyze_selection()
   end
 
   masterItem = reaper.GetSelectedMediaItem(0, 0)
-  masterPath, masterTake, err = take_source_path(masterItem)
-  if not masterPath then fail("MASTER: " .. tostring(err)); return end
+  masterPath, masterTake, masterErr = take_source_path(masterItem)
+  if not masterPath then fail("MASTER: " .. tostring(masterErr)); return end
 
   masterPos = reaper.GetMediaItemInfo_Value(masterItem, "D_POSITION")
+  masterLength = reaper.GetMediaItemInfo_Value(masterItem, "D_LENGTH")
   masterOffs = reaper.GetMediaItemTakeInfo_Value(masterTake, "D_STARTOFFS")
   masterRate = reaper.GetMediaItemTakeInfo_Value(masterTake, "D_PLAYRATE")
   if masterRate <= 0 then fail("PLAYRATE inválido en MASTER."); return end
@@ -92,18 +98,28 @@ local function analyze_selection()
     if not sourcePath then fail("SOURCE #" .. i .. ": " .. tostring(sourceErr)); return end
 
     local sourcePos = reaper.GetMediaItemInfo_Value(sourceItem, "D_POSITION")
+    local sourceLength = reaper.GetMediaItemInfo_Value(sourceItem, "D_LENGTH")
     local sourceOffs = reaper.GetMediaItemTakeInfo_Value(sourceTake, "D_STARTOFFS")
     local sourceRate = reaper.GetMediaItemTakeInfo_Value(sourceTake, "D_PLAYRATE")
     if sourceRate <= 0 then fail("PLAYRATE inválido en SOURCE #" .. i .. "."); return end
 
-    -- Analizar exactamente el contenido que aparece en REAPER al comienzo del take.
+    local commonStart = math.max(masterPos, sourcePos)
+    local commonEnd = math.min(masterPos + masterLength, sourcePos + sourceLength)
+    if commonEnd - commonStart < MIN_ANALYSIS_SEC then
+      fail(string.format("SOURCE #%d: no hay suficiente tramo común en el timeline para analizar (%.3f s).", i, MIN_ANALYSIS_SEC))
+      return
+    end
+
+    local masterAnalysisStart = masterOffs + (commonStart - masterPos) * masterRate
+    local sourceAnalysisStart = sourceOffs + (commonStart - sourcePos) * sourceRate
+
     local cmd = quote(exe) .. " " .. quote(masterPath) .. " " .. quote(sourcePath)
-      .. " " .. quote(string.format("%.12f", masterOffs))
-      .. " " .. quote(string.format("%.12f", sourceOffs))
+      .. " " .. quote(string.format("%.12f", masterAnalysisStart))
+      .. " " .. quote(string.format("%.12f", sourceAnalysisStart))
 
     local returnCode, output, normalized = parse_process_output(reaper.ExecProcess(cmd, 60000))
     if returnCode ~= 0 then
-      fail("El analizador falló en SOURCE #" .. i .. ".\n" .. tostring(normalized))
+      fail("El analizador falló en SOURCE #" .. i .. ".\n\n" .. tostring(normalized))
       return
     end
 
@@ -113,65 +129,101 @@ local function analyze_selection()
     local correlation = tonumber(output:match("CORRELATION=([%+%-]?[%d%.]+)"))
     local support = tonumber(output:match("SUPPORT_WINDOWS=([%+%-]?[%d%.]+)"))
     local total = tonumber(output:match("TOTAL_WINDOWS=([%+%-]?[%d%.]+)"))
-    if not delayMs then fail("SOURCE #" .. i .. " no devolvió DELAY_MS."); return end
+    if not delayMs then
+      fail("SOURCE #" .. i .. " no devolvió DELAY_MS.\n\n" .. tostring(output))
+      return
+    end
 
-    -- El DSP mide el desfase acústico entre los contenidos que comienzan en
-    -- cada take. La posición de timeline queda incorporada por separado.
     local targetOffs = masterOffs
       + ((sourcePos - masterPos) * sourceRate)
       + ((delayMs / 1000.0) * sourceRate / masterRate)
     local deltaSamples = (targetOffs - sourceOffs) * sourceRate
+
     if not confidence or confidence < MIN_CONFIDENCE then low = low + 1 end
 
     results[#results + 1] = {
-      index = i, item = sourceItem, take = sourceTake,
-      sourcePos = sourcePos, sourceOffs = sourceOffs,
-      targetOffs = targetOffs, deltaSamples = deltaSamples,
-      delayMs = delayMs, delaySamples = delaySamples or (delayMs * sourceRate / 1000.0),
-      confidence = confidence, correlation = correlation,
-      support = support, total = total,
+      index = i,
+      item = sourceItem,
+      take = sourceTake,
+      sourcePos = sourcePos,
+      sourceOffs = sourceOffs,
+      targetOffs = targetOffs,
+      deltaSamples = deltaSamples,
+      delayMs = delayMs,
+      delaySamples = delaySamples or (delayMs * sourceRate / 1000.0),
+      confidence = confidence,
+      correlation = correlation,
+      support = support,
+      total = total,
+      commonStart = commonStart,
     }
   end
 
   analyzed = true
-  set_status(string.format("Analizados %d SOURCE(s). %d con confidence < %.2f.", #results, low, MIN_CONFIDENCE), low > 0 and "warn" or "ok")
+  set_status(string.format("Analizados %d SOURCE(s) sobre tramos temporales comunes. %d con confidence < %.2f.", #results, low, MIN_CONFIDENCE), low > 0 and "warn" or "ok")
 end
 
 local function apply_results()
-  if not analyzed or #results == 0 then set_status("Primero ejecutá ANALYZE.", "warn"); return end
+  if not analyzed or #results == 0 then
+    set_status("Primero ejecutá ANALYZE.", "warn")
+    return
+  end
+
   local low = 0
-  for _, r in ipairs(results) do if not r.confidence or r.confidence < MIN_CONFIDENCE then low = low + 1 end end
+  for _, r in ipairs(results) do
+    if not r.confidence or r.confidence < MIN_CONFIDENCE then low = low + 1 end
+  end
+
   if low > 0 then
-    local answer = reaper.ShowMessageBox(string.format("Hay %d SOURCE(s) con confidence menor a %.2f.\n\n¿Aplicar igualmente?", low, MIN_CONFIDENCE), "Smart Align Post — CONFIDENCE", 4)
-    if answer ~= 6 then set_status("APPLY cancelado.", "info"); return end
+    local answer = reaper.ShowMessageBox(
+      string.format("Hay %d SOURCE(s) con confidence menor a %.2f.\n\n¿Aplicar igualmente?", low, MIN_CONFIDENCE),
+      "Smart Align Post — CONFIDENCE", 4)
+    if answer ~= 6 then
+      set_status("APPLY cancelado.", "info")
+      return
+    end
   end
 
   reaper.Undo_BeginBlock()
   local failures = 0
   local originalPositions = {}
+
   for _, r in ipairs(results) do
     originalPositions[r] = reaper.GetMediaItemInfo_Value(r.item, "D_POSITION")
     reaper.SetMediaItemTakeInfo_Value(r.take, "D_STARTOFFS", r.targetOffs)
     reaper.UpdateItemInProject(r.item)
   end
+
   reaper.UpdateArrange()
+
   for _, r in ipairs(results) do
     local afterOffs = reaper.GetMediaItemTakeInfo_Value(r.take, "D_STARTOFFS")
     local afterPos = reaper.GetMediaItemInfo_Value(r.item, "D_POSITION")
-    if math.abs(afterOffs - r.targetOffs) > 1e-8 or math.abs(afterPos - originalPositions[r]) > 1e-8 then failures = failures + 1 end
+    if math.abs(afterOffs - r.targetOffs) > 1e-8 or math.abs(afterPos - originalPositions[r]) > 1e-8 then
+      failures = failures + 1
+    end
   end
+
   reaper.Undo_EndBlock("Smart Align Post - STATIC MULTI APPLY", -1)
 
-  if failures > 0 then set_status(string.format("APPLY: %d SOURCE(s) con error de verificación.", failures), "error"); return end
+  if failures > 0 then
+    set_status(string.format("APPLY: %d SOURCE(s) con error de verificación.", failures), "error")
+    return
+  end
+
   applied = true
   set_status(string.format("Aplicado: %d SOURCE(s). D_POSITION intacto. Undo disponible.", #results), "ok")
 end
 
 local function draw_button(x, y, w, h, label, enabled, primary)
-  local hover = enabled and gfx.mouse_x >= x and gfx.mouse_x <= x + w and gfx.mouse_y >= y and gfx.mouse_y <= y + h
-  if not enabled then rect(x, y, w, h, 55, 55, 60)
-  elseif primary then rect(x, y, w, h, hover and 70 or 52, hover and 155 or 125, hover and 245 or 210)
-  else rect(x, y, w, h, hover and 78 or 64, hover and 78 or 64, hover and 85 or 70) end
+  local hover = enabled and inside(x, y, w, h, gfx.mouse_x, gfx.mouse_y)
+  if not enabled then
+    rect(x, y, w, h, 55, 55, 60)
+  elseif primary then
+    rect(x, y, w, h, hover and 70 or 52, hover and 155 or 125, hover and 245 or 210)
+  else
+    rect(x, y, w, h, hover and 78 or 64, hover and 78 or 64, hover and 85 or 70)
+  end
   local tw = gfx.measurestr(label)
   text(x + (w - tw) / 2, y + 10, label, 16, enabled and 245 or 135, enabled and 245 or 135, enabled and 250 or 135)
 end
@@ -181,37 +233,36 @@ local function draw_ui()
   text(24, 18, "SMART ALIGN POST", 25, 245, 245, 250)
   text(24, 49, "STATIC · MULTI SOURCE", 15, 160, 170, 185)
   text(24, 73, "MASTER = primer item seleccionado", 14, 195, 200, 210)
-  text(24, 92, "Análisis desde D_STARTOFFS · corrección en D_STARTOFFS", 14, 145, 155, 170)
-  local n = reaper.CountSelectedMediaItems(0)
-  text(500, 24, "Seleccionados: " .. n, 15, 205, 210, 220)
-  text(500, 48, "MASTER: " .. (masterItem and "OK" or "—"), 14, 160, 175, 185)
+  text(24, 92, "Análisis sobre el mismo instante del timeline · corrección en D_STARTOFFS", 13, 145, 155, 170)
 
-  local tableY = HEADER_H
+  local n = reaper.CountSelectedMediaItems(0)
+  text(585, 24, "Seleccionados: " .. n, 15, 205, 210, 220)
+  text(585, 48, "MASTER: " .. (masterItem and "OK" or "—"), 14, 160, 175, 185)
+
+  local tableY = 125
   rect(18, tableY, gfx.w - 36, 32, 45, 47, 53)
   text(30, tableY + 8, "SOURCE", 14, 190, 195, 205)
   text(145, tableY + 8, "DELAY", 14, 190, 195, 205)
-  text(255, tableY + 8, "Δ SAMPLES", 14, 190, 195, 205)
-  text(390, tableY + 8, "CONF", 14, 190, 195, 205)
-  text(470, tableY + 8, "CORR", 14, 190, 195, 205)
-  text(555, tableY + 8, "SUPPORT", 14, 190, 195, 205)
-  text(670, tableY + 8, "STATE", 14, 190, 195, 205)
+  text(245, tableY + 8, "Δ SAMPLES", 14, 190, 195, 205)
+  text(385, tableY + 8, "CONF", 14, 190, 195, 205)
+  text(455, tableY + 8, "CORR", 14, 190, 195, 205)
+  text(545, tableY + 8, "COMMON START", 14, 190, 195, 205)
+  text(700, tableY + 8, "STATE", 14, 190, 195, 205)
 
-  local maxRows = math.floor((gfx.h - tableY - 95) / ROW_H)
-  local startIndex = math.floor(scroll) + 1
-  local endIndex = math.min(#results, startIndex + maxRows - 1)
-  for idx = startIndex, endIndex do
-    local r = results[idx]
-    local y = tableY + 32 + (idx - startIndex) * ROW_H
+  local rowY = tableY + 32
+  for idx, r in ipairs(results) do
+    if rowY > gfx.h - 105 then break end
     local conf = r.confidence or 0
     local good = conf >= MIN_CONFIDENCE
-    rect(18, y, gfx.w - 36, ROW_H, (idx % 2 == 0) and 34 or 30, 34, 39)
-    text(30, y + 8, "SOURCE " .. r.index, 14, 235, 235, 240)
-    text(145, y + 8, string.format("%+.3f ms", r.delayMs), 14, 225, 230, 235)
-    text(255, y + 8, string.format("%+.2f", r.deltaSamples), 14, 225, 230, 235)
-    text(390, y + 8, string.format("%.3f", conf), 14, good and 120 or 235, good and 220 or 170, good and 150 or 130)
-    text(470, y + 8, string.format("%.4f", r.correlation or 0), 14, 210, 215, 225)
-    text(555, y + 8, string.format("%d/%d", r.support or 0, r.total or 0), 14, 210, 215, 225)
-    text(670, y + 8, applied and "APPLIED" or (good and "READY" or "CHECK"), 14, applied and 120 or (good and 145 or 235), applied and 220 or (good and 205 or 170), applied and 155 or (good and 235 or 130))
+    rect(18, rowY, gfx.w - 36, 34, (idx % 2 == 0) and 34 or 30, 34, 39)
+    text(30, rowY + 8, "SOURCE " .. r.index, 14, 235, 235, 240)
+    text(145, rowY + 8, string.format("%+.3f ms", r.delayMs), 14, 225, 230, 235)
+    text(245, rowY + 8, string.format("%+.2f", r.deltaSamples), 14, 225, 230, 235)
+    text(385, rowY + 8, string.format("%.3f", conf), 14, good and 120 or 235, good and 220 or 170, good and 150 or 130)
+    text(455, rowY + 8, string.format("%.4f", r.correlation or 0), 14, 210, 215, 225)
+    text(545, rowY + 8, string.format("%.3f s", r.commonStart or 0), 14, 210, 215, 225)
+    text(700, rowY + 8, applied and "APPLIED" or (good and "READY" or "CHECK"), 14, applied and 120 or (good and 145 or 235), applied and 220 or (good and 205 or 170), applied and 155 or (good and 235 or 130))
+    rowY = rowY + 34
   end
 
   local footerY = gfx.h - 72
@@ -219,19 +270,25 @@ local function draw_ui()
   if statusKind == "ok" then kindR, kindG, kindB = 120, 220, 150 end
   if statusKind == "warn" then kindR, kindG, kindB = 240, 200, 110 end
   if statusKind == "error" then kindR, kindG, kindB = 245, 120, 120 end
-  text(24, footerY - 18, status, 14, kindR, kindG, kindB)
-  draw_button(18, footerY + 8, 150, BUTTON_H, "ANALYZE", n >= 2, true)
-  draw_button(180, footerY + 8, 150, BUTTON_H, "APPLY", analyzed and #results > 0, true)
-  draw_button(gfx.w - 168, footerY + 8, 150, BUTTON_H, "CLOSE", true, false)
+
+  text(24, footerY - 18, status, 13, kindR, kindG, kindB)
+  draw_button(18, footerY + 8, 150, 38, "ANALYZE", n >= 2, true)
+  draw_button(180, footerY + 8, 150, 38, "APPLY", analyzed and #results > 0, true)
+  draw_button(gfx.w - 168, footerY + 8, 150, 38, "CLOSE", true, false)
 end
 
 local function handle_mouse()
   local down = gfx.mouse_cap & 1 == 1
   if down and not lastMouseDown then
     local footerY = gfx.h - 72
-    if inside(18, footerY + 8, 150, BUTTON_H, gfx.mouse_x, gfx.mouse_y) then analyze_selection()
-    elseif inside(180, footerY + 8, 150, BUTTON_H, gfx.mouse_x, gfx.mouse_y) then apply_results()
-    elseif inside(gfx.w - 168, footerY + 8, 150, BUTTON_H, gfx.mouse_x, gfx.mouse_y) then gfx.quit(); return true end
+    if inside(18, footerY + 8, 150, 38, gfx.mouse_x, gfx.mouse_y) then
+      analyze_selection()
+    elseif inside(180, footerY + 8, 150, 38, gfx.mouse_x, gfx.mouse_y) then
+      apply_results()
+    elseif inside(gfx.w - 168, footerY + 8, 150, 38, gfx.mouse_x, gfx.mouse_y) then
+      gfx.quit()
+      return true
+    end
   end
   lastMouseDown = down
   return false
@@ -240,11 +297,6 @@ end
 local function loop()
   if gfx.getchar() < 0 then return end
   handle_mouse()
-  local wheel = gfx.mouse_wheel
-  if wheel ~= 0 and #results > 0 then
-    scroll = clamp(scroll - wheel / 120, 0, math.max(0, #results - 1))
-    gfx.mouse_wheel = 0
-  end
   draw_ui()
   gfx.update()
   reaper.defer(loop)
