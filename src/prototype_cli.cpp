@@ -60,12 +60,7 @@ float pcmSample(const uint8_t* p, int bits, uint16_t format) {
     return 0.0f;
 }
 
-bool loadWav(const std::string& path,
-             WavData& out,
-             std::string& error,
-             double startSeconds = 0.0) {
-    if (startSeconds < 0.0) startSeconds = 0.0;
-
+bool loadWav(const std::string& path, WavData& out, std::string& error) {
     std::ifstream f(path, std::ios::binary);
     if (!f) { error = "No se pudo abrir: " + path; return false; }
     if (!readFourCC(f, "RIFF")) { error = "No es WAV RIFF: " + path; return false; }
@@ -112,16 +107,11 @@ bool loadWav(const std::string& path,
     if (frameBytes == 0) { error = "Frame WAV inválido: " + path; return false; }
     const size_t frames = dataSize / frameBytes;
 
-    const size_t startFrame = std::min<size_t>(
-        frames,
-        static_cast<size_t>(startSeconds * static_cast<double>(out.sampleRate)));
-    const size_t availableFrames = frames - startFrame;
-    const size_t maxFrames = std::min<size_t>(availableFrames,
-        static_cast<size_t>(out.sampleRate) * 10u);
+    const size_t maxFrames = std::min<size_t>(frames, static_cast<size_t>(out.sampleRate) * 10u);
     out.mono.resize(maxFrames);
 
     f.clear();
-    f.seekg(dataPos + std::streamoff(startFrame * frameBytes));
+    f.seekg(dataPos);
     std::vector<uint8_t> frame(frameBytes);
     for (size_t i = 0; i < maxFrames; ++i) {
         f.read(reinterpret_cast<char*>(frame.data()), static_cast<std::streamsize>(frame.size()));
@@ -137,43 +127,18 @@ bool loadWav(const std::string& path,
     return true;
 }
 
-double parseArg(const char* value, const char* name, int& status) {
-    try {
-        const double v = std::stod(value);
-        if (v < 0.0) {
-            std::cerr << "ERROR: " << name << " no puede ser negativo.\n";
-            status = 6;
-            return 0.0;
-        }
-        return v;
-    } catch (...) {
-        std::cerr << "ERROR: valor inválido para " << name << ": " << value << "\n";
-        status = 6;
-        return 0.0;
-    }
-}
-
 }
 
 int main(int argc, char** argv) {
-    if (argc != 3 && argc != 5) {
-        std::cerr << "Uso: SmartAlignPostPrototype.exe <MASTER.wav> <SOURCE.wav> [MASTER_STARTOFFS_SEC SOURCE_STARTOFFS_SEC]\n";
+    if (argc != 3) {
+        std::cerr << "Uso: SmartAlignPostPrototype.exe <MASTER.wav> <SOURCE.wav>\n";
         return 2;
-    }
-
-    double masterStartOffs = 0.0;
-    double sourceStartOffs = 0.0;
-    int parseStatus = 0;
-    if (argc == 5) {
-        masterStartOffs = parseArg(argv[3], "MASTER_STARTOFFS_SEC", parseStatus);
-        sourceStartOffs = parseArg(argv[4], "SOURCE_STARTOFFS_SEC", parseStatus);
-        if (parseStatus != 0) return parseStatus;
     }
 
     WavData master, source;
     std::string error;
-    if (!loadWav(argv[1], master, error, masterStartOffs)) { std::cerr << error << "\n"; return 3; }
-    if (!loadWav(argv[2], source, error, sourceStartOffs)) { std::cerr << error << "\n"; return 3; }
+    if (!loadWav(argv[1], master, error)) { std::cerr << error << "\n"; return 3; }
+    if (!loadWav(argv[2], source, error)) { std::cerr << error << "\n"; return 3; }
     if (master.sampleRate != source.sampleRate) {
         std::cerr << "ERROR: sample rates distintos (MASTER=" << master.sampleRate
                   << ", SOURCE=" << source.sampleRate << ").\n";
@@ -195,7 +160,6 @@ int main(int argc, char** argv) {
     const auto result = sap::AlignEngine::analyze(master.mono, source.mono, settings);
     const double delayMs = result.staticDelaySamples * 1000.0 / settings.sampleRate;
 
-    // Machine-readable one-line fields for the REAPER bridge and diagnostics.
     std::cout << "DELAY_MS=" << delayMs << "\n";
     std::cout << "DELAY_SAMPLES=" << result.staticDelaySamples << "\n";
     std::cout << "CONFIDENCE=" << result.staticConfidence << "\n";
