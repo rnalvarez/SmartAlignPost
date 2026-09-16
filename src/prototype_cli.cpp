@@ -60,7 +60,12 @@ float pcmSample(const uint8_t* p, int bits, uint16_t format) {
     return 0.0f;
 }
 
-bool loadWav(const std::string& path, WavData& out, std::string& error) {
+bool loadWav(const std::string& path,
+             WavData& out,
+             std::string& error,
+             double startSeconds = 0.0) {
+    if (startSeconds < 0.0) startSeconds = 0.0;
+
     std::ifstream f(path, std::ios::binary);
     if (!f) { error = "No se pudo abrir: " + path; return false; }
     if (!readFourCC(f, "RIFF")) { error = "No es WAV RIFF: " + path; return false; }
@@ -82,8 +87,8 @@ bool loadWav(const std::string& path, WavData& out, std::string& error) {
             out.format = readU16(f);
             out.channels = int(readU16(f));
             out.sampleRate = int(readU32(f));
-            (void)readU32(f); // byte rate
-            (void)readU16(f); // block align
+            (void)readU32(f);
+            (void)readU16(f);
             out.bitsPerSample = int(readU16(f));
             haveFmt = true;
         } else if (std::memcmp(id, "data", 4) == 0) {
@@ -107,11 +112,20 @@ bool loadWav(const std::string& path, WavData& out, std::string& error) {
     if (frameBytes == 0) { error = "Frame WAV inválido: " + path; return false; }
     const size_t frames = dataSize / frameBytes;
 
-    const size_t maxFrames = std::min<size_t>(frames, static_cast<size_t>(out.sampleRate) * 10u);
+    const size_t requestedStart = static_cast<size_t>(startSeconds * static_cast<double>(out.sampleRate));
+    if (requestedStart >= frames) {
+        error = "Inicio de análisis fuera del archivo: " + path +
+                " (start=" + std::to_string(startSeconds) + "s, duration=" +
+                std::to_string(static_cast<double>(frames) / out.sampleRate) + "s)";
+        return false;
+    }
+
+    const size_t maxFrames = std::min<size_t>(frames - requestedStart,
+                                               static_cast<size_t>(out.sampleRate) * 10u);
     out.mono.resize(maxFrames);
 
     f.clear();
-    f.seekg(dataPos);
+    f.seekg(dataPos + std::streamoff(requestedStart * frameBytes));
     std::vector<uint8_t> frame(frameBytes);
     for (size_t i = 0; i < maxFrames; ++i) {
         f.read(reinterpret_cast<char*>(frame.data()), static_cast<std::streamsize>(frame.size()));
@@ -127,27 +141,66 @@ bool loadWav(const std::string& path, WavData& out, std::string& error) {
     return true;
 }
 
+bool parseNonNegative(const char* text, const char* name, double& value, std::string& error) {
+    try {
+        value = std::stod(text);
+        if (value < 0.0) {
+            error = std::string("ERROR: ") + name + " no puede ser negativo.";
+            return false;
+        }
+        return true;
+    } catch (...) {
+        error = std::string("ERROR: valor inválido para ") + name + ": " + text;
+        return false;
+    }
 }
 
+void emitError(const std::string& message) {
+    // ExecProcess/REAPER debe poder mostrar el diagnóstico también por stdout.
+    std::cout << "ERROR=" << message << "\n";
+}
+
+} // namespace
+
 int main(int argc, char** argv) {
-    if (argc != 3) {
-        std::cerr << "Uso: SmartAlignPostPrototype.exe <MASTER.wav> <SOURCE.wav>\n";
+    if (argc != 3 && argc != 5) {
+        emitError("Uso: SmartAlignPostPrototype.exe <MASTER.wav> <SOURCE.wav> [MASTER_START_SEC SOURCE_START_SEC]");
         return 2;
     }
 
-    WavData master, source;
+    double masterStart = 0.0;
+    double sourceStart = 0.0;
     std::string error;
-    if (!loadWav(argv[1], master, error)) { std::cerr << error << "\n"; return 3; }
-    if (!loadWav(argv[2], source, error)) { std::cerr << error << "\n"; return 3; }
+    if (argc == 5) {
+        if (!parseNonNegative(argv[3], "MASTER_START_SEC", masterStart, error)) {
+            emitError(error);
+            return 6;
+        }
+        if (!parseNonNegative(argv[4], "SOURCE_START_SEC", sourceStart, error)) {
+            emitError(error);
+            return 6;
+        }
+    }
+
+    WavData master, source;
+    if (!loadWav(argv[1], master, error, masterStart)) {
+        emitError(error);
+        return 3;
+    }
+    if (!loadWav(argv[2], source, error, sourceStart)) {
+        emitError(error);
+        return 3;
+    }
+
     if (master.sampleRate != source.sampleRate) {
-        std::cerr << "ERROR: sample rates distintos (MASTER=" << master.sampleRate
-                  << ", SOURCE=" << source.sampleRate << ").\n";
+        emitError("sample rates distintos (MASTER=" + std::to_string(master.sampleRate) +
+                  ", SOURCE=" + std::to_string(source.sampleRate) + ")");
         return 4;
     }
 
     const size_t n = std::min(master.mono.size(), source.mono.size());
     if (n < 1024) {
-        std::cerr << "ERROR: señal demasiado corta para analizar.\n";
+        emitError("señal demasiado corta para analizar después del offset seleccionado");
         return 5;
     }
 
