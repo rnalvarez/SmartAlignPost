@@ -40,6 +40,8 @@ jobs:
           if (-not (Test-Path $exe)) { throw "No se encontró $exe" }
           Copy-Item $exe artifacts/package/SmartAlignPost/
           Copy-Item 'reaper/Smart Align Post - Selection Helper.lua' artifacts/package/SmartAlignPost/
+          Copy-Item 'reaper/Smart Align Post - Selection Helper MULTI.lua' artifacts/package/SmartAlignPost/
+          Copy-Item 'reaper/Smart Align Post - Static Multi UI v2.lua' artifacts/package/SmartAlignPost/
           Compress-Archive -Path artifacts/package/SmartAlignPost -DestinationPath artifacts/SmartAlignPost-Windows-VST3-Prototype.zip
 
       - name: Publicar artefacto
