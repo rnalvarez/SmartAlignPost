@@ -46,7 +46,39 @@ jobs:
           Copy-Item 'reaper/Smart Align Post - Static Multi UI v4.lua' artifacts/package/SmartAlignPost/
           Copy-Item 'reaper/Smart Align Post - DYNAMIC MULTI UI v1.lua' artifacts/package/SmartAlignPost/
           Copy-Item 'reaper/Smart Align Post - DYNAMIC MULTI UI v2.lua' artifacts/package/SmartAlignPost/
+
+          # Verificación explícita del contenido antes de comprimir.
+          $required = @(
+            'SmartAlignPostPrototype.exe',
+            'Smart Align Post - DYNAMIC MULTI UI v2.lua'
+          )
+          foreach ($name in $required) {
+            if (-not (Test-Path (Join-Path 'artifacts/package/SmartAlignPost' $name))) {
+              throw "Falta en el paquete: $name"
+            }
+          }
+
           Compress-Archive -Path artifacts/package/SmartAlignPost -DestinationPath artifacts/SmartAlignPost-Windows-VST3-Prototype.zip
+
+      - name: Verificar ZIP final
+        shell: pwsh
+        run: |
+          $zip = 'artifacts/SmartAlignPost-Windows-VST3-Prototype.zip'
+          if (-not (Test-Path $zip)) { throw 'No se generó el ZIP final' }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path $zip))
+          try {
+            $names = $archive.Entries | ForEach-Object { $_.FullName }
+            $expected = @(
+              'SmartAlignPost/SmartAlignPostPrototype.exe',
+              'SmartAlignPost/Smart Align Post - DYNAMIC MULTI UI v2.lua'
+            )
+            foreach ($entry in $expected) {
+              if ($names -notcontains $entry) { throw "El ZIP no contiene: $entry" }
+            }
+          } finally {
+            $archive.Dispose()
+          }
 
       - name: Publicar artefacto
         uses: actions/upload-artifact@v4
