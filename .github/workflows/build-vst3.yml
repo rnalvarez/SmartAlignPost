@@ -85,3 +85,5 @@ jobs:
         with:
           name: SmartAlignPost-Windows-VST3-Prototype
           path: artifacts/SmartAlignPost-Windows-VST3-Prototype.zip
+
+# Verificación de empaquetado DYNAMIC v2
