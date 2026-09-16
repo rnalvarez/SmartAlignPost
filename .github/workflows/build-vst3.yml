@@ -45,6 +45,7 @@ jobs:
           Copy-Item 'reaper/Smart Align Post - Static Multi UI v3 Stable.lua' artifacts/package/SmartAlignPost/
           Copy-Item 'reaper/Smart Align Post - Static Multi UI v4.lua' artifacts/package/SmartAlignPost/
           Copy-Item 'reaper/Smart Align Post - DYNAMIC MULTI UI v1.lua' artifacts/package/SmartAlignPost/
+          Copy-Item 'reaper/Smart Align Post - DYNAMIC MULTI UI v2.lua' artifacts/package/SmartAlignPost/
           Compress-Archive -Path artifacts/package/SmartAlignPost -DestinationPath artifacts/SmartAlignPost-Windows-VST3-Prototype.zip
 
       - name: Publicar artefacto
