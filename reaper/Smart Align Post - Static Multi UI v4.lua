@@ -12,11 +12,11 @@ local WIN_W, WIN_H = 820, 560
 local function script_dir()
   local src = debug.getinfo(1, "S").source
   if src:sub(1, 1) == "@" then src = src:sub(2) end
-  return src:match("^(.*)[/\\][^/\\]+$") or "."
+  return src:match("^(.*)[/\\\\][^/\\\\]+$") or "."
 end
 
 local function quote(s)
-  return '"' .. tostring(s):gsub('"', '\\"') .. '"'
+  return '"' .. tostring(s):gsub('"', '\\\"') .. '"'
 end
 
 local function take_source_path(item)
@@ -71,6 +71,9 @@ local function parse_process_output(processResult)
   return tonumber(normalized:match("^%s*(%-?%d+)%s*$")), "", normalized
 end
 
+local MAX_REFINEMENT_PASSES = 3
+local RESIDUAL_TOLERANCE_SAMPLES = 0.25
+
 local function analyze_selection()
   results = {}
   analyzed = false
@@ -91,8 +94,44 @@ local function analyze_selection()
   masterRate = reaper.GetMediaItemTakeInfo_Value(masterTake, "D_PLAYRATE")
   if masterRate <= 0 then fail("PLAYRATE inválido en MASTER."); return end
 
-  local exe = script_dir() .. "\\SmartAlignPostPrototype.exe"
+  local exe = script_dir() .. "\\\\SmartAlignPostPrototype.exe"
   local low = 0
+  local notConverged = 0
+  local toleranceMs = (RESIDUAL_TOLERANCE_SAMPLES / masterRate) * 1000.0
+
+  local function run_pair_analysis(sourcePath, sourceOffs, sourcePos, sourceRate, commonStart)
+    -- MASTER permanece completamente fijo en toda la refinación.
+    local masterAnalysisStart = masterOffs + (commonStart - masterPos) * masterRate
+    local sourceAnalysisStart = sourceOffs + (commonStart - sourcePos) * sourceRate
+
+    local cmd = quote(exe) .. " " .. quote(masterPath) .. " " .. quote(sourcePath)
+      .. " " .. quote(string.format("%.12f", masterAnalysisStart))
+      .. " " .. quote(string.format("%.12f", sourceAnalysisStart))
+
+    local returnCode, output, normalized = parse_process_output(reaper.ExecProcess(cmd, 60000))
+    if returnCode ~= 0 then
+      return nil, "El analizador falló.\n\n" .. tostring(normalized)
+    end
+
+    local delayMs = tonumber(output:match("DELAY_MS=([%+%-]?[%d%.]+)"))
+    local delaySamples = tonumber(output:match("DELAY_SAMPLES=([%+%-]?[%d%.]+)"))
+    local confidence = tonumber(output:match("CONFIDENCE=([%+%-]?[%d%.]+)"))
+    local correlation = tonumber(output:match("CORRELATION=([%+%-]?[%d%.]+)"))
+    local support = tonumber(output:match("SUPPORT_WINDOWS=([%+%-]?[%d%.]+)"))
+    local total = tonumber(output:match("TOTAL_WINDOWS=([%+%-]?[%d%.]+)"))
+    if not delayMs then
+      return nil, "El analizador no devolvió DELAY_MS.\n\n" .. tostring(output)
+    end
+
+    return {
+      delayMs = delayMs,
+      delaySamples = delaySamples or (delayMs * masterRate / 1000.0),
+      confidence = confidence,
+      correlation = correlation,
+      support = support,
+      total = total,
+    }
+  end
 
   for i = 1, selectedCount - 1 do
     local sourceItem = reaper.GetSelectedMediaItem(0, i)
@@ -112,38 +151,51 @@ local function analyze_selection()
       return
     end
 
-    -- Comparamos las muestras que REAPER está reproduciendo en el mismo instante.
-    local masterAnalysisStart = masterOffs + (commonStart - masterPos) * masterRate
-    local sourceAnalysisStart = sourceOffs + (commonStart - sourcePos) * sourceRate
-
-    local cmd = quote(exe) .. " " .. quote(masterPath) .. " " .. quote(sourcePath)
-      .. " " .. quote(string.format("%.12f", masterAnalysisStart))
-      .. " " .. quote(string.format("%.12f", sourceAnalysisStart))
-
-    local returnCode, output, normalized = parse_process_output(reaper.ExecProcess(cmd, 60000))
-    if returnCode ~= 0 then
-      fail("El analizador falló en SOURCE #" .. i .. ".\n\n" .. tostring(normalized))
+    -- Refinación controlada: SIEMPRE MASTER -> SOURCE. Nunca SOURCE -> SOURCE.
+    local currentOffs = sourceOffs
+    local best, bestErr = run_pair_analysis(sourcePath, currentOffs, sourcePos, sourceRate, commonStart)
+    if not best then
+      fail("SOURCE #" .. i .. ": " .. tostring(bestErr or "error de análisis"))
       return
     end
 
-    local delayMs = tonumber(output:match("DELAY_MS=([%+%-]?[%d%.]+)"))
-    local delaySamples = tonumber(output:match("DELAY_SAMPLES=([%+%-]?[%d%.]+)"))
-    local confidence = tonumber(output:match("CONFIDENCE=([%+%-]?[%d%.]+)"))
-    local correlation = tonumber(output:match("CORRELATION=([%+%-]?[%d%.]+)"))
-    local support = tonumber(output:match("SUPPORT_WINDOWS=([%+%-]?[%d%.]+)"))
-    local total = tonumber(output:match("TOTAL_WINDOWS=([%+%-]?[%d%.]+)"))
-    if not delayMs then
-      fail("SOURCE #" .. i .. " no devolvió DELAY_MS.\n\n" .. tostring(output))
-      return
+    local passes = 0
+    while passes < MAX_REFINEMENT_PASSES and math.abs(best.delayMs) > toleranceMs do
+      local correctionOffs = (best.delayMs / 1000.0) * sourceRate / masterRate
+      local candidatePlusOffs = currentOffs + correctionOffs
+      local candidatePlus = run_pair_analysis(sourcePath, candidatePlusOffs, sourcePos, sourceRate, commonStart)
+      if not candidatePlus then
+        fail("SOURCE #" .. i .. ": no se pudo verificar la corrección propuesta.")
+        return
+      end
+
+      if math.abs(candidatePlus.delayMs) < math.abs(best.delayMs) then
+        currentOffs = candidatePlusOffs
+        best = candidatePlus
+      else
+        -- Si el primer sentido no acerca SOURCE al MASTER, probamos el opuesto.
+        local candidateMinusOffs = currentOffs - correctionOffs
+        local candidateMinus = run_pair_analysis(sourcePath, candidateMinusOffs, sourcePos, sourceRate, commonStart)
+        if not candidateMinus then
+          fail("SOURCE #" .. i .. ": no se pudo verificar la corrección inversa.")
+          return
+        end
+
+        if math.abs(candidateMinus.delayMs) < math.abs(best.delayMs) then
+          currentOffs = candidateMinusOffs
+          best = candidateMinus
+        else
+          break
+        end
+      end
+
+      passes = passes + 1
     end
 
-    -- El analyzer devuelve el delay RESIDUAL entre los contenidos actuales.
-    -- Para corregir ese residual, ajustamos el STARTOFFS que SOURCE YA TIENE.
-    local targetOffs = sourceOffs
-      + ((delayMs / 1000.0) * sourceRate / masterRate)
-    local deltaSamples = (targetOffs - sourceOffs) * sourceRate
-
-    if not confidence or confidence < MIN_CONFIDENCE then low = low + 1 end
+    local finalResidualSamples = best.delayMs * masterRate / 1000.0
+    local converged = math.abs(finalResidualSamples) <= RESIDUAL_TOLERANCE_SAMPLES
+    if not converged then notConverged = notConverged + 1 end
+    if not best.confidence or best.confidence < MIN_CONFIDENCE then low = low + 1 end
 
     results[#results + 1] = {
       index = i,
@@ -151,20 +203,28 @@ local function analyze_selection()
       take = sourceTake,
       sourcePos = sourcePos,
       sourceOffs = sourceOffs,
-      targetOffs = targetOffs,
-      deltaSamples = deltaSamples,
-      delayMs = delayMs,
-      delaySamples = delaySamples or (delayMs * sourceRate / 1000.0),
-      confidence = confidence,
-      correlation = correlation,
-      support = support,
-      total = total,
+      targetOffs = currentOffs,
+      deltaSamples = (currentOffs - sourceOffs) * sourceRate,
+      delayMs = best.delayMs,
+      delaySamples = finalResidualSamples,
+      confidence = best.confidence,
+      correlation = best.correlation,
+      support = best.support,
+      total = best.total,
       commonStart = commonStart,
+      passes = passes,
+      converged = converged,
     }
   end
 
   analyzed = true
-  set_status(string.format("Analizados %d SOURCE(s) sobre el mismo instante del timeline. %d con confidence < %.2f.", #results, low, MIN_CONFIDENCE), low > 0 and "warn" or "ok")
+  local msg = string.format(
+    "Analizados %d SOURCE(s) siempre contra MASTER. %d con confidence < %.2f.",
+    #results, low, MIN_CONFIDENCE)
+  if notConverged > 0 then
+    msg = msg .. string.format(" %d no llegaron a ±%.2f samples de residual.", notConverged, RESIDUAL_TOLERANCE_SAMPLES)
+  end
+  set_status(msg, (low > 0 or notConverged > 0) and "warn" or "ok")
 end
 
 local function apply_results()
@@ -265,7 +325,15 @@ local function draw_ui()
     text(385, rowY + 8, string.format("%.3f", conf), 14, good and 120 or 235, good and 220 or 170, good and 150 or 130)
     text(455, rowY + 8, string.format("%.4f", r.correlation or 0), 14, 210, 215, 225)
     text(545, rowY + 8, string.format("%.3f s", r.commonStart or 0), 14, 210, 215, 225)
-    text(700, rowY + 8, applied and "APPLIED" or (good and "READY" or "CHECK"), 14, applied and 120 or (good and 145 or 235), applied and 220 or (good and 205 or 170), applied and 155 or (good and 235 or 130))
+    local stateText
+    if applied then
+      stateText = "APPLIED"
+    elseif r.converged then
+      stateText = string.format("READY/%d", r.passes or 0)
+    else
+      stateText = "CHECK"
+    end
+    text(700, rowY + 8, stateText, 14, applied and 120 or (r.converged and 145 or 235), applied and 220 or (r.converged and 205 or 170), applied and 155 or (r.converged and 235 or 130))
     rowY = rowY + 34
   end
 
