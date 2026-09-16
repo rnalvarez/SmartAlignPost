@@ -301,6 +301,7 @@ end
 local function loop()
   if gfx.getchar() < 0 then return end
   if handle_mouse() then return end
+  draw_ui()
   gfx.update()
   reaper.defer(loop)
 end
@@ -308,4 +309,6 @@ end
 gfx.init("Smart Align Post — STATIC MULTI v4", WIN_W, WIN_H)
 gfx.clear = 24 + 25 * 256 + 29 * 65536
 gfx.setfont(1, "Arial", 16)
+draw_ui()
+gfx.update()
 reaper.defer(loop)
