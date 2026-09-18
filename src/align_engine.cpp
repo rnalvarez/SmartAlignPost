@@ -279,7 +279,7 @@ double gccPhatDelay(const float* master,
     // Positive delay means SOURCE occurs later than MASTER. The
     // A*conj(B) cross-spectrum produces the opposite lag convention,
     // therefore invert the sign before returning the public delay.
-    return -phaseDelay;
+    return phaseDelay;
 }
 
 } // namespace
