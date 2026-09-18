@@ -226,6 +226,74 @@ Result AlignEngine::analyze(const std::vector<float>& master,
 
     const int maxLag = std::max(1, std::min<int>(requestedMaxLag, static_cast<int>(win / 2) - 1));
 
+    // DYNAMIC must not execute the STATIC consensus pass below first.
+    // That would perform essentially the same GCC-PHAT windows twice and can
+    // make even a short 24 s source exceed REAPER's 120 s process timeout on
+    // slower Windows machines. DYNAMIC is a single tracking pass seeded from
+    // the strongest of the first few windows.
+    if (settings.mode == Mode::Dynamic) {
+        constexpr int kWarmupWindows = 5;
+        double seedScore = -1.0;
+        double seedDelay = 0.0;
+        double seedCorrelation = 0.0;
+        double seedConfidence = 0.0;
+        size_t warmupPos = 0;
+        int warmupCount = 0;
+
+        for (; warmupCount < kWarmupWindows && warmupPos + win <= n;
+             ++warmupCount, warmupPos += hop) {
+            double c = 0.0;
+            double peak = 0.0;
+            const double d = gccPhatDelay(master.data() + warmupPos,
+                                          source.data() + warmupPos,
+                                          win, maxLag, settings.sampleRate, c, peak);
+            const double score = c * peak;
+            if (score > seedScore) {
+                seedScore = score;
+                seedDelay = d;
+                seedCorrelation = peak;
+                seedConfidence = c;
+            }
+        }
+
+        if (warmupCount == 0) return r;
+
+        r.staticDelaySamples = seedDelay;
+        r.staticCorrelation = seedCorrelation;
+        r.staticConfidence = seedConfidence;
+        r.staticAnalysisTimeSec = 0.0;
+        r.staticSupportWindows = warmupCount;
+        r.staticTotalWindows = warmupCount;
+
+        double previous = seedDelay;
+        for (size_t pos = 0; pos + win <= n; pos += hop) {
+            double c = 0.0;
+            double peak = 0.0;
+            double d = gccPhatDelay(master.data() + pos,
+                                    source.data() + pos,
+                                    win, maxLag, settings.sampleRate, c, peak);
+
+            if (c < settings.minConfidence) {
+                d = previous;
+            } else {
+                const double maxStep =
+                    settings.maxSlewMsPerSecond / 1000.0 *
+                    (static_cast<double>(hop) / settings.sampleRate) *
+                    settings.sampleRate;
+                d = std::clamp(d, previous - maxStep, previous + maxStep);
+            }
+
+            const double tau = std::max(0.001, settings.smoothingMs / 1000.0);
+            const double dt = static_cast<double>(hop) / settings.sampleRate;
+            const double alpha = 1.0 - std::exp(-dt / tau);
+            d = previous + alpha * (d - previous);
+
+            r.curve.push_back({static_cast<double>(pos) / settings.sampleRate, d, c});
+            previous = d;
+        }
+        return r;
+    }
+
     const int lagSpan = 2 * maxLag + 1;
     std::vector<double> lagScore(static_cast<size_t>(lagSpan), 0.0);
     std::vector<double> lagConfidence(static_cast<size_t>(lagSpan), 0.0);
@@ -337,69 +405,6 @@ Result AlignEngine::analyze(const std::vector<float>& master,
 
     if (settings.mode == Mode::Static) return r;
 
-    // DYNAMIC does not need a full STATIC consensus pass first. That pass
-    // doubles the GCC-PHAT work for exactly the same windows and was a major
-    // throughput cost. Seed the tracker from the strongest of the first few
-    // windows, then run the dynamic pass once over the signal.
-    {
-        constexpr int kWarmupWindows = 5;
-        double seedConfidence = -1.0;
-        double seedDelay = 0.0;
-        double seedCorrelation = 0.0;
-        size_t warmupPos = 0;
-        int warmupCount = 0;
-
-        for (; warmupCount < kWarmupWindows && warmupPos + win <= n;
-             ++warmupCount, warmupPos += hop) {
-            double c = 0.0;
-            double peak = 0.0;
-            const double d = gccPhatDelay(master.data() + warmupPos,
-                                          source.data() + warmupPos,
-                                          win, maxLag, settings.sampleRate, c, peak);
-            const double score = c * peak;
-            if (score > seedConfidence) {
-                seedConfidence = score;
-                seedDelay = d;
-                seedCorrelation = peak;
-                r.staticConfidence = c;
-                r.staticAnalysisTimeSec =
-                    static_cast<double>(warmupPos) / settings.sampleRate;
-            }
-        }
-
-        if (warmupCount == 0) return r;
-
-        r.staticDelaySamples = seedDelay;
-        r.staticCorrelation = seedCorrelation;
-        r.staticSupportWindows = warmupCount;
-        r.staticTotalWindows = warmupCount;
-    }
-
-    double previous = r.staticDelaySamples;
-    for (size_t pos=0; pos+win<=n; pos+=hop) {
-        double c=0.0;
-        double peak=0.0;
-        double d = gccPhatDelay(master.data()+pos, source.data()+pos,
-                                win, maxLag, settings.sampleRate, c, peak);
-
-        if (c < settings.minConfidence) {
-            d = previous;
-        } else {
-            const double maxStep =
-                settings.maxSlewMsPerSecond / 1000.0 *
-                (static_cast<double>(hop) / settings.sampleRate) *
-                settings.sampleRate;
-            d = std::clamp(d, previous-maxStep, previous+maxStep);
-        }
-
-        const double tau = std::max(0.001, settings.smoothingMs/1000.0);
-        const double dt = static_cast<double>(hop)/settings.sampleRate;
-        const double alpha = 1.0 - std::exp(-dt/tau);
-        d = previous + alpha*(d-previous);
-
-        r.curve.push_back({static_cast<double>(pos)/settings.sampleRate, d, c});
-        previous=d;
-    }
     return r;
 }
 
