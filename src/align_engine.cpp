@@ -66,7 +66,12 @@ double gccPhatDelay(const float* master,
     peakCorrelation = 0.0;
     if (n < 32 || sampleRate <= 0.0) return 0.0;
 
-    const size_t fftSize = nextPowerOfTwo(n);
+    // The zero-padding (fftSize - n) must cover the full lag search range,
+    // or the circular correlation wraps around and contaminates results at
+    // lags near +-maxLag. This matters most for short buffers (analyze()'s
+    // n < win branch), where maxLag can be a large fraction of n.
+    const size_t lagMargin = static_cast<size_t>(std::max(0, maxLag));
+    const size_t fftSize = nextPowerOfTwo(n + lagMargin);
     std::vector<Complex> A(fftSize, Complex(0.0, 0.0));
     std::vector<Complex> B(fftSize, Complex(0.0, 0.0));
 
@@ -182,10 +187,11 @@ double AlignEngine::estimateDelay(const float* master,
                                    const float* source,
                                    size_t n,
                                    int maxLag,
+                                   double sampleRate,
                                    double& confidence)
 {
     double peak = 0.0;
-    return gccPhatDelay(master, source, n, maxLag, 48000.0, confidence, peak);
+    return gccPhatDelay(master, source, n, maxLag, sampleRate, confidence, peak);
 }
 
 Result AlignEngine::analyze(const std::vector<float>& master,

@@ -45,6 +45,7 @@ public:
                                 const float* source,
                                 size_t n,
                                 int maxLag,
+                                double sampleRate,
                                 double& confidence);
 
 private:
