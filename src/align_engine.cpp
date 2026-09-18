@@ -152,6 +152,12 @@ double gccPhatDelay(const float* master,
         }
     }
 
+#ifdef _WIN32
+    static int winDebugCalls = 0;
+    const int winDebugId = ++winDebugCalls;
+    if (winDebugId <= 3) std::cerr << "WINDBG gcc enter n=" << n << " fft=" << fftSize << "\\n" << std::flush;
+#endif
+
     // Phase-slope refinement around the coarse delay.
     // For SOURCE delayed by +d samples, A*conj(B) has phase slope +d.
     // Subtract the coarse delay first so residual phase stays near zero and
@@ -270,6 +276,10 @@ double gccPhatDelay(const float* master,
             }
         }
     }
+
+#ifdef _WIN32
+    if (winDebugId <= 3) std::cerr << "WINDBG gcc before return id=" << winDebugId << " phaseBins=" << phaseBins << "\\n" << std::flush;
+#endif
 
     peakCorrelation = std::clamp(best, 0.0, 1.0);
     const double prominence = std::max(0.0, best - std::max(0.0, second));
