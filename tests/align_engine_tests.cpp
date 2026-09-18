@@ -151,9 +151,7 @@ int main()
     // Dynamic tracking regression: the curve must follow a genuinely
     // time-varying delay, not just exist (the earlier empty-curve check
     // would pass even if every point were frozen at the wrong value). Uses
-    // an exact-integer, locally-constant-per-block "staircase" delay so the
-    // test isolates the engine's tracking behaviour from any synthesis
-    // interpolation artifact.
+    // the same analysis settings as the production CLI.
     {
         auto dynMaster = makeTestSignal(durationSamples);
         const size_t blockSamples = static_cast<size_t>(0.48 * sr);
@@ -171,11 +169,11 @@ int main()
         dynSettings.sampleRate = sr;
         dynSettings.mode = sap::Mode::Dynamic;
         dynSettings.maxDelayMs = 12.0;
-        dynSettings.analysisWindowMs = 200.0;
-        dynSettings.hopMs = 100.0;
+        dynSettings.analysisWindowMs = 120.0;
+        dynSettings.hopMs = 200.0;
         dynSettings.minConfidence = 0.80;
-        dynSettings.smoothingMs = 120.0;
-        dynSettings.maxSlewMsPerSecond = 12.0;
+        dynSettings.smoothingMs = 180.0;
+        dynSettings.maxSlewMsPerSecond = 20.0;
 
         const auto dynResult = sap::AlignEngine::analyze(dynMaster, dynSource, dynSettings);
         if (dynResult.curve.size() < 5) {
@@ -197,6 +195,63 @@ int main()
         }
         std::cout << "DYNAMIC_TRACKING max_error=" << maxErr << " samples over "
                   << dynResult.curve.size() << " points\n";
+    }
+
+    // Constant-delay DYNAMIC regression using the production settings.
+    // The new dynamic path seeds from a short warm-up instead of running a
+    // full STATIC pass, so a constant source must still stay locked to the
+    // known MASTER delay.
+    {
+        constexpr int dynamicConstantDelay = 173;
+        auto constantSource = delayed(master, dynamicConstantDelay);
+
+        sap::Settings dynamicConstant;
+        dynamicConstant.sampleRate = sr;
+        dynamicConstant.mode = sap::Mode::Dynamic;
+        dynamicConstant.maxDelayMs = 12.0;
+        dynamicConstant.analysisWindowMs = 120.0;
+        dynamicConstant.hopMs = 200.0;
+        dynamicConstant.minConfidence = 0.80;
+        dynamicConstant.smoothingMs = 180.0;
+        dynamicConstant.maxSlewMsPerSecond = 20.0;
+
+        const auto constantResult =
+            sap::AlignEngine::analyze(master, constantSource, dynamicConstant);
+        if (constantResult.curve.size() < 5) {
+            std::cerr << "Dynamic constant-delay curve too short: "
+                      << constantResult.curve.size() << " points\n";
+            return 9;
+        }
+        double maxConstantError = 0.0;
+        for (const auto& p : constantResult.curve)
+            maxConstantError = std::max(
+                maxConstantError, std::abs(p.delaySamples - dynamicConstantDelay));
+
+        if (maxConstantError > 1.5) {
+            std::cerr << "Dynamic constant-delay tracking failed: max error "
+                      << maxConstantError << " samples\n";
+            return 10;
+        }
+    }
+
+    // Non-48 kHz regression: estimateDelay() must use the caller-provided
+    // sample rate for its DSP path rather than assuming 48 kHz.
+    {
+        constexpr double sr44 = 44100.0;
+        constexpr int delay44 = 117;
+        auto master44 = makeTestSignal(44100);
+        auto source44 = delayed(master44, delay44);
+        double confidence44 = 0.0;
+        const double measured44 = sap::AlignEngine::estimateDelay(
+            master44.data(), source44.data(), master44.size(),
+            220, sr44, confidence44);
+
+        if (!approx(measured44, delay44, 1.0) || confidence44 < 0.8) {
+            std::cerr << "44.1 kHz estimateDelay failed: got "
+                      << measured44 << " expected " << delay44
+                      << " confidence=" << confidence44 << "\n";
+            return 11;
+        }
     }
 
     std::cout << "Smart Align Post DSP tests passed.\n";
