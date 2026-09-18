@@ -92,3 +92,5 @@ endif()
 # Re-run Windows prototype smoke test after direct process-launch fix
 
 # Trigger Windows package build after prototype smoke-test fix
+
+# CI trigger: validate Windows DYNAMIC phase test diagnostics.
