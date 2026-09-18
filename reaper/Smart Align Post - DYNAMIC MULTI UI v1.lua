@@ -86,13 +86,15 @@ local function run_dynamic_chunk(masterPath, sourcePath, masterStart, sourceStar
   if returnCode ~= 0 then return nil, "" .. tostring(normalized) end
 
   local staticDelay = tonumber(output:match("DELAY_SAMPLES=([%+%-]?[%d%.]+)")) or 0
+  local staticDelayMs = tonumber(output:match("DELAY_MS=([%+%-]?[%d%.]+)")) or 0
   local staticConf = tonumber(output:match("CONFIDENCE=([%+%-]?[%d%.]+)")) or 0
   local curve = {}
-  for t, d, c in output:gmatch("POINT=([%+%-]?[%d%.]+),([%+%-]?[%d%.]+),([%+%-]?[%d%.]+)") do
-    curve[#curve + 1] = {time = tonumber(t), delay = tonumber(d), confidence = tonumber(c)}
+  for t, ms, d, c in output:gmatch("POINT=([%+%-]?[%d%.]+),([%+%-]?[%d%.]+),([%+%-]?[%d%.]+),([%+%-]?[%d%.]+)") do
+    curve[#curve + 1] = {time = tonumber(t), delayMs = tonumber(ms), delay = tonumber(d), confidence = tonumber(c)}
   end
   return {
     staticDelay = staticDelay,
+    staticDelayMs = staticDelayMs,
     staticConfidence = staticConf,
     curve = curve,
   }, nil
@@ -107,13 +109,13 @@ local function consolidate_curve(points)
   for _, p in ipairs(points) do
     if p.confidence >= MIN_CONFIDENCE then
       if not last then
-        last = {time = p.time, delay = p.delay, confidence = p.confidence}
+        last = {time = p.time, delay = p.delay, delayMs = p.delayMs, confidence = p.confidence}
         out[#out + 1] = last
       else
         local dt = p.time - last.time
         local dd = math.abs(p.delay - last.delay)
         if dt >= CONSOLIDATE_MAX_SEC or dd >= CONSOLIDATE_MIN_DELTA_SAMPLES then
-          last = {time = p.time, delay = p.delay, confidence = p.confidence}
+          last = {time = p.time, delay = p.delay, delayMs = p.delayMs, confidence = p.confidence}
           out[#out + 1] = last
         else
           if p.confidence > last.confidence then last.confidence = p.confidence end
@@ -146,6 +148,7 @@ local function analyze_source(sourceItem, sourceIndex)
   local chunkStart = commonStart
   local firstChunk = true
   local lastStaticDelay = 0
+  local lastStaticDelayMs = 0
   local lastStaticConf = 0
 
   while chunkStart < commonEnd - 0.05 do
@@ -159,6 +162,7 @@ local function analyze_source(sourceItem, sourceIndex)
     if not analysis then return nil, string.format("SOURCE #%d: %s", sourceIndex, err) end
 
     lastStaticDelay = analysis.staticDelay
+    lastStaticDelayMs = analysis.staticDelayMs
     lastStaticConf = analysis.staticConfidence
 
     for _, p in ipairs(analysis.curve) do
@@ -168,6 +172,7 @@ local function analyze_source(sourceItem, sourceIndex)
         points[#points + 1] = {
           time = absoluteTime,
           delay = p.delay,
+          delayMs = p.delayMs,
           confidence = p.confidence,
         }
       end
@@ -181,13 +186,13 @@ local function analyze_source(sourceItem, sourceIndex)
   table.sort(points, function(a,b) return a.time < b.time end)
   local curve = consolidate_curve(points)
   if #curve == 0 then
-    curve[1] = {time = commonStart, delay = lastStaticDelay, confidence = lastStaticConf}
+    curve[1] = {time = commonStart, delay = lastStaticDelay, delayMs = lastStaticDelayMs, confidence = lastStaticConf}
   end
 
   -- Forzamos una referencia explícita MASTER -> SOURCE: el primer punto siempre
   -- parte de la medición MASTER/SOURCE y nunca de otra SOURCE.
   if curve[1].time > commonStart + 1e-6 then
-    table.insert(curve, 1, {time = commonStart, delay = lastStaticDelay, confidence = lastStaticConf})
+    table.insert(curve, 1, {time = commonStart, delay = lastStaticDelay, delayMs = lastStaticDelayMs, confidence = lastStaticConf})
   end
 
   local maxAbs = 0
@@ -249,17 +254,23 @@ end
 
 local function split_and_apply_source(r)
   local item = r.item
-  local currentDelay = nil
+  local currentDelayMs = nil
   local current = item
   local splitCount = 0
 
   -- Primer punto: corregimos el OFFSET del segmento inicial respecto del MASTER.
+  -- p.delayMs es un valor de TIEMPO (ms); /1000 da segundos y *sourceRate/masterRate
+  -- ajusta por diferencias de PLAYRATE entre SOURCE y MASTER (mismo patrón que
+  -- STATIC). Antes se dividía delay EN SAMPLES por D_PLAYRATE, que no es una
+  -- conversión samples->segundos: con el playrate típico de 1.0 esto corría el
+  -- STARTOFFS la cantidad de samples pero en SEGUNDOS (p.ej. 56 samples -> 56s
+  -- en vez de ~1.2ms).
   local firstPoint = r.curve[1]
   local initialOffs = reaper.GetMediaItemTakeInfo_Value(reaper.GetActiveTake(current), "D_STARTOFFS")
-  local firstDelaySeconds = firstPoint.delay / r.sourceRate
+  local firstDelaySeconds = (firstPoint.delayMs / 1000.0) * r.sourceRate / masterRate
   reaper.SetMediaItemTakeInfo_Value(reaper.GetActiveTake(current), "D_STARTOFFS", initialOffs + firstDelaySeconds)
   reaper.UpdateItemInProject(current)
-  currentDelay = firstPoint.delay
+  currentDelayMs = firstPoint.delayMs
 
   for idx = 2, #r.curve do
     local p = r.curve[idx]
@@ -277,14 +288,15 @@ local function split_and_apply_source(r)
     if not rightTake then goto continue end
 
     -- SplitMediaItem conserva el timeline y avanza el STARTOFFS automáticamente.
-    -- Solo aplicamos el cambio de delay respecto del segmento anterior.
+    -- Solo aplicamos el cambio de delay respecto del segmento anterior (en ms,
+    -- ver nota de unidades más arriba).
     local rightOffs = reaper.GetMediaItemTakeInfo_Value(rightTake, "D_STARTOFFS")
-    local deltaDelaySeconds = (p.delay - currentDelay) / r.sourceRate
+    local deltaDelaySeconds = ((p.delayMs - currentDelayMs) / 1000.0) * r.sourceRate / masterRate
     reaper.SetMediaItemTakeInfo_Value(rightTake, "D_STARTOFFS", rightOffs + deltaDelaySeconds)
     reaper.UpdateItemInProject(right)
 
     current = right
-    currentDelay = p.delay
+    currentDelayMs = p.delayMs
     splitCount = splitCount + 1
 
     ::continue::

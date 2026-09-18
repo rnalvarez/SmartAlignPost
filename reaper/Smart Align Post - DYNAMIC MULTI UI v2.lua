@@ -45,20 +45,20 @@ local function run_chunk(masterFile,sourceFile,masterStart,sourceStart,duration)
   local exe=script_dir().."\\SmartAlignPostPrototype.exe"
   local cmd=quote(exe).." "..quote(masterFile).." "..quote(sourceFile).." "..quote(string.format("%.12f",masterStart)).." "..quote(string.format("%.12f",sourceStart)).." "..quote(string.format("%.6f",duration))
   local code,out,norm=parse_process_output(reaper.ExecProcess(cmd,120000)); if code~=0 then return nil,norm end
-  local curve={}; for t,d,c in out:gmatch("POINT=([%+%-]?[%d%.]+),([%+%-]?[%d%.]+),([%+%-]?[%d%.]+)") do curve[#curve+1]={time=tonumber(t),delay=tonumber(d),confidence=tonumber(c)} end
-  return {staticDelay=tonumber(out:match("DELAY_SAMPLES=([%+%-]?[%d%.]+)")) or 0,staticConfidence=tonumber(out:match("CONFIDENCE=([%+%-]?[%d%.]+)")) or 0,curve=curve},nil
+  local curve={}; for t,ms,d,c in out:gmatch("POINT=([%+%-]?[%d%.]+),([%+%-]?[%d%.]+),([%+%-]?[%d%.]+),([%+%-]?[%d%.]+)") do curve[#curve+1]={time=tonumber(t),delayMs=tonumber(ms),delay=tonumber(d),confidence=tonumber(c)} end
+  return {staticDelay=tonumber(out:match("DELAY_SAMPLES=([%+%-]?[%d%.]+)")) or 0,staticDelayMs=tonumber(out:match("DELAY_MS=([%+%-]?[%d%.]+)")) or 0,staticConfidence=tonumber(out:match("CONFIDENCE=([%+%-]?[%d%.]+)")) or 0,curve=curve},nil
 end
 local function consolidate(points)
   table.sort(points,function(a,b)return a.time<b.time end); local out,last={},nil
   for _,p in ipairs(points) do
     if (p.confidence or 0)>=MIN_CONFIDENCE then
-      if not last then last={time=p.time,delay=p.delay,confidence=p.confidence}; out[#out+1]=last
+      if not last then last={time=p.time,delay=p.delay,delayMs=p.delayMs,confidence=p.confidence}; out[#out+1]=last
       else
         local dt=p.time-last.time; local dd=math.abs(p.delay-last.delay)
-        if dt>=CONSOLIDATE_MAX_SEC or dd>=CONSOLIDATE_MIN_DELTA_SAMPLES then last={time=p.time,delay=p.delay,confidence=p.confidence}; out[#out+1]=last
+        if dt>=CONSOLIDATE_MAX_SEC or dd>=CONSOLIDATE_MIN_DELTA_SAMPLES then last={time=p.time,delay=p.delay,delayMs=p.delayMs,confidence=p.confidence}; out[#out+1]=last
         else
           if p.confidence>last.confidence then last.confidence=p.confidence end
-          last.time=p.time; last.delay=(last.delay+p.delay)*0.5
+          last.time=p.time; last.delay=(last.delay+p.delay)*0.5; last.delayMs=(last.delayMs+p.delayMs)*0.5
         end
       end
     end
@@ -70,16 +70,16 @@ local function analyze_source(item,index)
   local pos=reaper.GetMediaItemInfo_Value(item,"D_POSITION"); local len=reaper.GetMediaItemInfo_Value(item,"D_LENGTH"); local offs=reaper.GetMediaItemTakeInfo_Value(take,"D_STARTOFFS"); local rate=reaper.GetMediaItemTakeInfo_Value(take,"D_PLAYRATE")
   if rate<=0 then return nil,"PLAYRATE inválido en SOURCE #"..index end
   local commonStart=math.max(masterPos,pos); local commonEnd=math.min(masterPos+masterLength,pos+len); if commonEnd-commonStart<0.5 then return nil,string.format("SOURCE #%d: tramo común demasiado corto.",index) end
-  local points={}; local chunkStart=commonStart; local first=true; local fallbackDelay,fallbackConf=0,0
+  local points={}; local chunkStart=commonStart; local first=true; local fallbackDelay,fallbackDelayMs,fallbackConf=0,0,0
   while chunkStart<commonEnd-0.05 do
     local duration=math.min(CHUNK_SEC,commonEnd-chunkStart); if duration<0.5 then break end
     local masterStart=masterOffs+(chunkStart-masterPos)*masterRate; local sourceStart=offs+(chunkStart-pos)*rate
     local a,e=run_chunk(masterPath,path,masterStart,sourceStart,duration); if not a then return nil,string.format("SOURCE #%d: %s",index,tostring(e)) end
-    fallbackDelay,fallbackConf=a.staticDelay,a.staticConfidence
-    for _,p in ipairs(a.curve) do local abs=chunkStart+p.time; if abs>=commonStart+((first and 0) or CURVE_SKIP_START_SEC) and abs<commonEnd-0.05 then points[#points+1]={time=abs,delay=p.delay,confidence=p.confidence} end end
+    fallbackDelay,fallbackDelayMs,fallbackConf=a.staticDelay,a.staticDelayMs,a.staticConfidence
+    for _,p in ipairs(a.curve) do local abs=chunkStart+p.time; if abs>=commonStart+((first and 0) or CURVE_SKIP_START_SEC) and abs<commonEnd-0.05 then points[#points+1]={time=abs,delay=p.delay,delayMs=p.delayMs,confidence=p.confidence} end end
     if commonEnd-chunkStart<=CHUNK_SEC+0.001 then break end; chunkStart=chunkStart+CHUNK_SEC-CHUNK_OVERLAP_SEC; first=false
   end
-  local curve=consolidate(points); if #curve==0 then curve[1]={time=commonStart,delay=fallbackDelay,confidence=fallbackConf} elseif curve[1].time>commonStart+1e-6 then table.insert(curve,1,{time=commonStart,delay=curve[1].delay,confidence=curve[1].confidence}) end
+  local curve=consolidate(points); if #curve==0 then curve[1]={time=commonStart,delay=fallbackDelay,delayMs=fallbackDelayMs,confidence=fallbackConf} elseif curve[1].time>commonStart+1e-6 then table.insert(curve,1,{time=commonStart,delay=curve[1].delay,delayMs=curve[1].delayMs,confidence=curve[1].confidence}) end
   local minConf,maxAbs=1,0; for _,p in ipairs(curve) do minConf=math.min(minConf,p.confidence or 0); maxAbs=math.max(maxAbs,math.abs(p.delay or 0)) end
   return {index=index,item=item,take=take,sourcePos=pos,sourceOffs=offs,sourceRate=rate,commonStart=commonStart,commonEnd=commonEnd,curve=curve,pointCount=#curve,minConfidence=minConf,maxAbsDelay=maxAbs},nil
 end
@@ -90,18 +90,25 @@ local function analyze_selection()
   local low=0; for i=1,selectedCount-1 do local r,e=analyze_source(reaper.GetSelectedMediaItem(0,i),i); if not r then fail(e); return end; if r.minConfidence<MIN_CONFIDENCE then low=low+1 end; results[#results+1]=r end
   analyzed=true; set_status(string.format("Analizados %d SOURCE(s) exclusivamente contra MASTER. %d con confidence < %.2f.",#results,low,MIN_CONFIDENCE),low>0 and "warn" or "ok")
 end
-local function set_absolute_correction(item,startPos,originalPos,originalOffs,rate,delaySamples)
+local function set_absolute_correction(item,startPos,originalPos,originalOffs,rate,delayMs)
   local take=reaper.GetActiveTake(item); if not take then return false end
-  local target=originalOffs+(startPos-originalPos)*rate+(delaySamples/rate); reaper.SetMediaItemTakeInfo_Value(take,"D_STARTOFFS",target); reaper.UpdateItemInProject(item)
+  -- delayMs is a TIME value; /1000 gives seconds, then *rate/masterRate
+  -- accounts for playback-rate differences (same pattern as STATIC's
+  -- apply step). Previously this divided a SAMPLE COUNT by D_PLAYRATE,
+  -- which is not a samples->seconds conversion: at the typical playrate
+  -- of 1.0 it shifted D_STARTOFFS by the raw sample count in SECONDS
+  -- (e.g. a 56-sample correction became a 56s offset instead of ~1.2ms).
+  local correctionSeconds=(delayMs/1000.0)*rate/masterRate
+  local target=originalOffs+(startPos-originalPos)*rate+correctionSeconds; reaper.SetMediaItemTakeInfo_Value(take,"D_STARTOFFS",target); reaper.UpdateItemInProject(item)
   return math.abs(reaper.GetMediaItemTakeInfo_Value(take,"D_STARTOFFS")-target)<1e-7
 end
 local function apply_source(r)
   if r.minConfidence<MIN_CONFIDENCE then local ans=reaper.ShowMessageBox(string.format("SOURCE %d tiene confidence mínima %.3f.\n\n¿Aplicar igualmente?",r.index,r.minConfidence),"Smart Align Post — DYNAMIC CONFIDENCE",4); if ans~=6 then return 0,true end end
   local current=r.item; local splits=0; local tol=0.005; local first=r.curve[1]
   if first.time>r.sourcePos+tol then local right=reaper.SplitMediaItem(current,first.time); if not right then return 0,false end; current=right; splits=splits+1 end
-  if not set_absolute_correction(current,reaper.GetMediaItemInfo_Value(current,"D_POSITION"),r.sourcePos,r.sourceOffs,r.sourceRate,first.delay) then return splits,false end
+  if not set_absolute_correction(current,reaper.GetMediaItemInfo_Value(current,"D_POSITION"),r.sourcePos,r.sourceOffs,r.sourceRate,first.delayMs) then return splits,false end
   for i=2,#r.curve do local p=r.curve[i]; local curPos=reaper.GetMediaItemInfo_Value(current,"D_POSITION"); local curLen=reaper.GetMediaItemInfo_Value(current,"D_LENGTH")
-    if p.time>curPos+tol and p.time<curPos+curLen-tol then local right=reaper.SplitMediaItem(current,p.time); if right then current=right; splits=splits+1; if not set_absolute_correction(current,p.time,r.sourcePos,r.sourceOffs,r.sourceRate,p.delay) then return splits,false end end end
+    if p.time>curPos+tol and p.time<curPos+curLen-tol then local right=reaper.SplitMediaItem(current,p.time); if right then current=right; splits=splits+1; if not set_absolute_correction(current,p.time,r.sourcePos,r.sourceOffs,r.sourceRate,p.delayMs) then return splits,false end end end
   end
   return splits,true
 end

@@ -239,7 +239,16 @@ int main(int argc, char** argv) {
     if (dynamic) {
         std::cout << "CURVE_COUNT=" << result.curve.size() << "\n";
         for (const auto& p : result.curve) {
-            std::cout << "POINT=" << p.timeSec << "," << p.delaySamples << "," << p.confidence << "\n";
+            const double delayMs = p.delaySamples * 1000.0 / settings.sampleRate;
+            // Field order: time, delayMs, delaySamples, confidence. delayMs
+            // is the one callers should use to convert into D_STARTOFFS
+            // seconds (matching how the DELAY_MS summary line above is
+            // used) -- delaySamples alone is not a time unit and dividing
+            // it by a take's D_PLAYRATE (as the pre-fix DYNAMIC REAPER
+            // scripts did) is a unit-conversion bug, not a valid seconds
+            // conversion.
+            std::cout << "POINT=" << p.timeSec << "," << delayMs << ","
+                       << p.delaySamples << "," << p.confidence << "\n";
         }
     }
 
