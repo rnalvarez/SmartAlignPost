@@ -17,6 +17,8 @@ struct Settings {
     double minConfidence = 0.80;
     double smoothingMs = 200.0;
     double maxSlewMsPerSecond = 8.0;
+    bool hasInitialDelaySamples = false;
+    double initialDelaySamples = 0.0;
 };
 
 struct Point {
