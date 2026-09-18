@@ -9,7 +9,7 @@ local MIN_CONFIDENCE = 0.80
 -- Procesamos en bloques cortos para que REAPER no quede esperando más de 120 s
 -- aunque el equipo/archivo real sea mucho más lento que el smoke test de CI.
 -- El resultado final se consolida entre bloques; MASTER siempre es la referencia.
-local CHUNK_SEC = 8.0
+local CHUNK_SEC = 5.0
 local CHUNK_OVERLAP_SEC = 0.5
 local CURVE_SKIP_START_SEC = 0.10
 local CONSOLIDATE_MAX_SEC = 0.25
