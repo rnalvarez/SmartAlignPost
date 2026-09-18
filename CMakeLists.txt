@@ -88,3 +88,5 @@ if(SAP_BUILD_PROTOTYPE)
     )
     target_include_directories(SmartAlignPostPrototype PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 endif()
+
+# Re-run Windows prototype smoke test after direct process-launch fix
