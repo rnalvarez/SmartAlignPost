@@ -224,6 +224,17 @@ int main(int argc, char** argv) {
     const bool dynamic = (argc == 6);
     settings.mode = dynamic ? sap::Mode::Dynamic : sap::Mode::Static;
 
+    // DYNAMIC prioritizes throughput: the delay can change on the scale of
+    // hundreds of milliseconds in production, so a 120 ms window and 200 ms
+    // hop provide adequate temporal resolution while reducing FFT work by
+    // several times versus the original 200/100 ms configuration.
+    if (dynamic) {
+        settings.analysisWindowMs = 120.0;
+        settings.hopMs = 200.0;
+        settings.smoothingMs = 180.0;
+        settings.maxSlewMsPerSecond = 20.0;
+    }
+
     const auto result = sap::AlignEngine::analyze(master.mono, source.mono, settings);
     const double staticDelayMs = result.staticDelaySamples * 1000.0 / settings.sampleRate;
 
