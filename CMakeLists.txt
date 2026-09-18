@@ -69,6 +69,16 @@ if(SAP_BUILD_TESTS)
     )
     target_include_directories(smartalign_engine_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     add_test(NAME SmartAlignEngineTests COMMAND smartalign_engine_tests)
+
+    if(SAP_BUILD_PROTOTYPE)
+        add_executable(smartalign_prototype_tests
+            tests/prototype_cli_tests.cpp
+        )
+        add_test(
+            NAME SmartAlignPrototypeSmoke
+            COMMAND smartalign_prototype_tests $<TARGET_FILE:SmartAlignPostPrototype>
+        )
+    endif()
 endif()
 
 if(SAP_BUILD_PROTOTYPE)
