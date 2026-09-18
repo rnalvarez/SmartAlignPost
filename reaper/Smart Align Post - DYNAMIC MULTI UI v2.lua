@@ -6,7 +6,7 @@
 -- D_POSITION nunca se modifica.
 
 local MIN_CONFIDENCE = 0.80
-local CHUNK_SEC = 60.0
+local CHUNK_SEC = 180.0
 local CHUNK_OVERLAP_SEC = 0.5
 local CURVE_SKIP_START_SEC = 0.10
 local CONSOLIDATE_MAX_SEC = 0.25
