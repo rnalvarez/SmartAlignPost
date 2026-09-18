@@ -206,7 +206,7 @@ double gccPhatDelay(const float* master,
         ++phaseBins;
     }
 
-    if (phaseBins >= 24 && phaseWeightSum > 0.0) {
+    if (n >= 2048 && phaseBins >= 24 && phaseWeightSum > 0.0) {
         const double meanF = phaseFreqSum / phaseWeightSum;
         const double meanP = phaseSum / phaseWeightSum;
         const double denom = phaseFreq2Sum - phaseWeightSum * meanF * meanF;
