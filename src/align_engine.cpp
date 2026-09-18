@@ -94,7 +94,24 @@ double gccPhatDelay(const float* master,
     fft(A, false);
     fft(B, false);
 
+    // Keep the original cross-spectrum phase long enough to refine the
+    // coarse GCC-PHAT delay. GCC-PHAT is excellent for finding the correct
+    // correlation basin, but the integer/3-point peak refinement alone is
+    // not sufficient for phase-critical alignment. A phase-slope fit of
+    // A*conj(B) gives sub-sample delay precision over a useful audio band.
+    std::vector<Complex> crossSpectrum(fftSize, Complex(0.0, 0.0));
+    double maxCrossMagnitude = 0.0;
     for (size_t k = 0; k < fftSize; ++k) {
+        const Complex cross = A[k] * std::conj(B[k]);
+        crossSpectrum[k] = cross;
+        maxCrossMagnitude = std::max(maxCrossMagnitude, std::abs(cross));
+    }
+
+    for (size_t k = 0; k < fftSize; ++k) {
+        const Complex cross = crossSpectrum[k];
+        const double mag = std::abs(cross);
+        A[k] = mag > 1e-12 ? cross / mag : Complex(0.0, 0.0);
+    }
         const Complex cross = A[k] * std::conj(B[k]);
         const double mag = std::abs(cross);
         A[k] = mag > 1e-12 ? cross / mag : Complex(0.0, 0.0);
@@ -139,6 +156,123 @@ double gccPhatDelay(const float* master,
         }
     }
 
+    // Phase-slope refinement around the coarse delay.
+    // For SOURCE delayed by +d samples, A*conj(B) has phase slope +d.
+    // Subtract the coarse delay first so residual phase stays near zero and
+    // can be unwrapped safely even for delays of several milliseconds.
+    double phaseDelay = refinedLag;
+    double phaseWeightSum = 0.0;
+    double phaseFreqSum = 0.0;
+    double phaseSum = 0.0;
+    double phaseFreq2Sum = 0.0;
+    double phaseFreqPhaseSum = 0.0;
+    double prevRaw = 0.0;
+    double unwrapped = 0.0;
+    bool havePhase = false;
+    int phaseBins = 0;
+
+    const double nyquist = sampleRate * 0.5;
+    const double fMin = std::max(100.0, sampleRate * 0.004);
+    const double fMax = std::min(16000.0, nyquist * 0.90);
+    const double magnitudeFloor = maxCrossMagnitude * 1e-4;
+
+    for (size_t k = 1; k < fftSize / 2; ++k) {
+        const double freq = static_cast<double>(k) * sampleRate /
+                            static_cast<double>(fftSize);
+        if (freq < fMin || freq > fMax) continue;
+
+        const Complex cross = crossSpectrum[k];
+        const double mag = std::abs(cross);
+        if (mag <= magnitudeFloor) continue;
+
+        const double raw = std::arg(
+            cross * std::exp(Complex(0.0, -2.0 * kPi * freq *
+                                           refinedLag / sampleRate)));
+
+        if (!havePhase) {
+            unwrapped = raw;
+            prevRaw = raw;
+            havePhase = true;
+        } else {
+            double delta = raw - prevRaw;
+            while (delta > kPi) delta -= 2.0 * kPi;
+            while (delta < -kPi) delta += 2.0 * kPi;
+            unwrapped += delta;
+            prevRaw = raw;
+        }
+
+        const double w = std::sqrt(mag);
+        phaseWeightSum += w;
+        phaseFreqSum += w * freq;
+        phaseSum += w * unwrapped;
+        phaseFreq2Sum += w * freq * freq;
+        phaseFreqPhaseSum += w * freq * unwrapped;
+        ++phaseBins;
+    }
+
+    if (phaseBins >= 24 && phaseWeightSum > 0.0) {
+        const double meanF = phaseFreqSum / phaseWeightSum;
+        const double meanP = phaseSum / phaseWeightSum;
+        const double denom = phaseFreq2Sum - phaseWeightSum * meanF * meanF;
+        if (std::abs(denom) > 1e-12) {
+            const double slope =
+                (phaseFreqPhaseSum - phaseWeightSum * meanF * meanP) / denom;
+            const double candidateDelay =
+                refinedLag + slope * sampleRate / (2.0 * kPi);
+
+            // Compute a weighted R^2-like phase-line quality.
+            double ssTot = 0.0;
+            double ssErr = 0.0;
+            // Re-run the unwrap so the quality metric uses exactly the same
+            // residual phase sequence as the fit.
+            bool have = false;
+            double prev = 0.0;
+            double up = 0.0;
+            for (size_t k = 1; k < fftSize / 2; ++k) {
+                const double freq = static_cast<double>(k) * sampleRate /
+                                    static_cast<double>(fftSize);
+                if (freq < fMin || freq > fMax) continue;
+                const double mag = std::abs(crossSpectrum[k]);
+                if (mag <= magnitudeFloor) continue;
+
+                const double raw = std::arg(
+                    crossSpectrum[k] *
+                    std::exp(Complex(0.0, -2.0 * kPi * freq *
+                                           refinedLag / sampleRate)));
+                if (!have) {
+                    up = raw;
+                    prev = raw;
+                    have = true;
+                } else {
+                    double delta = raw - prev;
+                    while (delta > kPi) delta -= 2.0 * kPi;
+                    while (delta < -kPi) delta += 2.0 * kPi;
+                    up += delta;
+                    prev = raw;
+                }
+
+                const double w = std::sqrt(mag);
+                const double fitted =
+                    meanP + slope * (freq - meanF);
+                const double errP = up - fitted;
+                const double dcP = up - meanP;
+                ssErr += w * errP * errP;
+                ssTot += w * dcP * dcP;
+            }
+
+            const double r2 = ssTot > 1e-12
+                ? std::clamp(1.0 - ssErr / ssTot, 0.0, 1.0)
+                : 0.0;
+
+            if (r2 >= 0.55 &&
+                std::abs(candidateDelay) <= static_cast<double>(maxLag)) {
+                phaseDelay = candidateDelay;
+                confidence = std::clamp(
+                    confidence * (0.65 + 0.35 * r2), 0.0, 1.0);
+            }
+        }
+    }
+
     peakCorrelation = std::clamp(best, 0.0, 1.0);
     const double prominence = std::max(0.0, best - std::max(0.0, second));
     const double separation = best > 1e-12 ? prominence / best : 0.0;
@@ -149,7 +283,7 @@ double gccPhatDelay(const float* master,
     // Positive delay means SOURCE occurs later than MASTER. The
     // A*conj(B) cross-spectrum produces the opposite lag convention,
     // therefore invert the sign before returning the public delay.
-    return -refinedLag;
+    return -phaseDelay;
 }
 
 } // namespace
