@@ -10,7 +10,7 @@ local MIN_CONFIDENCE = 0.80
 -- aunque el equipo/archivo real sea mucho más lento que el smoke test de CI.
 -- El resultado final se consolida entre bloques; MASTER siempre es la referencia.
 local CHUNK_SEC = 5.0
-local CHUNK_OVERLAP_SEC = 0.5
+local CHUNK_OVERLAP_SEC = 1.0
 local CURVE_SKIP_START_SEC = 0.10
 local CONSOLIDATE_MAX_SEC = 0.25
 local CONSOLIDATE_MIN_DELTA_SAMPLES = 1.0
@@ -44,9 +44,10 @@ local function parse_process_output(processResult)
   if e then return tonumber((n:sub(1,e-1)):match("^%s*(%-?%d+)%s*$")),n:sub(e+1),n end
   return tonumber(n:match("^%s*(%-?%d+)%s*$")),"",n
 end
-local function run_chunk(masterFile,sourceFile,masterStart,sourceStart,duration)
+local function run_chunk(masterFile,sourceFile,masterStart,sourceStart,duration,initialDelay)
   local exe=script_dir().."\\SmartAlignPostPrototype.exe"
   local cmd=quote(exe).." "..quote(masterFile).." "..quote(sourceFile).." "..quote(string.format("%.12f",masterStart)).." "..quote(string.format("%.12f",sourceStart)).." "..quote(string.format("%.6f",duration))
+  if initialDelay~=nil then cmd=cmd.." "..quote(string.format("%.6f",initialDelay)) end
   local code,out,norm=parse_process_output(reaper.ExecProcess(cmd,120000))
   if code~=0 then
     if code==259 then
@@ -79,12 +80,13 @@ local function analyze_source(item,index)
   local pos=reaper.GetMediaItemInfo_Value(item,"D_POSITION"); local len=reaper.GetMediaItemInfo_Value(item,"D_LENGTH"); local offs=reaper.GetMediaItemTakeInfo_Value(take,"D_STARTOFFS"); local rate=reaper.GetMediaItemTakeInfo_Value(take,"D_PLAYRATE")
   if rate<=0 then return nil,"PLAYRATE inválido en SOURCE #"..index end
   local commonStart=math.max(masterPos,pos); local commonEnd=math.min(masterPos+masterLength,pos+len); if commonEnd-commonStart<0.5 then return nil,string.format("SOURCE #%d: tramo común demasiado corto.",index) end
-  local points={}; local chunkStart=commonStart; local first=true; local fallbackDelay,fallbackDelayMs,fallbackConf=0,0,0
+  local points={}; local chunkStart=commonStart; local first=true; local fallbackDelay,fallbackDelayMs,fallbackConf=0,0,0; local priorDelay=nil
   while chunkStart<commonEnd-0.05 do
     local duration=math.min(CHUNK_SEC,commonEnd-chunkStart); if duration<0.5 then break end
     local masterStart=masterOffs+(chunkStart-masterPos)*masterRate; local sourceStart=offs+(chunkStart-pos)*rate
-    local a,e=run_chunk(masterPath,path,masterStart,sourceStart,duration); if not a then return nil,string.format("SOURCE #%d: %s",index,tostring(e)) end
+    local a,e=run_chunk(masterPath,path,masterStart,sourceStart,duration,priorDelay); if not a then return nil,string.format("SOURCE #%d: %s",index,tostring(e)) end
     fallbackDelay,fallbackDelayMs,fallbackConf=a.staticDelay,a.staticDelayMs,a.staticConfidence
+    if #a.curve>0 then priorDelay=a.curve[#a.curve].delay end
     for _,p in ipairs(a.curve) do local abs=chunkStart+p.time; if abs>=commonStart+((first and 0) or CURVE_SKIP_START_SEC) and abs<commonEnd-0.05 then points[#points+1]={time=abs,delay=p.delay,delayMs=p.delayMs,confidence=p.confidence} end end
     if commonEnd-chunkStart<=CHUNK_SEC+0.001 then break end; chunkStart=chunkStart+CHUNK_SEC-CHUNK_OVERLAP_SEC; first=false
   end
