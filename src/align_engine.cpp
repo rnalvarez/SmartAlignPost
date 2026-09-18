@@ -260,11 +260,13 @@ double gccPhatDelay(const float* master,
                 ? std::clamp(1.0 - ssErr / ssTot, 0.0, 1.0)
                 : 0.0;
 
-            if (r2 >= 0.55 &&
+            const double correction = candidateDelay - phaseDelay;
+            if (r2 >= 0.80 &&
+                std::abs(correction) <= 4.0 &&
                 std::abs(candidateDelay) <= static_cast<double>(maxLag)) {
                 phaseDelay = candidateDelay;
                 confidence = std::clamp(
-                    confidence * (0.65 + 0.35 * r2), 0.0, 1.0);
+                    confidence * (0.70 + 0.30 * r2), 0.0, 1.0);
             }
         }
     }
