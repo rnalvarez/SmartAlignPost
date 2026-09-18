@@ -232,40 +232,50 @@ Result AlignEngine::analyze(const std::vector<float>& master,
     // slower Windows machines. DYNAMIC is a single tracking pass seeded from
     // the strongest of the first few windows.
     if (settings.mode == Mode::Dynamic) {
-        constexpr int kWarmupWindows = 5;
-        double seedScore = -1.0;
-        double seedDelay = 0.0;
-        double seedCorrelation = 0.0;
-        double seedConfidence = 0.0;
-        size_t warmupPos = 0;
-        int warmupCount = 0;
+        double previous = 0.0;
 
-        for (; warmupCount < kWarmupWindows && warmupPos + win <= n;
-             ++warmupCount, warmupPos += hop) {
-            double c = 0.0;
-            double peak = 0.0;
-            const double d = gccPhatDelay(master.data() + warmupPos,
-                                          source.data() + warmupPos,
-                                          win, maxLag, settings.sampleRate, c, peak);
-            const double score = c * peak;
-            if (score > seedScore) {
-                seedScore = score;
-                seedDelay = d;
-                seedCorrelation = peak;
-                seedConfidence = c;
+        if (settings.hasInitialDelaySamples) {
+            // The REAPER bridge supplies the last delay measured in the
+            // previous chunk. This keeps DYNAMIC continuous across chunk
+            // boundaries instead of restarting the tracker every few seconds.
+            previous = settings.initialDelaySamples;
+        } else {
+            // First chunk: seed from the strongest of the first few windows.
+            constexpr int kWarmupWindows = 5;
+            double seedScore = -1.0;
+            double seedDelay = 0.0;
+            double seedCorrelation = 0.0;
+            double seedConfidence = 0.0;
+            size_t warmupPos = 0;
+            int warmupCount = 0;
+
+            for (; warmupCount < kWarmupWindows && warmupPos + win <= n;
+                 ++warmupCount, warmupPos += hop) {
+                double c = 0.0;
+                double peak = 0.0;
+                const double d = gccPhatDelay(master.data() + warmupPos,
+                                              source.data() + warmupPos,
+                                              win, maxLag, settings.sampleRate, c, peak);
+                const double score = c * peak;
+                if (score > seedScore) {
+                    seedScore = score;
+                    seedDelay = d;
+                    seedCorrelation = peak;
+                    seedConfidence = c;
+                }
             }
+
+            if (warmupCount == 0) return r;
+
+            previous = seedDelay;
+            r.staticDelaySamples = seedDelay;
+            r.staticCorrelation = seedCorrelation;
+            r.staticConfidence = seedConfidence;
+            r.staticAnalysisTimeSec = 0.0;
+            r.staticSupportWindows = warmupCount;
+            r.staticTotalWindows = warmupCount;
         }
 
-        if (warmupCount == 0) return r;
-
-        r.staticDelaySamples = seedDelay;
-        r.staticCorrelation = seedCorrelation;
-        r.staticConfidence = seedConfidence;
-        r.staticAnalysisTimeSec = 0.0;
-        r.staticSupportWindows = warmupCount;
-        r.staticTotalWindows = warmupCount;
-
-        double previous = seedDelay;
         for (size_t pos = 0; pos + win <= n; pos += hop) {
             double c = 0.0;
             double peak = 0.0;
@@ -290,6 +300,11 @@ Result AlignEngine::analyze(const std::vector<float>& master,
 
             r.curve.push_back({static_cast<double>(pos) / settings.sampleRate, d, c});
             previous = d;
+        }
+
+        if (!r.curve.empty()) {
+            r.staticDelaySamples = r.curve.back().delaySamples;
+            r.staticConfidence = r.curve.back().confidence;
         }
         return r;
     }
