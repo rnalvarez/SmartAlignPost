@@ -6,7 +6,7 @@
 -- D_POSITION nunca se modifica.
 
 local MIN_CONFIDENCE = 0.80
-local CHUNK_SEC = 180.0
+local CHUNK_SEC = 60.0
 local CHUNK_OVERLAP_SEC = 0.5
 local CURVE_SKIP_START_SEC = 0.10
 local CONSOLIDATE_MAX_SEC = 0.25
@@ -44,7 +44,13 @@ end
 local function run_chunk(masterFile,sourceFile,masterStart,sourceStart,duration)
   local exe=script_dir().."\\SmartAlignPostPrototype.exe"
   local cmd=quote(exe).." "..quote(masterFile).." "..quote(sourceFile).." "..quote(string.format("%.12f",masterStart)).." "..quote(string.format("%.12f",sourceStart)).." "..quote(string.format("%.6f",duration))
-  local code,out,norm=parse_process_output(reaper.ExecProcess(cmd,120000)); if code~=0 then return nil,norm end
+  local code,out,norm=parse_process_output(reaper.ExecProcess(cmd,120000))
+  if code~=0 then
+    if code==259 then
+      return nil,"timeout del analizador (>120 s) en un bloque de "..string.format("%.1f",duration).." s."
+    end
+    return nil,norm
+  end
   local curve={}; for t,ms,d,c in out:gmatch("POINT=([%+%-]?[%d%.]+),([%+%-]?[%d%.]+),([%+%-]?[%d%.]+),([%+%-]?[%d%.]+)") do curve[#curve+1]={time=tonumber(t),delayMs=tonumber(ms),delay=tonumber(d),confidence=tonumber(c)} end
   return {staticDelay=tonumber(out:match("DELAY_SAMPLES=([%+%-]?[%d%.]+)")) or 0,staticDelayMs=tonumber(out:match("DELAY_MS=([%+%-]?[%d%.]+)")) or 0,staticConfidence=tonumber(out:match("CONFIDENCE=([%+%-]?[%d%.]+)")) or 0,curve=curve},nil
 end
