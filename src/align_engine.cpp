@@ -160,7 +160,7 @@ double gccPhatDelay(const float* master,
     // For SOURCE delayed by +d samples, A*conj(B) has phase slope +d.
     // Subtract the coarse delay first so residual phase stays near zero and
     // can be unwrapped safely even for delays of several milliseconds.
-    double phaseDelay = refinedLag;
+    double phaseDelay = -refinedLag;
     double phaseWeightSum = 0.0;
     double phaseFreqSum = 0.0;
     double phaseSum = 0.0;
@@ -187,7 +187,7 @@ double gccPhatDelay(const float* master,
 
         const double raw = std::arg(
             cross * std::exp(Complex(0.0, -2.0 * kPi * freq *
-                                           refinedLag / sampleRate)));
+                                           phaseDelay / sampleRate)));
 
         if (!havePhase) {
             unwrapped = raw;
@@ -218,7 +218,7 @@ double gccPhatDelay(const float* master,
             const double slope =
                 (phaseFreqPhaseSum - phaseWeightSum * meanF * meanP) / denom;
             const double candidateDelay =
-                refinedLag + slope * sampleRate / (2.0 * kPi);
+                phaseDelay + slope * sampleRate / (2.0 * kPi);
 
             // Compute a weighted R^2-like phase-line quality.
             double ssTot = 0.0;
@@ -238,7 +238,7 @@ double gccPhatDelay(const float* master,
                 const double raw = std::arg(
                     crossSpectrum[k] *
                     std::exp(Complex(0.0, -2.0 * kPi * freq *
-                                           refinedLag / sampleRate)));
+                                           phaseDelay / sampleRate)));
                 if (!have) {
                     up = raw;
                     prev = raw;
