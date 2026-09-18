@@ -6,7 +6,7 @@
 -- Se evita alinear SOURCE contra SOURCE: cada cálculo se hace exclusivamente contra MASTER.
 
 local MIN_CONFIDENCE = 0.80
-local CHUNK_SEC = 60.0
+local CHUNK_SEC = 180.0
 local CHUNK_OVERLAP_SEC = 0.30
 local CURVE_SKIP_START_SEC = 0.12
 local CONSOLIDATE_MAX_SEC = 0.20
