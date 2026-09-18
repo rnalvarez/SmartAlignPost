@@ -9,6 +9,9 @@
 #include <vector>
 
 #ifdef _WIN32
+  #ifndef NOMINMAX
+    #define NOMINMAX
+  #endif
   #include <windows.h>
   #include <cstdio>
 #else
@@ -79,7 +82,7 @@ static void writeWav16(const std::filesystem::path& path,
 static std::string shellQuote(const std::string& s)
 {
 #ifdef _WIN32
-    return """ + s + """;
+    return "\"" + s + "\"";
 #else
     return "'" + s + "'";
 #endif
