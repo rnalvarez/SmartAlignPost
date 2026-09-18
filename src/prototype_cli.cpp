@@ -1,6 +1,7 @@
 #include "align_engine.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
@@ -124,20 +125,34 @@ bool loadWav(const std::string& path,
 
     const size_t requestedFrames = static_cast<size_t>(durationSeconds * static_cast<double>(out.sampleRate));
     const size_t maxFrames = std::min<size_t>(frames - requestedStart, requestedFrames);
-    out.mono.resize(maxFrames);
+    if (maxFrames == 0) {
+        error = "No hay frames disponibles para el tramo solicitado: " + path;
+        return false;
+    }
+
+    // Read the requested audio block in one I/O operation instead of issuing
+    // one f.read() call per audio frame. The previous implementation could
+    // perform millions of tiny reads on a long production WAV and dominate
+    // the DYNAMIC analysis time before the DSP even started.
+    const size_t bytesToRead = maxFrames * frameBytes;
+    std::vector<uint8_t> raw(bytesToRead);
 
     f.clear();
     f.seekg(dataPos + std::streamoff(requestedStart * frameBytes));
-    std::vector<uint8_t> frame(frameBytes);
-    for (size_t i = 0; i < maxFrames; ++i) {
-        f.read(reinterpret_cast<char*>(frame.data()), static_cast<std::streamsize>(frame.size()));
-        if (f.gcount() != static_cast<std::streamsize>(frame.size())) {
-            out.mono.resize(i);
-            break;
-        }
+    f.read(reinterpret_cast<char*>(raw.data()), static_cast<std::streamsize>(bytesToRead));
+    const size_t bytesRead = static_cast<size_t>(std::max<std::streamsize>(0, f.gcount()));
+    const size_t actualFrames = bytesRead / frameBytes;
+    if (actualFrames == 0) {
+        error = "No se pudieron leer frames del tramo solicitado: " + path;
+        return false;
+    }
+
+    out.mono.resize(actualFrames);
+    for (size_t i = 0; i < actualFrames; ++i) {
+        const uint8_t* frame = raw.data() + i * frameBytes;
         double sum = 0.0;
         for (int c = 0; c < out.channels; ++c)
-            sum += pcmSample(frame.data() + c * bytesPerSample, out.bitsPerSample, out.format);
+            sum += pcmSample(frame + c * bytesPerSample, out.bitsPerSample, out.format);
         out.mono[i] = static_cast<float>(sum / out.channels);
     }
     return true;
@@ -169,6 +184,8 @@ int main(int argc, char** argv) {
         return 2;
     }
 
+    const auto totalStart = std::chrono::steady_clock::now();
+
     double masterStart = 0.0;
     double sourceStart = 0.0;
     double duration = 60.0;
@@ -193,12 +210,14 @@ int main(int argc, char** argv) {
     }
 
     WavData master, source;
+    const auto loadStart = std::chrono::steady_clock::now();
     if (!loadWav(argv[1], master, error, masterStart, duration)) {
         emitError(error); return 3;
     }
     if (!loadWav(argv[2], source, error, sourceStart, duration)) {
         emitError(error); return 3;
     }
+    const auto loadEnd = std::chrono::steady_clock::now();
 
     if (master.sampleRate != source.sampleRate) {
         emitError("sample rates distintos (MASTER=" + std::to_string(master.sampleRate) +
@@ -235,10 +254,19 @@ int main(int argc, char** argv) {
         settings.maxSlewMsPerSecond = 20.0;
     }
 
+    const auto analyzeStart = std::chrono::steady_clock::now();
     const auto result = sap::AlignEngine::analyze(master.mono, source.mono, settings);
+    const auto analyzeEnd = std::chrono::steady_clock::now();
     const double staticDelayMs = result.staticDelaySamples * 1000.0 / settings.sampleRate;
+    const double loadMs = std::chrono::duration<double, std::milli>(loadEnd - loadStart).count();
+    const double analyzeMs = std::chrono::duration<double, std::milli>(analyzeEnd - analyzeStart).count();
+    const double totalMs = std::chrono::duration<double, std::milli>(
+        analyzeEnd - totalStart).count();
 
     std::cout << "MODE=" << (dynamic ? "DYNAMIC" : "STATIC") << "\n";
+    std::cout << "LOAD_MS=" << loadMs << "\n";
+    std::cout << "ANALYZE_MS=" << analyzeMs << "\n";
+    std::cout << "TOTAL_MS=" << totalMs << "\n";
     std::cout << "DELAY_MS=" << staticDelayMs << "\n";
     std::cout << "DELAY_SAMPLES=" << result.staticDelaySamples << "\n";
     std::cout << "CONFIDENCE=" << result.staticConfidence << "\n";
