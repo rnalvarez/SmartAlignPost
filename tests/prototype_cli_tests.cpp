@@ -9,14 +9,11 @@
 #include <vector>
 
 #ifdef _WIN32
+  #include <windows.h>
   #include <cstdio>
-  #define SAP_POPEN _popen
-  #define SAP_PCLOSE _pclose
 #else
   #include <cstdio>
   #include <sys/wait.h>
-  #define SAP_POPEN popen
-  #define SAP_PCLOSE pclose
 #endif
 
 static std::vector<float> makeSignal(size_t n)
@@ -88,6 +85,105 @@ static std::string shellQuote(const std::string& s)
 #endif
 }
 
+static bool runPrototype(const std::string& exe,
+                         const std::string& master,
+                         const std::string& source,
+                         std::string& output,
+                         int& exitCode)
+{
+#ifdef _WIN32
+    // Do not use _popen/cmd.exe on Windows here. It introduces shell parsing
+    // and can reinterpret the generated command line. The smoke test needs to
+    // exercise the prototype executable directly.
+    const auto outPath =
+        std::filesystem::temp_directory_path() / "smartalign_post_smoke_cli.txt";
+
+    HANDLE outHandle = CreateFileA(
+        outPath.string().c_str(),
+        GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        nullptr,
+        CREATE_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+    if (outHandle == INVALID_HANDLE_VALUE)
+        return false;
+
+    SetHandleInformation(outHandle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+
+    std::string cmd =
+        shellQuote(exe) + " " +
+        shellQuote(master) + " " +
+        shellQuote(source) +
+        " 0 0 24.0";
+
+    std::vector<char> cmdline(cmd.begin(), cmd.end());
+    cmdline.push_back('\0');
+
+    STARTUPINFOA si{};
+    PROCESS_INFORMATION pi{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdOutput = outHandle;
+    si.hStdError = outHandle;
+
+    const BOOL created = CreateProcessA(
+        nullptr,
+        cmdline.data(),
+        nullptr,
+        nullptr,
+        TRUE,
+        CREATE_NO_WINDOW,
+        nullptr,
+        nullptr,
+        &si,
+        &pi);
+
+    CloseHandle(outHandle);
+
+    if (!created) {
+        std::error_code ec;
+        std::filesystem::remove(outPath, ec);
+        return false;
+    }
+
+    WaitForSingleObject(pi.hProcess, INFINITE);
+
+    DWORD processCode = 1;
+    GetExitCodeProcess(pi.hProcess, &processCode);
+    exitCode = static_cast<int>(processCode);
+
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+
+    std::ifstream f(outPath, std::ios::binary);
+    output.assign((std::istreambuf_iterator<char>(f)),
+                  std::istreambuf_iterator<char>());
+
+    std::error_code ec;
+    std::filesystem::remove(outPath, ec);
+    return true;
+#else
+    const std::string command =
+        shellQuote(exe) + " " +
+        shellQuote(master) + " " +
+        shellQuote(source) +
+        " 0 0 24.0";
+
+    FILE* pipe = popen(command.c_str(), "r");
+    if (!pipe)
+        return false;
+
+    char buffer[4096];
+    while (std::fgets(buffer, sizeof(buffer), pipe))
+        output += buffer;
+
+    const int status = pclose(pipe);
+    exitCode = (WIFEXITED(status) ? WEXITSTATUS(status) : 1);
+    return true;
+#endif
+}
+
 int main(int argc, char** argv)
 {
     if (argc != 2) {
@@ -113,26 +209,12 @@ int main(int argc, char** argv)
         writeWav16(masterPath, master, sampleRate);
         writeWav16(sourcePath, source, sampleRate);
 
-        const std::string command =
-            shellQuote(argv[1]) + " " +
-            shellQuote(masterPath.string()) + " " +
-            shellQuote(sourcePath.string()) +
-            " 0 0 24.0";
-
-        FILE* pipe = SAP_POPEN(command.c_str(), "r");
-        if (!pipe) throw std::runtime_error("No se pudo iniciar SmartAlignPostPrototype");
-
         std::string output;
-        char buffer[4096];
-        while (std::fgets(buffer, sizeof(buffer), pipe))
-            output += buffer;
+        int status = 1;
+        if (!runPrototype(argv[1], masterPath.string(), sourcePath.string(), output, status))
+            throw std::runtime_error("No se pudo iniciar SmartAlignPostPrototype");
 
-        const int status = SAP_PCLOSE(pipe);
-#ifdef _WIN32
         const bool exitedOk = status == 0;
-#else
-        const bool exitedOk = WIFEXITED(status) && WEXITSTATUS(status) == 0;
-#endif
         if (!exitedOk) {
             std::cerr << "Prototype returned failure.\n" << output;
             return 2;
