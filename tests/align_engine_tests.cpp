@@ -170,10 +170,10 @@ int main()
         dynSettings.mode = sap::Mode::Dynamic;
         dynSettings.maxDelayMs = 12.0;
         dynSettings.analysisWindowMs = 120.0;
-        dynSettings.hopMs = 200.0;
+        dynSettings.hopMs = 100.0;
         dynSettings.minConfidence = 0.80;
-        dynSettings.smoothingMs = 180.0;
-        dynSettings.maxSlewMsPerSecond = 20.0;
+        dynSettings.smoothingMs = 100.0;
+        dynSettings.maxSlewMsPerSecond = 60.0;
 
         const auto dynResult = sap::AlignEngine::analyze(dynMaster, dynSource, dynSettings);
         if (dynResult.curve.size() < 5) {
@@ -195,6 +195,30 @@ int main()
         }
         std::cout << "DYNAMIC_TRACKING max_error=" << maxErr << " samples over "
                   << dynResult.curve.size() << " points\n";
+
+        // Cross-chunk seed regression: the second analysis starts from the
+        // last delay of the previous chunk instead of re-initializing from
+        // an unrelated local warm-up window.
+        sap::Settings seededSettings = dynSettings;
+        seededSettings.hasInitialDelaySamples = true;
+        seededSettings.initialDelaySamples = 52.0;
+        const size_t chunkSamples = static_cast<size_t>(5.0 * sr);
+        std::vector<float> seededMaster(dynMaster.begin(),
+                                        dynMaster.begin() + static_cast<std::ptrdiff_t>(chunkSamples));
+        std::vector<float> seededSource(dynSource.begin(),
+                                        dynSource.begin() + static_cast<std::ptrdiff_t>(chunkSamples));
+        const auto seeded = sap::AlignEngine::analyze(seededMaster, seededSource, seededSettings);
+        if (seeded.curve.empty()) {
+            std::cerr << "Seeded dynamic curve is empty\n";
+            return 12;
+        }
+        const double firstSeeded = seeded.curve.front().delaySamples;
+        if (std::abs(firstSeeded - seededSettings.initialDelaySamples) > 8.0) {
+            std::cerr << "Seeded dynamic continuity failed: first="
+                      << firstSeeded << " seed="
+                      << seededSettings.initialDelaySamples << "\n";
+            return 13;
+        }
     }
 
     // Constant-delay DYNAMIC regression using the production settings.
