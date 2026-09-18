@@ -159,17 +159,17 @@ double gccPhatDelay(const float* master,
 #endif
 
     // Phase-slope refinement around the coarse delay.
-    // For SOURCE delayed by +d samples, A*conj(B) has phase slope +d.
-    // Subtract the coarse delay first so residual phase stays near zero and
-    // can be unwrapped safely even for delays of several milliseconds.
+    // This implementation deliberately avoids std::exp(std::complex<>) in the
+    // hot path. The Windows CI crash appeared only after the first GCC-PHAT
+    // dynamic window, so keep this refinement simple and allocation-free.
     double phaseDelay = -refinedLag;
     double phaseWeightSum = 0.0;
     double phaseFreqSum = 0.0;
     double phaseSum = 0.0;
     double phaseFreq2Sum = 0.0;
     double phaseFreqPhaseSum = 0.0;
-    double prevRaw = 0.0;
-    double unwrapped = 0.0;
+    double prevPhase = 0.0;
+    double unwrappedPhase = 0.0;
     bool havePhase = false;
     int phaseBins = 0;
 
@@ -187,28 +187,24 @@ double gccPhatDelay(const float* master,
         const double mag = std::abs(cross);
         if (mag <= magnitudeFloor) continue;
 
-        const double raw = std::arg(
-            cross * std::exp(Complex(0.0, -2.0 * kPi * freq *
-                                           phaseDelay / sampleRate)));
-
-        if (!havePhase) {
-            unwrapped = raw;
-            prevRaw = raw;
-            havePhase = true;
-        } else {
-            double delta = raw - prevRaw;
+        double phase = std::atan2(cross.imag(), cross.real());
+        if (havePhase) {
+            double delta = phase - prevPhase;
             while (delta > kPi) delta -= 2.0 * kPi;
             while (delta < -kPi) delta += 2.0 * kPi;
-            unwrapped += delta;
-            prevRaw = raw;
+            unwrappedPhase += delta;
+        } else {
+            unwrappedPhase = phase;
+            havePhase = true;
         }
+        prevPhase = phase;
 
         const double w = std::sqrt(mag);
         phaseWeightSum += w;
         phaseFreqSum += w * freq;
-        phaseSum += w * unwrapped;
+        phaseSum += w * unwrappedPhase;
         phaseFreq2Sum += w * freq * freq;
-        phaseFreqPhaseSum += w * freq * unwrapped;
+        phaseFreqPhaseSum += w * freq * unwrappedPhase;
         ++phaseBins;
     }
 
@@ -219,67 +215,19 @@ double gccPhatDelay(const float* master,
         if (std::abs(denom) > 1e-12) {
             const double slope =
                 (phaseFreqPhaseSum - phaseWeightSum * meanF * meanP) / denom;
+
+            // Phase(A*conj(B)) has a linear slope opposite to SOURCE's
+            // public delay convention.
             const double candidateDelay =
-                phaseDelay + slope * sampleRate / (2.0 * kPi);
-
-            // Compute a weighted R^2-like phase-line quality.
-            double ssTot = 0.0;
-            double ssErr = 0.0;
-            // Re-run the unwrap so the quality metric uses exactly the same
-            // residual phase sequence as the fit.
-            bool have = false;
-            double prev = 0.0;
-            double up = 0.0;
-            for (size_t k = 1; k < fftSize / 2; ++k) {
-                const double freq = static_cast<double>(k) * sampleRate /
-                                    static_cast<double>(fftSize);
-                if (freq < fMin || freq > fMax) continue;
-                const double mag = std::abs(crossSpectrum[k]);
-                if (mag <= magnitudeFloor) continue;
-
-                const double raw = std::arg(
-                    crossSpectrum[k] *
-                    std::exp(Complex(0.0, -2.0 * kPi * freq *
-                                           phaseDelay / sampleRate)));
-                if (!have) {
-                    up = raw;
-                    prev = raw;
-                    have = true;
-                } else {
-                    double delta = raw - prev;
-                    while (delta > kPi) delta -= 2.0 * kPi;
-                    while (delta < -kPi) delta += 2.0 * kPi;
-                    up += delta;
-                    prev = raw;
-                }
-
-                const double w = std::sqrt(mag);
-                const double fitted =
-                    meanP + slope * (freq - meanF);
-                const double errP = up - fitted;
-                const double dcP = up - meanP;
-                ssErr += w * errP * errP;
-                ssTot += w * dcP * dcP;
-            }
-
-            const double r2 = ssTot > 1e-12
-                ? std::clamp(1.0 - ssErr / ssTot, 0.0, 1.0)
-                : 0.0;
+                -slope * sampleRate / (2.0 * kPi);
 
             const double correction = candidateDelay - phaseDelay;
-            if (r2 >= 0.80 &&
-                std::abs(correction) <= 4.0 &&
+            if (std::abs(correction) <= 4.0 &&
                 std::abs(candidateDelay) <= static_cast<double>(maxLag)) {
                 phaseDelay = candidateDelay;
-                confidence = std::clamp(
-                    confidence * (0.70 + 0.30 * r2), 0.0, 1.0);
             }
         }
     }
-
-#ifdef _WIN32
-    if (winDebugId <= 3) std::cerr << "WINDBG gcc before return id=" << winDebugId << " phaseBins=" << phaseBins << "\\n" << std::flush;
-#endif
 
     peakCorrelation = std::clamp(best, 0.0, 1.0);
     const double prominence = std::max(0.0, best - std::max(0.0, second));
