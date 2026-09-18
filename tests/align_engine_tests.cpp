@@ -169,11 +169,11 @@ int main()
         dynSettings.sampleRate = sr;
         dynSettings.mode = sap::Mode::Dynamic;
         dynSettings.maxDelayMs = 12.0;
-        dynSettings.analysisWindowMs = 120.0;
-        dynSettings.hopMs = 100.0;
+        dynSettings.analysisWindowMs = 80.0;
+        dynSettings.hopMs = 40.0;
         dynSettings.minConfidence = 0.80;
-        dynSettings.smoothingMs = 100.0;
-        dynSettings.maxSlewMsPerSecond = 60.0;
+        dynSettings.smoothingMs = 60.0;
+        dynSettings.maxSlewMsPerSecond = 120.0;
 
         const auto dynResult = sap::AlignEngine::analyze(dynMaster, dynSource, dynSettings);
         if (dynResult.curve.size() < 5) {
@@ -233,11 +233,11 @@ int main()
         dynamicConstant.sampleRate = sr;
         dynamicConstant.mode = sap::Mode::Dynamic;
         dynamicConstant.maxDelayMs = 12.0;
-        dynamicConstant.analysisWindowMs = 120.0;
-        dynamicConstant.hopMs = 200.0;
+        dynamicConstant.analysisWindowMs = 80.0;
+        dynamicConstant.hopMs = 40.0;
         dynamicConstant.minConfidence = 0.80;
-        dynamicConstant.smoothingMs = 180.0;
-        dynamicConstant.maxSlewMsPerSecond = 20.0;
+        dynamicConstant.smoothingMs = 60.0;
+        dynamicConstant.maxSlewMsPerSecond = 120.0;
 
         const auto constantResult =
             sap::AlignEngine::analyze(master, constantSource, dynamicConstant);
