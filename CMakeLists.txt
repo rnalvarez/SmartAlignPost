@@ -90,3 +90,5 @@ if(SAP_BUILD_PROTOTYPE)
 endif()
 
 # Re-run Windows prototype smoke test after direct process-launch fix
+
+# Trigger Windows package build after prototype smoke-test fix
