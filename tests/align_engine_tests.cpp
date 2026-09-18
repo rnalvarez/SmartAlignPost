@@ -58,6 +58,8 @@ int main()
     constexpr double speedOfSound = 343.0; // m/s, nominal test value
     constexpr size_t durationSamples = 48000 * 4;
 
+    std::cerr << "STAGE: baseline\\n" << std::flush;
+
     // Baseline exact delay test.
     constexpr int knownDelay = 173;
     auto master = makeTestSignal(durationSamples);
@@ -78,6 +80,8 @@ int main()
         std::cerr << "Confidence test failed: " << r.staticConfidence << "\n";
         return 1;
     }
+
+    std::cerr << "STAGE: distance sweep\\n" << std::flush;
 
     // Acoustic distance sweep. Two clips have identical duration and identical
     // source content; SOURCE is delayed only by the propagation time created by
@@ -124,6 +128,8 @@ int main()
                   << "/" << dr.staticTotalWindows << "\n";
     }
 
+    std::cerr << "STAGE: dynamic regression\\n" << std::flush;
+
     // Dynamic mode regression: it must still expose a non-empty delay curve.
     s.mode = sap::Mode::Dynamic;
     s.analysisWindowMs = 100.0;
@@ -133,6 +139,8 @@ int main()
         std::cerr << "Dynamic curve is empty\n";
         return 5;
     }
+
+    std::cerr << "STAGE: short buffer\\n" << std::flush;
 
     // Short-buffer regression (analyze()'s n < win branch): this path had
     // zero test coverage before. A clip shorter than one analysis window
@@ -161,6 +169,8 @@ int main()
             return 6;
         }
     }
+
+    std::cerr << "STAGE: dynamic tracking\\n" << std::flush;
 
     // Dynamic tracking regression: the curve must follow a genuinely
     // time-varying delay, not just exist (the earlier empty-curve check
@@ -235,6 +245,8 @@ int main()
         }
     }
 
+    std::cerr << "STAGE: constant dynamic\\n" << std::flush;
+
     // Constant-delay DYNAMIC regression using the production settings.
     // The new dynamic path seeds from a short warm-up instead of running a
     // full STATIC pass, so a constant source must still stay locked to the
@@ -272,6 +284,8 @@ int main()
         }
     }
 
+    std::cerr << "STAGE: fractional phase\\n" << std::flush;
+
     // Phase-slope refinement regression: a fractional delay should no longer
     // collapse to the nearest sample. The test signal is broadband and the
     // expected residual is deliberately tighter than one whole sample.
@@ -303,6 +317,8 @@ int main()
         std::cout << "FRACTIONAL_PHASE max_error="
                   << maxFractionalError << " samples\n";
     }
+
+    std::cerr << "STAGE: 44.1k\\n" << std::flush;
 
     // Non-48 kHz regression: estimateDelay() must use the caller-provided
     // sample rate for its DSP path rather than assuming 48 kHz.
