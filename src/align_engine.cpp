@@ -152,12 +152,6 @@ double gccPhatDelay(const float* master,
         }
     }
 
-#ifdef _WIN32
-    static int winDebugCalls = 0;
-    const int winDebugId = ++winDebugCalls;
-    if (winDebugId <= 3) std::cerr << "WINDBG gcc enter n=" << n << " fft=" << fftSize << "\\n" << std::flush;
-#endif
-
     // Phase-slope refinement around the coarse delay.
     // This implementation deliberately avoids std::exp(std::complex<>) in the
     // hot path. The Windows CI crash appeared only after the first GCC-PHAT
