@@ -112,10 +112,6 @@ double gccPhatDelay(const float* master,
         const double mag = std::abs(cross);
         A[k] = mag > 1e-12 ? cross / mag : Complex(0.0, 0.0);
     }
-        const Complex cross = A[k] * std::conj(B[k]);
-        const double mag = std::abs(cross);
-        A[k] = mag > 1e-12 ? cross / mag : Complex(0.0, 0.0);
-    }
 
     fft(A, true);
 
