@@ -33,6 +33,20 @@ static std::vector<float> delayed(const std::vector<float>& x, int samples)
     return y;
 }
 
+static std::vector<float> fractionallyDelayed(const std::vector<float>& x, double samples)
+{
+    std::vector<float> y(x.size(), 0.0f);
+    const int whole = static_cast<int>(std::floor(samples));
+    const double frac = samples - static_cast<double>(whole);
+    for (size_t i = static_cast<size_t>(std::max(whole + 1, 1)); i < x.size(); ++i) {
+        const size_t j = i - static_cast<size_t>(whole);
+        const float a = x[j];
+        const float b = j > 0 ? x[j - 1] : x[j];
+        y[i] = static_cast<float>((1.0 - frac) * a + frac * b);
+    }
+    return y;
+}
+
 static bool approx(double a, double b, double tolerance)
 {
     return std::abs(a - b) <= tolerance;
@@ -256,6 +270,38 @@ int main()
                       << maxConstantError << " samples\n";
             return 10;
         }
+    }
+
+    // Phase-slope refinement regression: a fractional delay should no longer
+    // collapse to the nearest sample. The test signal is broadband and the
+    // expected residual is deliberately tighter than one whole sample.
+    {
+        constexpr double fractionalDelay = 56.30;
+        auto fracSource = fractionallyDelayed(master, fractionalDelay);
+        sap::Settings fractional;
+        fractional.sampleRate = sr;
+        fractional.maxDelayMs = 12.0;
+        fractional.analysisWindowMs = 120.0;
+        fractional.hopMs = 40.0;
+        fractional.mode = sap::Mode::Dynamic;
+
+        const auto fr = sap::AlignEngine::analyze(master, fracSource, fractional);
+        if (fr.curve.empty()) {
+            std::cerr << "Fractional phase regression: empty curve\n";
+            return 14;
+        }
+        double maxFractionalError = 0.0;
+        for (const auto& p : fr.curve)
+            maxFractionalError = std::max(
+                maxFractionalError, std::abs(p.delaySamples - fractionalDelay));
+
+        if (maxFractionalError > 0.35) {
+            std::cerr << "Fractional phase refinement failed: max error "
+                      << maxFractionalError << " samples\n";
+            return 15;
+        }
+        std::cout << "FRACTIONAL_PHASE max_error="
+                  << maxFractionalError << " samples\n";
     }
 
     // Non-48 kHz regression: estimateDelay() must use the caller-provided
