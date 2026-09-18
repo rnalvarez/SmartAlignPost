@@ -259,10 +259,10 @@ int main(int argc, char** argv) {
     // hop provide adequate temporal resolution while reducing FFT work by
     // several times versus the original 200/100 ms configuration.
     if (dynamic) {
-        settings.analysisWindowMs = 120.0;
-        settings.hopMs = 100.0;
-        settings.smoothingMs = 100.0;
-        settings.maxSlewMsPerSecond = 60.0;
+        settings.analysisWindowMs = 80.0;
+        settings.hopMs = 40.0;
+        settings.smoothingMs = 60.0;
+        settings.maxSlewMsPerSecond = 120.0;
         settings.hasInitialDelaySamples = hasInitialDelay;
         settings.initialDelaySamples = initialDelaySamples;
     }
