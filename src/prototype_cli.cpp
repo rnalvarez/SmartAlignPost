@@ -179,8 +179,8 @@ void emitError(const std::string& message) {
 } // namespace
 
 int main(int argc, char** argv) {
-    if (argc != 3 && argc != 5 && argc != 6) {
-        emitError("Uso: SmartAlignPostPrototype.exe <MASTER.wav> <SOURCE.wav> [MASTER_START_SEC SOURCE_START_SEC [DURATION_SEC]]");
+    if (argc != 3 && argc != 5 && argc != 6 && argc != 7) {
+        emitError("Uso: SmartAlignPostPrototype.exe <MASTER.wav> <SOURCE.wav> [MASTER_START_SEC SOURCE_START_SEC [DURATION_SEC [INITIAL_DELAY_SAMPLES]]]");
         return 2;
     }
 
@@ -199,12 +199,23 @@ int main(int argc, char** argv) {
             emitError(error); return 6;
         }
     }
-    if (argc == 6) {
+    double initialDelaySamples = 0.0;
+    bool hasInitialDelay = false;
+    if (argc == 6 || argc == 7) {
         if (!parseNonNegative(argv[5], "DURATION_SEC", duration, error)) {
             emitError(error); return 6;
         }
         if (duration < 0.5 || duration > 180.0) {
             emitError("DURATION_SEC debe estar entre 0.5 y 180 segundos.");
+            return 6;
+        }
+    }
+    if (argc == 7) {
+        try {
+            initialDelaySamples = std::stod(argv[6]);
+            hasInitialDelay = true;
+        } catch (...) {
+            emitError(std::string("ERROR: valor inválido para INITIAL_DELAY_SAMPLES: ") + argv[6]);
             return 6;
         }
     }
@@ -249,9 +260,11 @@ int main(int argc, char** argv) {
     // several times versus the original 200/100 ms configuration.
     if (dynamic) {
         settings.analysisWindowMs = 120.0;
-        settings.hopMs = 200.0;
-        settings.smoothingMs = 180.0;
-        settings.maxSlewMsPerSecond = 20.0;
+        settings.hopMs = 100.0;
+        settings.smoothingMs = 100.0;
+        settings.maxSlewMsPerSecond = 60.0;
+        settings.hasInitialDelaySamples = hasInitialDelay;
+        settings.initialDelaySamples = initialDelaySamples;
     }
 
     const auto analyzeStart = std::chrono::steady_clock::now();
