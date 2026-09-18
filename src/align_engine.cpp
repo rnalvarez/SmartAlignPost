@@ -337,6 +337,44 @@ Result AlignEngine::analyze(const std::vector<float>& master,
 
     if (settings.mode == Mode::Static) return r;
 
+    // DYNAMIC does not need a full STATIC consensus pass first. That pass
+    // doubles the GCC-PHAT work for exactly the same windows and was a major
+    // throughput cost. Seed the tracker from the strongest of the first few
+    // windows, then run the dynamic pass once over the signal.
+    {
+        constexpr int kWarmupWindows = 5;
+        double seedConfidence = -1.0;
+        double seedDelay = 0.0;
+        double seedCorrelation = 0.0;
+        size_t warmupPos = 0;
+        int warmupCount = 0;
+
+        for (; warmupCount < kWarmupWindows && warmupPos + win <= n;
+             ++warmupCount, warmupPos += hop) {
+            double c = 0.0;
+            double peak = 0.0;
+            const double d = gccPhatDelay(master.data() + warmupPos,
+                                          source.data() + warmupPos,
+                                          win, maxLag, settings.sampleRate, c, peak);
+            const double score = c * peak;
+            if (score > seedConfidence) {
+                seedConfidence = score;
+                seedDelay = d;
+                seedCorrelation = peak;
+                r.staticConfidence = c;
+                r.staticAnalysisTimeSec =
+                    static_cast<double>(warmupPos) / settings.sampleRate;
+            }
+        }
+
+        if (warmupCount == 0) return r;
+
+        r.staticDelaySamples = seedDelay;
+        r.staticCorrelation = seedCorrelation;
+        r.staticSupportWindows = warmupCount;
+        r.staticTotalWindows = warmupCount;
+    }
+
     double previous = r.staticDelaySamples;
     for (size_t pos=0; pos+win<=n; pos+=hop) {
         double c=0.0;
