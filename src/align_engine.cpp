@@ -621,6 +621,59 @@ Result AlignEngine::analyze(
         return result;
     }
 
+    const bool knownRateDrift =
+        std::isfinite(settings.playbackRateRatio) &&
+        std::abs(settings.playbackRateRatio - 1.0) > 1.0e-6;
+
+    if (staticDelays.empty() && knownRateDrift &&
+        settings.mode != Mode::Static) {
+        // Recover a coarse absolute alignment even when the normal static
+        // confidence gate rejects every high-energy anchor. The known
+        // playback-rate drift is enough to establish the trajectory; we only
+        // need one trustworthy absolute phase offset to anchor it.
+        const auto coarseAnchors = selectTimelineAnchors(
+            master,
+            source,
+            window,
+            std::max<std::size_t>(
+                1,
+                static_cast<std::size_t>(
+                    std::llround(
+                        std::max(250.0, settings.hopMs) *
+                        settings.sampleRate / 1000.0))),
+            7);
+
+        Measurement bestMeasurement;
+        bool haveBest = false;
+
+        for (const auto& anchor : coarseAnchors) {
+            const Measurement m = measurePhase(
+                master,
+                source,
+                anchor.center,
+                window,
+                0.0,
+                -static_cast<double>(maxLag),
+                static_cast<double>(maxLag),
+                settings.sampleRate);
+
+            if (!haveBest || m.confidence > bestMeasurement.confidence) {
+                bestMeasurement = m;
+                haveBest = true;
+            }
+        }
+
+        if (haveBest && bestMeasurement.confidence >= 0.40) {
+            result.staticDelaySamples = bestMeasurement.finalDelay;
+            result.staticCorrelation = bestMeasurement.correlation;
+            result.staticConfidence = bestMeasurement.confidence;
+            staticDelays.push_back(bestMeasurement.finalDelay);
+            staticCorrelations.push_back(bestMeasurement.correlation);
+            staticConfidences.push_back(bestMeasurement.confidence);
+            result.staticSupportWindows = 1;
+        }
+    }
+
     if (staticDelays.empty()) {
         result.modeUsed = Mode::Static;
         return result;
@@ -713,9 +766,6 @@ Result AlignEngine::analyze(
     }
 
     const bool explicitDynamic = settings.mode == Mode::Dynamic;
-    const bool knownRateDrift =
-        std::isfinite(settings.playbackRateRatio) &&
-        std::abs(settings.playbackRateRatio - 1.0) > 1.0e-6;
 
     const bool needsDynamic = explicitDynamic ||
         knownRateDrift ||
@@ -762,7 +812,7 @@ Result AlignEngine::analyze(
     // quality of the static solution as the floor, with a conservative
     // absolute minimum.
     const double dynamicPointMinConfidence =
-        explicitDynamic
+        (explicitDynamic || knownRateDrift)
             ? std::max(
                 0.50,
                 std::min(
@@ -841,10 +891,6 @@ Result AlignEngine::analyze(
         // is weak on a short/quiet take. Anchor the deterministic slope to the
         // robust static delay and let the waveform tracker validate it whenever
         // it can.
-        const bool knownRateDrift =
-            std::isfinite(settings.playbackRateRatio) &&
-            std::abs(settings.playbackRateRatio - 1.0) > 1.0e-6;
-
         if (knownRateDrift &&
             settings.mode != Mode::Static &&
             !staticDelays.empty()) {
