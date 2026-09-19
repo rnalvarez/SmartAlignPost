@@ -242,6 +242,54 @@ int main()
         }
     }
 
+    std::cerr << "PHASE TEST: AUTO detects gradual drift\n";
+
+    {
+        constexpr double startDelay = 48.0;
+        constexpr double endDelay = 228.0;
+
+        const auto source =
+            varyingDelaySignal(
+                master,
+                startDelay,
+                endDelay);
+
+        sap::Settings s;
+        s.sampleRate = sr;
+        s.mode = sap::Mode::Auto;
+        s.maxDelayMs = 12.0;
+        s.analysisWindowMs = 60.0;
+        s.hopMs = 250.0;
+        s.minConfidence = 0.68;
+
+        const auto r =
+            sap::AlignEngine::analyze(master, source, s);
+
+        if (r.modeUsed != sap::Mode::Dynamic ||
+            r.curve.size() < 4) {
+            std::cerr
+                << "AUTO drift detection failed: mode="
+                << (r.modeUsed == sap::Mode::Dynamic ? "DYNAMIC" : "STATIC")
+                << " curve="
+                << r.curve.size()
+                << "\n";
+            return 8;
+        }
+
+        const double first = r.curve.front().delaySamples;
+        const double last = r.curve.back().delaySamples;
+
+        if (last - first < 120.0) {
+            std::cerr
+                << "AUTO drift trajectory too small: first="
+                << first
+                << " last="
+                << last
+                << "\n";
+            return 9;
+        }
+    }
+
     std::cerr << "PHASE TEST: noisy source\n";
 
     {
