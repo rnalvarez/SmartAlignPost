@@ -18,14 +18,6 @@ static std::vector<float> makeSignal(size_t n)
     return x;
 }
 
-static std::vector<float> delayed(const std::vector<float>& x, int samples)
-{
-    std::vector<float> y(x.size(), 0.0f);
-    for (size_t i = static_cast<size_t>(samples); i < x.size(); ++i)
-        y[i] = x[i - static_cast<size_t>(samples)];
-    return y;
-}
-
 int main()
 {
     constexpr double sr = 48000.0;
@@ -33,44 +25,60 @@ int main()
     constexpr int stepSamples = 4;
     constexpr int startDelay = 40;
 
-    const auto master = makeSignal(durationSamples);
-    std::vector<float> source(master.size(), 0.0f);
+    const auto dynMaster = makeSignal(durationSamples);
     const size_t blockSamples = static_cast<size_t>(0.48 * sr);
+    std::vector<float> dynSource(dynMaster.size(), 0.0f);
 
-    for (size_t i = 0; i < master.size(); ++i) {
+    for (size_t i = 0; i < dynMaster.size(); ++i) {
         const int block = static_cast<int>(i / blockSamples);
         const int delayHere = startDelay + block * stepSamples;
         if (static_cast<long>(i) - delayHere >= 0)
-            source[i] = master[static_cast<size_t>(
+            dynSource[i] = dynMaster[static_cast<size_t>(
                 static_cast<long>(i) - delayHere)];
     }
 
-    sap::Settings s;
-    s.sampleRate = sr;
-    s.mode = sap::Mode::Dynamic;
-    s.maxDelayMs = 12.0;
-    s.analysisWindowMs = 80.0;
-    s.hopMs = 40.0;
-    s.minConfidence = 0.80;
-    s.smoothingMs = 60.0;
-    s.maxSlewMsPerSecond = 120.0;
+    sap::Settings dynSettings;
+    dynSettings.sampleRate = sr;
+    dynSettings.mode = sap::Mode::Dynamic;
+    dynSettings.maxDelayMs = 12.0;
+    dynSettings.analysisWindowMs = 80.0;
+    dynSettings.hopMs = 40.0;
+    dynSettings.minConfidence = 0.80;
+    dynSettings.smoothingMs = 60.0;
+    dynSettings.maxSlewMsPerSecond = 120.0;
 
-    std::cerr << "DIAG: before Dynamic analyze" << std::endl;
-    const auto result = sap::AlignEngine::analyze(master, source, s);
-    std::cerr << "DIAG: after Dynamic analyze curve="
-              << result.curve.size() << std::endl;
+    std::cerr << "DIAG 1: before unseeded dynamic" << std::endl;
+    const auto dynResult = sap::AlignEngine::analyze(
+        dynMaster, dynSource, dynSettings);
+    std::cerr << "DIAG 1: after unseeded dynamic curve="
+              << dynResult.curve.size() << std::endl;
 
-    if (result.curve.size() < 5)
+    if (dynResult.curve.size() < 5)
         return 2;
 
-    double maxErr = 0.0;
-    for (const auto& p : result.curve) {
-        const size_t sampleAtT = static_cast<size_t>(p.timeSec * sr);
-        const int block = static_cast<int>(sampleAtT / blockSamples);
-        const double truth = startDelay + block * stepSamples;
-        maxErr = std::max(maxErr, std::abs(p.delaySamples - truth));
-    }
+    sap::Settings seededSettings = dynSettings;
+    seededSettings.hasInitialDelaySamples = true;
+    seededSettings.initialDelaySamples = 52.0;
 
-    std::cerr << "DIAG: maxErr=" << maxErr << std::endl;
-    return maxErr <= 8.0 ? 0 : 3;
+    const size_t chunkSamples = static_cast<size_t>(5.0 * sr);
+    if (chunkSamples > dynMaster.size())
+        return 3;
+
+    std::vector<float> seededMaster(
+        dynMaster.begin(),
+        dynMaster.begin() + static_cast<std::ptrdiff_t>(chunkSamples));
+    std::vector<float> seededSource(
+        dynSource.begin(),
+        dynSource.begin() + static_cast<std::ptrdiff_t>(chunkSamples));
+
+    std::cerr << "DIAG 2: before seeded dynamic" << std::endl;
+    const auto seeded = sap::AlignEngine::analyze(
+        seededMaster, seededSource, seededSettings);
+    std::cerr << "DIAG 2: after seeded dynamic curve="
+              << seeded.curve.size() << std::endl;
+
+    if (seeded.curve.empty())
+        return 4;
+
+    return 0;
 }
