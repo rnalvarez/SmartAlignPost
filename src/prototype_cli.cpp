@@ -176,11 +176,37 @@ void emitError(const std::string& message) {
     std::cout << "ERROR=" << message << "\n";
 }
 
+std::vector<float> resampleToProjectTime(
+    const std::vector<float>& native,
+    double playbackRate,
+    size_t outputFrames)
+{
+    std::vector<float> out(outputFrames, 0.0f);
+    if (native.empty() || playbackRate <= 0.0) return out;
+
+    for (size_t i = 0; i < outputFrames; ++i) {
+        const double srcIndex = static_cast<double>(i) * playbackRate;
+        if (srcIndex < 0.0 ||
+            srcIndex >= static_cast<double>(native.size())) {
+            break;
+        }
+
+        const size_t i0 = static_cast<size_t>(std::floor(srcIndex));
+        const size_t i1 = std::min(i0 + 1, native.size() - 1);
+        const double frac = srcIndex - static_cast<double>(i0);
+        out[i] = static_cast<float>(
+            (1.0 - frac) * native[i0] +
+            frac * native[i1]);
+    }
+
+    return out;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
-    if (argc != 3 && argc != 5 && argc != 6 && argc != 7) {
-        emitError("Uso: SmartAlignPostPrototype.exe <MASTER.wav> <SOURCE.wav> [MASTER_START_SEC SOURCE_START_SEC [DURATION_SEC [INITIAL_DELAY_SAMPLES]]]");
+    if (argc != 3 && argc != 5 && argc != 6 && argc != 7 && argc != 9) {
+        emitError("Uso: SmartAlignPostPrototype.exe <MASTER.wav> <SOURCE.wav> [MASTER_START_SEC SOURCE_START_SEC [DURATION_SEC [INITIAL_DELAY_SAMPLES [MASTER_PLAYRATE SOURCE_PLAYRATE]]]]");
         return 2;
     }
 
@@ -201,6 +227,8 @@ int main(int argc, char** argv) {
     }
     double initialDelaySamples = 0.0;
     bool hasInitialDelay = false;
+    double masterPlayRate = 1.0;
+    double sourcePlayRate = 1.0;
     if (argc == 6 || argc == 7) {
         if (!parseNonNegative(argv[5], "DURATION_SEC", duration, error)) {
             emitError(error); return 6;
@@ -210,7 +238,7 @@ int main(int argc, char** argv) {
             return 6;
         }
     }
-    if (argc == 7) {
+    if (argc == 7 || argc == 9) {
         try {
             initialDelaySamples = std::stod(argv[6]);
             hasInitialDelay = true;
@@ -220,12 +248,29 @@ int main(int argc, char** argv) {
         }
     }
 
+    if (argc == 9) {
+        try {
+            masterPlayRate = std::stod(argv[7]);
+            sourcePlayRate = std::stod(argv[8]);
+            if (masterPlayRate <= 0.0 || sourcePlayRate <= 0.0) {
+                emitError("MASTER_PLAYRATE y SOURCE_PLAYRATE deben ser > 0.");
+                return 6;
+            }
+        } catch (...) {
+            emitError("ERROR: valor inválido para MASTER_PLAYRATE/SOURCE_PLAYRATE.");
+            return 6;
+        }
+    }
+
     WavData master, source;
     const auto loadStart = std::chrono::steady_clock::now();
-    if (!loadWav(argv[1], master, error, masterStart, duration)) {
+    const double masterReadDuration = duration * masterPlayRate;
+    const double sourceReadDuration = duration * sourcePlayRate;
+
+    if (!loadWav(argv[1], master, error, masterStart, masterReadDuration)) {
         emitError(error); return 3;
     }
-    if (!loadWav(argv[2], source, error, sourceStart, duration)) {
+    if (!loadWav(argv[2], source, error, sourceStart, sourceReadDuration)) {
         emitError(error); return 3;
     }
     const auto loadEnd = std::chrono::steady_clock::now();
@@ -236,7 +281,18 @@ int main(int argc, char** argv) {
         return 4;
     }
 
-    const size_t n = std::min(master.mono.size(), source.mono.size());
+    // Convert both takes onto the same PROJECT-TIME sample grid. The source
+    // WAV itself may be played at a different D_PLAYRATE in REAPER. Without
+    // this normalization the analyzer compares two files at native speed and
+    // completely misses a non-destructive time-stretch applied to the SOURCE.
+    const size_t projectFrames = static_cast<size_t>(
+        std::floor(duration * master.sampleRate));
+    const auto masterProject = resampleToProjectTime(
+        master.mono, masterPlayRate, projectFrames);
+    const auto sourceProject = resampleToProjectTime(
+        source.mono, sourcePlayRate, projectFrames);
+
+    const size_t n = std::min(masterProject.size(), sourceProject.size());
     if (n < 1024) {
         emitError("señal demasiado corta para analizar después del offset seleccionado");
         return 5;
@@ -282,7 +338,7 @@ int main(int argc, char** argv) {
     }
 
     const auto analyzeStart = std::chrono::steady_clock::now();
-    const auto result = sap::AlignEngine::analyze(master.mono, source.mono, settings);
+    const auto result = sap::AlignEngine::analyze(masterProject, sourceProject, settings);
     const auto analyzeEnd = std::chrono::steady_clock::now();
     const double staticDelayMs = result.staticDelaySamples * 1000.0 / settings.sampleRate;
     const double loadMs = std::chrono::duration<double, std::milli>(loadEnd - loadStart).count();
@@ -314,7 +370,7 @@ int main(int argc, char** argv) {
             // scripts did) is a unit-conversion bug, not a valid seconds
             // conversion.
             const double sourceAbsoluteSec =
-                sourceStart + p.sourceTimeSec;
+                sourceStart + p.sourceTimeSec * sourcePlayRate;
             // Field order:
             // master-local-time, delayMs, delaySamples, confidence, keyPoint,
             // source-absolute-time.  The last field is the actual paired
