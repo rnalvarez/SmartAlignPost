@@ -320,19 +320,20 @@ int main(int argc, char** argv) {
     // hop provide adequate temporal resolution while reducing FFT work by
     // several times versus the original 200/100 ms configuration.
     if (dynamic) {
-        // High temporal resolution for a moving SOURCE. The measurement time
-        // is the window center; a 10 ms hop gives the warp frequent control
-        // points while the landmark pass adds exact acoustic anchors.
+        // The measurement is focused on the strongest short acoustic region
+        // inside each 40 ms window. A 20 ms hop halves FFT work versus the
+        // previous 10 ms grid while retaining adequate temporal resolution
+        // for microphone-distance movement.
         // Dynamic drift can exceed the nominal single-mic acoustic offset
         // during long takes or artificial rate-drift tests.
         settings.maxDelayMs = 40.0;
         settings.analysisWindowMs = 40.0;
-        settings.hopMs = 10.0;
+        settings.hopMs = 20.0;
         settings.smoothingMs = 10.0;
         settings.maxSlewMsPerSecond = 600.0;
         settings.dynamicFineWindowMs = 24.0;
         settings.dynamicEventFrameMs = 3.0;
-        settings.dynamicEventMinSeparationMs = 20.0;
+        settings.dynamicEventMinSeparationMs = 60.0;
         settings.dynamicEventMatchWindowMs = 15.0;
         settings.dynamicMicroWindowMs = 12.0;
         settings.dynamicMicroSearchMs = 3.0;
