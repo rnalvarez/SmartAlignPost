@@ -290,6 +290,46 @@ int main()
         }
     }
 
+    std::cerr << "PHASE TEST: known playback-rate drift stays dynamic\n";
+
+    {
+        const double expected = 120.0;
+        const auto source =
+            delaySignal(master, expected);
+
+        sap::Settings s;
+        s.sampleRate = sr;
+        s.mode = sap::Mode::Auto;
+        s.maxDelayMs = 12.0;
+        s.analysisWindowMs = 60.0;
+        s.hopMs = 250.0;
+        s.minConfidence = 0.72;
+        s.playbackRateRatio = 0.999;
+
+        const auto r =
+            sap::AlignEngine::analyze(master, source, s);
+
+        if (r.modeUsed != sap::Mode::Dynamic ||
+            r.curve.size() < 2) {
+            std::cerr
+                << "known-rate drift not kept dynamic: curve="
+                << r.curve.size()
+                << "\n";
+            return 10;
+        }
+
+        const double drift =
+            r.curve.back().delaySamples -
+            r.curve.front().delaySamples;
+
+        if (drift < 400.0 || drift > 700.0) {
+            std::cerr
+                << "known-rate drift unexpected: "
+                << drift << " samples\n";
+            return 11;
+        }
+    }
+
     std::cerr << "PHASE TEST: noisy source\n";
 
     {
