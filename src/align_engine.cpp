@@ -870,7 +870,7 @@ Result AlignEngine::analyze(const std::vector<float>& master,
         const auto prefixRms = [](const std::vector<double>& prefix,
                                   size_t start,
                                   size_t length) {
-            if (length == 0 || start + length >= prefix.size())
+            if (length == 0 || start + length > prefix.size())
                 return 0.0;
             return std::sqrt(
                 std::max(0.0,
@@ -935,13 +935,17 @@ Result AlignEngine::analyze(const std::vector<float>& master,
                     : prefixRms(masterEnergyPrefix,
                                 pos,
                                 win);
+            const double sourceFocusStart =
+                pos + focusCenter >= focusHalf
+                    ? pos + focusCenter - focusHalf
+                    : pos;
             const double sourceFocusEnergy =
-                prefixRms(
-                    sourceEnergyPrefix,
-                    pos + focusCenter < n
-                        ? pos + focusCenter - std::min(focusCenter, focusHalf)
-                        : pos,
-                    focusWindowSamples);
+                (sourceFocusStart + focusWindowSamples <= n)
+                    ? prefixRms(
+                        sourceEnergyPrefix,
+                        sourceFocusStart,
+                        focusWindowSamples)
+                    : 0.0;
 
             // Ignore windows dominated by room tone/silence.  This does not
             // stop the tracker; it simply holds the last trustworthy delay and
