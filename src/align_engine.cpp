@@ -884,6 +884,9 @@ Result AlignEngine::analyze(const std::vector<float>& master,
             const double localConfidence = std::clamp(local.score, 0.0, 1.0);
             const double effectiveConfidence =
                 std::max(c, localConfidence);
+            const double trackingMinConfidence =
+                std::min(settings.minConfidence,
+                         settings.dynamicTrackingMinConfidence);
 
             double residualTracked = residualDelay;
             if (localConfidence > 0.0) {
@@ -892,7 +895,7 @@ Result AlignEngine::analyze(const std::vector<float>& master,
 
             double d = previous + residualTracked;
 
-            if (effectiveConfidence < settings.minConfidence) {
+            if (effectiveConfidence < trackingMinConfidence) {
                 d = previous;
             } else {
                 const double maxStep =
@@ -1096,9 +1099,12 @@ Result AlignEngine::analyze(const std::vector<float>& master,
         double tracked = observations.front().delaySamples;
         double trackedTime = observations.front().timeSec;
         bool haveTracked = false;
+        const double curveTrackingMinConfidence =
+            std::min(settings.minConfidence,
+                     settings.dynamicTrackingMinConfidence);
 
         for (const auto& obs : observations) {
-            if (obs.confidence < settings.minConfidence && haveTracked)
+            if (obs.confidence < curveTrackingMinConfidence && haveTracked)
                 continue;
 
             if (!haveTracked) {
