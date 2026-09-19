@@ -29,25 +29,21 @@ static std::vector<float> delayed(const std::vector<float>& x, int samples)
 int main()
 {
     constexpr double sr = 48000.0;
-    constexpr size_t n = 4096;
-    constexpr int delay = 173;
+    constexpr size_t durationSamples = 48000 * 4;
+    constexpr int stepSamples = 4;
+    constexpr int startDelay = 40;
 
-    const auto master = makeSignal(n);
-    const auto source = delayed(master, delay);
+    const auto master = makeSignal(durationSamples);
+    std::vector<float> source(master.size(), 0.0f);
+    const size_t blockSamples = static_cast<size_t>(0.48 * sr);
 
-    std::cerr << "DIAG 1: before estimateDelay" << std::endl;
-    double confidence = 0.0;
-    const double measured = sap::AlignEngine::estimateDelay(
-        master.data(), source.data(), master.size(), 576, sr, confidence);
-    std::cerr << "DIAG 1: after estimateDelay delay=" << measured
-              << " confidence=" << confidence << std::endl;
-
-    if (std::abs(measured - delay) > 1.0)
-        return 1;
-
-    // Diagnostic step 1 only: isolate the native GCC-PHAT call on Windows.
-    // Do not enter AlignEngine::analyze() until this direct call is proven safe.
-    return 0;
+    for (size_t i = 0; i < master.size(); ++i) {
+        const int block = static_cast<int>(i / blockSamples);
+        const int delayHere = startDelay + block * stepSamples;
+        if (static_cast<long>(i) - delayHere >= 0)
+            source[i] = master[static_cast<size_t>(
+                static_cast<long>(i) - delayHere)];
+    }
 
     sap::Settings s;
     s.sampleRate = sr;
@@ -59,13 +55,22 @@ int main()
     s.smoothingMs = 60.0;
     s.maxSlewMsPerSecond = 120.0;
 
-    std::cerr << "DIAG 2: before tiny Dynamic analyze" << std::endl;
+    std::cerr << "DIAG: before Dynamic analyze" << std::endl;
     const auto result = sap::AlignEngine::analyze(master, source, s);
-    std::cerr << "DIAG 2: after tiny Dynamic analyze curve="
+    std::cerr << "DIAG: after Dynamic analyze curve="
               << result.curve.size() << std::endl;
 
-    if (result.curve.empty())
+    if (result.curve.size() < 5)
         return 2;
 
-    return 0;
+    double maxErr = 0.0;
+    for (const auto& p : result.curve) {
+        const size_t sampleAtT = static_cast<size_t>(p.timeSec * sr);
+        const int block = static_cast<int>(sampleAtT / blockSamples);
+        const double truth = startDelay + block * stepSamples;
+        maxErr = std::max(maxErr, std::abs(p.delaySamples - truth));
+    }
+
+    std::cerr << "DIAG: maxErr=" << maxErr << std::endl;
+    return maxErr <= 8.0 ? 0 : 3;
 }
