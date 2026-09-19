@@ -287,6 +287,7 @@ struct LocalRefinement
 {
     double delaySamples = 0.0;
     double score = 0.0;
+    double sharpness = 0.0;
 };
 
 LocalRefinement refinePairedWaveformDelay(
@@ -360,8 +361,28 @@ LocalRefinement refinePairedWaveformDelay(
         }
     }
 
+    const double bestScore = scores[static_cast<size_t>(best)];
+    double secondBest = 0.0;
+    for (int i = 0; i < static_cast<int>(scores.size()); ++i) {
+        if (std::abs(i - best) <= 2) continue;
+        secondBest = std::max(
+            secondBest,
+            scores[static_cast<size_t>(i)]);
+    }
+
+    const double sharpness =
+        bestScore > 1e-9
+            ? std::clamp(
+                (bestScore - secondBest) / bestScore,
+                0.0,
+                1.0)
+            : 0.0;
+
     result.delaySamples = refined;
-    result.score = scores[static_cast<size_t>(best)];
+    result.sharpness = sharpness;
+    // Confidence is not just correlation magnitude. A broad/ambiguous peak
+    // can have a high correlation but still give an unstable time estimate.
+    result.score = bestScore * (0.50 + 0.50 * sharpness);
     return result;
 }
 
@@ -891,10 +912,22 @@ Result AlignEngine::analyze(const std::vector<float>& master,
         // Predictive alignment keeps the correlated audio overlapped and lets
         // the curve follow the changing delay without requiring a huge FFT
         // window.
-        for (size_t pos = 0; pos + win <= n; pos += hop) {
-            // Find the strongest short acoustic region inside this window.
-            // The SOURCE uses the same relative focus position after the
-            // predicted delay has aligned the two windows.
+        // Dynamic tracking is primarily LOCAL.  The previous implementation
+        // ran GCC-PHAT over every 40 ms window, which was both expensive and
+        // vulnerable to unrelated energy/reverberation elsewhere in the window.
+        // We now lock onto the predicted delay with a focused waveform
+        // correlation. GCC-PHAT is used only periodically to re-center the
+        // search basin if necessary.
+        const size_t recaptureEvery = std::max<size_t>(
+            1,
+            static_cast<size_t>(
+                std::llround(
+                    settings.dynamicRecaptureIntervalMs /
+                    std::max(settings.hopMs, 1.0))));
+
+        size_t observationIndex = 0;
+
+        for (size_t pos = 0; pos + win <= n; pos += hop, ++observationIndex) {
             size_t focusCenter = win / 2;
             double bestFocusEnergy = 0.0;
 
@@ -925,12 +958,9 @@ Result AlignEngine::analyze(const std::vector<float>& master,
                     : prefixRms(masterEnergyPrefix,
                                 pos,
                                 win);
-            // Ignore windows dominated by room tone/silence.  MASTER is
-            // the absolute reference, so its local energy is the primary
-            // criterion for deciding where a warp control point is useful.
-            if (masterFocusEnergy < masterEnergyGate) {
+
+            if (masterFocusEnergy < masterEnergyGate)
                 continue;
-            }
 
             const long long predictedLag =
                 static_cast<long long>(std::llround(previous));
@@ -947,33 +977,54 @@ Result AlignEngine::analyze(const std::vector<float>& master,
             if (masterPos + win > n || sourcePos + win > n)
                 break;
 
-            double c = 0.0;
-            double peak = 0.0;
-            const double residualDelay = gccPhatDelay(
-                master.data() + masterPos,
-                source.data() + sourcePos,
-                win,
-                maxLag,
-                settings.sampleRate,
-                c,
-                peak);
-
-            // Refine around the most energetic acoustic region, not the
-            // arbitrary center of the 40 ms analysis window.
-            const LocalRefinement local = refinePairedWaveformDelay(
+            // Primary estimator: local waveform shape around the strongest
+            // MASTER focus. This is the part that needs sample/sub-sample
+            // accuracy for phase alignment.
+            LocalRefinement local = refinePairedWaveformDelay(
                 master.data() + masterPos,
                 source.data() + sourcePos,
                 win,
                 focusCenter,
-                residualDelay,
+                0.0,
                 settings.sampleRate,
                 settings.dynamicMicroWindowMs,
                 settings.dynamicMicroSearchMs);
 
-            const double localConfidence =
-                std::clamp(local.score, 0.0, 1.0);
+            // Periodic spectral recapture protects against a slow drift
+            // escaping the local +/-search basin. It is intentionally sparse
+            // to keep long-take analysis practical.
+            if (observationIndex % recaptureEvery == 0) {
+                double c = 0.0;
+                double peak = 0.0;
+                const double coarseResidual = gccPhatDelay(
+                    master.data() + masterPos,
+                    source.data() + sourcePos,
+                    win,
+                    maxLag,
+                    settings.sampleRate,
+                    c,
+                    peak);
+
+                const LocalRefinement recaptured =
+                    refinePairedWaveformDelay(
+                        master.data() + masterPos,
+                        source.data() + sourcePos,
+                        win,
+                        focusCenter,
+                        coarseResidual,
+                        settings.sampleRate,
+                        settings.dynamicMicroWindowMs,
+                        settings.dynamicMicroSearchMs);
+
+                // Prefer the recaptured result when its local peak is sharper
+                // than the predicted-basin result. This prevents GCC from
+                // dominating a good local phase estimate.
+                if (recaptured.score > local.score)
+                    local = recaptured;
+            }
+
             const double effectiveConfidence =
-                std::max(c, localConfidence);
+                local.score;
 
             const double trackingMinConfidence =
                 std::min(settings.minConfidence,
@@ -982,17 +1033,13 @@ Result AlignEngine::analyze(const std::vector<float>& master,
             if (effectiveConfidence < trackingMinConfidence)
                 continue;
 
-            double residualTracked = residualDelay;
-            if (localConfidence > 0.0)
-                residualTracked = local.delaySamples;
-
             const double maxStep =
                 settings.maxSlewMsPerSecond / 1000.0 *
                 (static_cast<double>(hop) / settings.sampleRate) *
                 settings.sampleRate;
 
             double d = std::clamp(
-                previous + residualTracked,
+                previous + local.delaySamples,
                 previous - maxStep,
                 previous + maxStep);
 
@@ -1005,9 +1052,6 @@ Result AlignEngine::analyze(const std::vector<float>& master,
                 1.0 - std::exp(-dt / tau);
             d = previous + alpha * (d - previous);
 
-            // Time reference is the energetic focus point.  This makes every
-            // emitted marker answer the question "where is the SOURCE at the
-            // moment that actually carries useful acoustic information?"
             const double observationTime =
                 (static_cast<double>(pos + focusCenter)) /
                 settings.sampleRate;
