@@ -713,7 +713,12 @@ Result AlignEngine::analyze(
     }
 
     const bool explicitDynamic = settings.mode == Mode::Dynamic;
+    const bool knownRateDrift =
+        std::isfinite(settings.playbackRateRatio) &&
+        std::abs(settings.playbackRateRatio - 1.0) > 1.0e-6;
+
     const bool needsDynamic = explicitDynamic ||
+        knownRateDrift ||
         staticSpread > dynamicThreshold ||
         coherentTemporalDrift;
 
