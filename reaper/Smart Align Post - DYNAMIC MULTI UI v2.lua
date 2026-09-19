@@ -13,8 +13,11 @@ local MIN_CONFIDENCE = 0.80
 local CHUNK_SEC = 5.0
 local CHUNK_OVERLAP_SEC = 1.0
 local CURVE_SKIP_START_SEC = 0.05
-local CONSOLIDATE_MAX_SEC = 0.04
-local CONSOLIDATE_MIN_DELTA_SAMPLES = 0.25
+-- Keep the temporal control grid dense enough to follow real motion of the
+-- SOURCE microphone. The analyzer now measures at 10 ms, so collapsing to
+-- 40 ms was unnecessarily low-pass filtering the physical delay trajectory.
+local CONSOLIDATE_MAX_SEC = 0.02
+local CONSOLIDATE_MIN_DELTA_SAMPLES = 0.10
 -- Ganancia adicional aplicada SOLO a la variación de delay durante el
 -- time-warp. 1.0 = curva medida; valores mayores hacen que REAPER adapte
 -- temporalmente el SOURCE con más decisión. El offset inicial permanece igual.
@@ -256,10 +259,10 @@ local function apply_source(r)
   local first = points[1]
   if not add_marker(0.0, first.delayMs) then return 0,false end
 
-  -- Insert the complete measured curve (now consolidated at a much finer
-  -- temporal resolution). More markers let REAPER follow small changes in
-  -- delay instead of approximating several hundred milliseconds with one
-  -- long stretch segment.
+  -- Insert the complete measured curve. The curve is deliberately
+  -- dense: moving the SOURCE changes the acoustic delay continuously, so
+  -- REAPER needs temporal control points throughout the item rather than
+  -- one global stretch ratio. Landmark points remain independent anchors.
   for _,p in ipairs(points) do
     local relative = p.time - r.sourcePos
     if relative > 0.001 and relative < itemLen - 0.001 then
