@@ -406,9 +406,7 @@ Measurement measurePhase(
         std::max(bestValue, 1.0e-9),
         0.0, 1.0);
 
-    const double localSearch = std::max(
-        1.0,
-        0.75 * sampleRate / 1000.0);
+    const double localSearch = 0.75;
 
     double bestWaveDelay = out.phatDelay;
     double bestCorrelation = -1.0;
