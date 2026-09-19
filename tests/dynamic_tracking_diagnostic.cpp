@@ -60,9 +60,8 @@ int main()
     seededSettings.hasInitialDelaySamples = true;
     seededSettings.initialDelaySamples = 52.0;
 
-    const size_t chunkSamples = static_cast<size_t>(5.0 * sr);
-    if (chunkSamples > dynMaster.size())
-        return 3;
+    const size_t chunkSamples = std::min(
+        static_cast<size_t>(5.0 * sr), dynMaster.size());
 
     std::vector<float> seededMaster(
         dynMaster.begin(),
