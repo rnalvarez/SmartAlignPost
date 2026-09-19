@@ -750,6 +750,21 @@ Result AlignEngine::analyze(
             ? settings.initialDelaySamples
             : result.staticDelaySamples;
 
+    // DYNAMIC tracking can be materially less confident than the robust
+    // static median, especially on short overlaps. Once a temporal drift is
+    // explicitly justified (e.g. D_PLAYRATE != 1.0), do not force every
+    // individual anchor to meet the full static confidence gate. Use the
+    // quality of the static solution as the floor, with a conservative
+    // absolute minimum.
+    const double dynamicPointMinConfidence =
+        explicitDynamic
+            ? std::max(
+                0.50,
+                std::min(
+                    settings.minConfidence,
+                    result.staticConfidence * 0.95))
+            : settings.minConfidence;
+
     std::size_t previousCenter = anchors.front().center;
 
     for (const auto& anchor : anchors) {
@@ -783,7 +798,7 @@ Result AlignEngine::analyze(
             first ? static_cast<double>(maxLag) : dynamicMax,
             settings.sampleRate);
 
-        if (m.confidence >= settings.minConfidence) {
+        if (m.confidence >= dynamicPointMinConfidence) {
             double acceptedDelay = m.finalDelay;
 
             if (!first) {
