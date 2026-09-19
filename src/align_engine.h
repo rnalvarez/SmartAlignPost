@@ -49,6 +49,11 @@ struct Result {
     double staticCorrelation = 0.0;
     int staticSupportWindows = 0;
     int staticTotalWindows = 0;
+    int scoutPoints = 0;
+    double scoutFirstDelaySamples = 0.0;
+    double scoutLastDelaySamples = 0.0;
+    double scoutR2 = 0.0;
+    bool scoutCoherent = false;
     std::vector<Point> curve;
     Mode modeUsed = Mode::Static;
 };
