@@ -872,9 +872,51 @@ Result AlignEngine::analyze(
             }
 
             result.scoutR2 = rSquared;
+
+            // A real microphone-distance drift does not have to be linear.
+            // R² alone can reject a genuine monotonic walk when movement
+            // accelerates, decelerates, or contains small local reversals.
+            const double directionDeadband =
+                std::max(1.0, dynamicThreshold * 0.25);
+
+            int positiveSteps = 0;
+            int negativeSteps = 0;
+            int meaningfulSteps = 0;
+
+            for (std::size_t i = 1; i < scout.size(); ++i) {
+                const double delta =
+                    scout[i].second - scout[i - 1].second;
+
+                if (std::abs(delta) < directionDeadband)
+                    continue;
+
+                ++meaningfulSteps;
+                if (delta > 0.0)
+                    ++positiveSteps;
+                else
+                    ++negativeSteps;
+            }
+
+            double directionConsistency = 0.0;
+            if (meaningfulSteps > 0) {
+                directionConsistency =
+                    static_cast<double>(
+                        std::max(positiveSteps, negativeSteps)) /
+                    static_cast<double>(meaningfulSteps);
+            }
+
+            result.scoutDirectionConsistency =
+                directionConsistency;
+
+            const bool linearEvidence = rSquared >= 0.45;
+            const bool monotonicEvidence =
+                meaningfulSteps >= 3 &&
+                directionConsistency >= 0.67;
+
             coherentTemporalDrift =
                 endToEnd > dynamicThreshold &&
-                rSquared >= 0.45;
+                (linearEvidence || monotonicEvidence);
+
             result.scoutCoherent = coherentTemporalDrift;
         }
     }
@@ -925,8 +967,13 @@ Result AlignEngine::analyze(
     // individual anchor to meet the full static confidence gate. Use the
     // quality of the static solution as the floor, with a conservative
     // absolute minimum.
+    const bool scoutJustifiedDynamic =
+        coherentTemporalDrift ||
+        explicitDynamic ||
+        knownRateDrift;
+
     const double dynamicPointMinConfidence =
-        (explicitDynamic || knownRateDrift)
+        scoutJustifiedDynamic
             ? std::max(
                 0.50,
                 std::min(
