@@ -830,9 +830,77 @@ Result AlignEngine::analyze(
     }
 
     if (result.curve.size() < 2) {
-        result.curve.clear();
-        result.modeUsed = Mode::Static;
-        return result;
+        // When the project already tells us that SOURCE is being played at a
+        // different rate, the temporal drift itself is known. Do not collapse
+        // that case back to STATIC just because the local acoustic confidence
+        // is weak on a short/quiet take. Anchor the deterministic slope to the
+        // robust static delay and let the waveform tracker validate it whenever
+        // it can.
+        const bool knownRateDrift =
+            std::isfinite(settings.playbackRateRatio) &&
+            std::abs(settings.playbackRateRatio - 1.0) > 1.0e-6;
+
+        if (knownRateDrift &&
+            settings.mode != Mode::Static &&
+            !staticDelays.empty()) {
+            result.curve.clear();
+
+            const auto timeline =
+                selectTimelineAnchors(
+                    master,
+                    source,
+                    window,
+                    std::max<std::size_t>(
+                        1,
+                        static_cast<std::size_t>(
+                            std::llround(
+                                std::max(250.0, settings.hopMs) *
+                                settings.sampleRate / 1000.0))),
+                    std::max<std::size_t>(
+                        2,
+                        std::min<std::size_t>(
+                            settings.maxDynamicAnchors,
+                            32)));
+
+            if (timeline.size() >= 2) {
+                const double durationSec =
+                    static_cast<double>(usable - 1) /
+                    settings.sampleRate;
+                const double centerTime =
+                    durationSec * 0.5;
+                const double slopePerSec =
+                    (1.0 - settings.playbackRateRatio) *
+                    settings.sampleRate;
+
+                for (const auto& anchor : timeline) {
+                    const double t =
+                        static_cast<double>(anchor.center) /
+                        settings.sampleRate;
+
+                    Point p;
+                    p.timeSec = t;
+                    p.delaySamples =
+                        result.staticDelaySamples +
+                        (t - centerTime) * slopePerSec;
+                    p.confidence =
+                        result.staticConfidence;
+                    p.keyPoint = true;
+                    p.phatDelaySamples =
+                        p.delaySamples;
+                    p.waveformDelaySamples =
+                        p.delaySamples;
+                    p.phaseAgreement = 1.0;
+
+                    result.curve.push_back(p);
+                }
+            }
+        }
+
+        if (result.curve.size() < 2) {
+            result.curve.clear();
+            result.modeUsed = Mode::Static;
+            return result;
+        }
     }
 
     // Preserve the static solution when the dynamic points are nearly
