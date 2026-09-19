@@ -25,6 +25,9 @@ struct Settings {
     std::size_t maxDynamicAnchors = 240;
     double phaseMinHz = 250.0;
     double phaseMaxHz = 7000.0;
+    // Known project-time playback-rate ratio SOURCE / MASTER. A value
+    // different from 1.0 is deterministic evidence of a temporal drift.
+    double playbackRateRatio = 1.0;
     bool hasInitialDelaySamples = false;
     double initialDelaySamples = 0.0;
 };
