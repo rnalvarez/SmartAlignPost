@@ -188,6 +188,7 @@ struct DynamicObservation
 {
     double timeSec = 0.0;
     double delaySamples = 0.0;
+    double sourceTimeSec = 0.0;
     double confidence = 0.0;
     bool keyPoint = false;
 };
@@ -867,6 +868,7 @@ Result AlignEngine::analyze(const std::vector<float>& master,
             observations.push_back({
                 observationTime,
                 d,
+                observationTime + d / settings.sampleRate,
                 c,
                 false
             });
@@ -1006,6 +1008,8 @@ Result AlignEngine::analyze(const std::vector<float>& master,
             observations.push_back({
                 event.timeSec,
                 refined.delaySamples,
+                event.timeSec +
+                    refined.delaySamples / settings.sampleRate,
                 refinedConfidence,
                 true
             });
@@ -1083,9 +1087,17 @@ Result AlignEngine::analyze(const std::vector<float>& master,
                 trackedTime = obs.timeSec;
             }
 
+            double mappedSourceTime =
+                obs.sourceTimeSec;
+            if (mappedSourceTime <= 0.0) {
+                mappedSourceTime =
+                    obs.timeSec + tracked / settings.sampleRate;
+            }
+
             r.curve.push_back({
                 obs.timeSec,
                 tracked,
+                mappedSourceTime,
                 obs.confidence,
                 obs.keyPoint
             });
