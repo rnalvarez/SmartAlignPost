@@ -13,12 +13,16 @@ local MIN_CONFIDENCE = 0.80
 local CHUNK_SEC = 5.0
 local CHUNK_OVERLAP_SEC = 1.0
 local CURVE_SKIP_START_SEC = 0.05
-local CONSOLIDATE_MAX_SEC = 0.04
-local CONSOLIDATE_MIN_DELTA_SAMPLES = 0.25
+-- Keep the temporal control grid dense enough to follow real motion of the
+-- SOURCE microphone. The analyzer now measures at 10 ms, so collapsing to
+-- 40 ms was unnecessarily low-pass filtering the physical delay trajectory.
+local CONSOLIDATE_MAX_SEC = 0.02
+local CONSOLIDATE_MIN_DELTA_SAMPLES = 0.10
 -- Ganancia adicional aplicada SOLO a la variación de delay durante el
 -- time-warp. 1.0 = curva medida; valores mayores hacen que REAPER adapte
 -- temporalmente el SOURCE con más decisión. El offset inicial permanece igual.
 local DYNAMIC_WARP_GAIN = 1.0
+local LANDMARK_WARP_VERSION = "LANDMARK WARP"
 local WIN_W, WIN_H = 920, 600
 
 local results = {}
@@ -63,7 +67,28 @@ local function run_chunk(masterFile,sourceFile,masterStart,sourceStart,duration,
     end
     return nil,norm
   end
-  local curve={}; for t,ms,d,c,k in out:gmatch("POINT=([%+%-]?[%d%.]+),([%+%-]?[%d%.]+),([%+%-]?[%d%.]+),([%+%-]?[%d%.]+),([01]?)") do curve[#curve+1]={time=tonumber(t),delayMs=tonumber(ms),delay=tonumber(d),confidence=tonumber(c),keyPoint=(k=="1")} end
+  local curve={}
+  for t,ms,d,c,k,src in out:gmatch("POINT=([%+%-]?[%d%.]+),([%+%-]?[%d%.]+),([%+%-]?[%d%.]+),([%+%-]?[%d%.]+),([01]?),([%+%-]?[%d%.]+)") do
+    curve[#curve+1]={
+      time=tonumber(t),
+      delayMs=tonumber(ms),
+      delay=tonumber(d),
+      confidence=tonumber(c),
+      keyPoint=(k=="1"),
+      sourceAbsoluteSec=tonumber(src)
+    }
+  end
+  if #curve==0 then
+    for t,ms,d,c,k in out:gmatch("POINT=([%+%-]?[%d%.]+),([%+%-]?[%d%.]+),([%+%-]?[%d%.]+),([%+%-]?[%d%.]+),([01]?)") do
+      curve[#curve+1]={
+        time=tonumber(t),
+        delayMs=tonumber(ms),
+        delay=tonumber(d),
+        confidence=tonumber(c),
+        keyPoint=(k=="1")
+      }
+    end
+  end
   return {staticDelay=tonumber(out:match("DELAY_SAMPLES=([%+%-]?[%d%.]+)")) or 0,staticDelayMs=tonumber(out:match("DELAY_MS=([%+%-]?[%d%.]+)")) or 0,staticConfidence=tonumber(out:match("CONFIDENCE=([%+%-]?[%d%.]+)")) or 0,curve=curve},nil
 end
 local function consolidate(points)
@@ -84,7 +109,8 @@ local function consolidate(points)
           delay=p.delay,
           delayMs=p.delayMs,
           confidence=p.confidence,
-          keyPoint=true
+          keyPoint=true,
+          sourceAbsoluteSec=p.sourceAbsoluteSec
         }
         out[#out+1]=anchor
         last=anchor
@@ -94,7 +120,8 @@ local function consolidate(points)
           delay=p.delay,
           delayMs=p.delayMs,
           confidence=p.confidence,
-          keyPoint=false
+          keyPoint=false,
+          sourceAbsoluteSec=p.sourceAbsoluteSec
         }
         out[#out+1]=last
       elseif last.keyPoint then
@@ -106,7 +133,8 @@ local function consolidate(points)
             delay=p.delay,
             delayMs=p.delayMs,
             confidence=p.confidence,
-            keyPoint=false
+            keyPoint=false,
+            sourceAbsoluteSec=p.sourceAbsoluteSec
           }
           out[#out+1]=last
         end
@@ -127,6 +155,11 @@ local function consolidate(points)
           last.time=p.time
           last.delay=(last.delay+p.delay)*0.5
           last.delayMs=(last.delayMs+p.delayMs)*0.5
+          if p.sourceAbsoluteSec and last.sourceAbsoluteSec then
+            last.sourceAbsoluteSec=(last.sourceAbsoluteSec+p.sourceAbsoluteSec)*0.5
+          elseif p.sourceAbsoluteSec then
+            last.sourceAbsoluteSec=p.sourceAbsoluteSec
+          end
         end
       end
     end
@@ -146,7 +179,19 @@ local function analyze_source(item,index)
     local a,e=run_chunk(masterPath,path,masterStart,sourceStart,duration,priorDelay); if not a then return nil,string.format("SOURCE #%d: %s",index,tostring(e)) end
     fallbackDelay,fallbackDelayMs,fallbackConf=a.staticDelay,a.staticDelayMs,a.staticConfidence
     if #a.curve>0 then priorDelay=a.curve[#a.curve].delay end
-    for _,p in ipairs(a.curve) do local abs=chunkStart+p.time; if abs>=commonStart+((first and 0) or CURVE_SKIP_START_SEC) and abs<commonEnd-0.05 then points[#points+1]={time=abs,delay=p.delay,delayMs=p.delayMs,confidence=p.confidence,keyPoint=p.keyPoint==true} end end
+    for _,p in ipairs(a.curve) do
+      local abs=chunkStart+p.time
+      if abs>=commonStart+((first and 0) or CURVE_SKIP_START_SEC) and abs<commonEnd-0.05 then
+        points[#points+1]={
+          time=abs,
+          delay=p.delay,
+          delayMs=p.delayMs,
+          confidence=p.confidence,
+          keyPoint=p.keyPoint==true,
+          sourceAbsoluteSec=p.sourceAbsoluteSec
+        }
+      end
+    end
     if commonEnd-chunkStart<=CHUNK_SEC+0.001 then break end; chunkStart=chunkStart+CHUNK_SEC-CHUNK_OVERLAP_SEC; first=false
   end
   local curve=consolidate(points); if #curve==0 then curve[1]={time=commonStart,delay=fallbackDelay,delayMs=fallbackDelayMs,confidence=fallbackConf,keyPoint=false} elseif curve[1].time>commonStart+1e-6 then table.insert(curve,1,{time=commonStart,delay=curve[1].delay,delayMs=curve[1].delayMs,confidence=curve[1].confidence,keyPoint=false}) end
@@ -158,7 +203,7 @@ local function analyze_selection()
   masterItem=reaper.GetSelectedMediaItem(0,0); masterPath,masterTake,masterErr=take_source_path(masterItem); if not masterPath then fail("MASTER: "..tostring(masterErr)); return end
   masterPos=reaper.GetMediaItemInfo_Value(masterItem,"D_POSITION"); masterLength=reaper.GetMediaItemInfo_Value(masterItem,"D_LENGTH"); masterOffs=reaper.GetMediaItemTakeInfo_Value(masterTake,"D_STARTOFFS"); masterRate=reaper.GetMediaItemTakeInfo_Value(masterTake,"D_PLAYRATE"); if masterRate<=0 then fail("PLAYRATE inválido en MASTER."); return end
   local low=0; for i=1,selectedCount-1 do local r,e=analyze_source(reaper.GetSelectedMediaItem(0,i),i); if not r then fail(e); return end; if r.minConfidence<MIN_CONFIDENCE then low=low+1 end; results[#results+1]=r end
-  analyzed=true; set_status(string.format("Analizados %d SOURCE(s) exclusivamente contra MASTER. %d con confidence < %.2f.",#results,low,MIN_CONFIDENCE),low>0 and "warn" or "ok")
+  analyzed=true; set_status(string.format("LANDMARK WARP: %d SOURCE(s) analizados contra MASTER. %d con confidence < %.2f.",#results,low,MIN_CONFIDENCE),low>0 and "warn" or "ok")
 end
 local function set_absolute_correction(item,startPos,originalPos,originalOffs,rate,delayMs)
   local take=reaper.GetActiveTake(item); if not take then return false end
@@ -226,12 +271,19 @@ local function apply_source(r)
       (delayMs - anchorDelayMs) * DYNAMIC_WARP_GAIN
   end
 
-  local function add_marker(itemTime, delayMs)
+  local function add_marker(itemTime, delayMs, directSourceAbsoluteSec)
     itemTime = math.max(0.0, math.min(itemLen, itemTime))
     local effectiveDelayMs = amplified_delay(delayMs)
     local correction = correction_seconds(effectiveDelayMs)
-    local baselineSrc = r.sourceOffs + itemTime * rate
-    local srcPos = baselineSrc + correction * rate
+    local srcPos
+    if directSourceAbsoluteSec then
+      -- LANDMARK WARP: use the measured MASTER->SOURCE correspondence
+      -- directly instead of reconstructing it from delay(t).
+      srcPos = directSourceAbsoluteSec
+    else
+      local baselineSrc = r.sourceOffs + itemTime * rate
+      srcPos = baselineSrc + correction * rate
+    end
 
     -- El mapeo fuente debe ser estrictamente creciente. El control de
     -- maxSlew del motor debería garantizarlo, pero protegemos el APPLY
@@ -254,23 +306,23 @@ local function apply_source(r)
   -- Boundary at the start: extend the first measured correction backwards
   -- so the whole item participates in the same mapping.
   local first = points[1]
-  if not add_marker(0.0, first.delayMs) then return 0,false end
+  if not add_marker(0.0, first.delayMs, first.sourceAbsoluteSec) then return 0,false end
 
-  -- Insert the complete measured curve (now consolidated at a much finer
-  -- temporal resolution). More markers let REAPER follow small changes in
-  -- delay instead of approximating several hundred milliseconds with one
-  -- long stretch segment.
+  -- Insert the complete measured curve. The curve is deliberately
+  -- dense: moving the SOURCE changes the acoustic delay continuously, so
+  -- REAPER needs temporal control points throughout the item rather than
+  -- one global stretch ratio. Landmark points remain independent anchors.
   for _,p in ipairs(points) do
     local relative = p.time - r.sourcePos
     if relative > 0.001 and relative < itemLen - 0.001 then
-      if not add_marker(relative, p.delayMs) then return inserted,false end
+      if not add_marker(relative, p.delayMs, p.sourceAbsoluteSec) then return inserted,false end
     end
   end
 
   -- Boundary at the end: hold the last measured correction through the tail.
   local last = points[#points]
   if itemLen > 0.001 then
-    if not add_marker(itemLen, last.delayMs) then return inserted,false end
+    if not add_marker(itemLen, last.delayMs, last.sourceAbsoluteSec) then return inserted,false end
   end
 
   reaper.UpdateItemInProject(r.item)
@@ -295,7 +347,7 @@ local function draw_button(x,y,w,h,label,enabled,primary)
   local tw=gfx.measurestr(label); text(x+(w-tw)/2,y+10,label,16,enabled and 245 or 135,enabled and 245 or 135,enabled and 250 or 135)
 end
 local function draw_ui()
-  rect(0,0,gfx.w,gfx.h,24,25,29); text(24,18,"SMART ALIGN POST",25,245,245,250); text(24,49,"DYNAMIC · MULTI SOURCE v2",15,160,170,185); text(24,73,"MASTER = referencia absoluta · nunca se modifica",14,195,200,210); text(24,94,"Corrección dinámica MASTER → cada SOURCE mediante time-warp",13,145,155,170)
+  rect(0,0,gfx.w,gfx.h,24,25,29); text(24,18,"SMART ALIGN POST",25,245,245,250); text(24,49,"DYNAMIC · MULTI SOURCE v2 · "..LANDMARK_WARP_VERSION,15,160,170,185); text(24,73,"MASTER = referencia absoluta · nunca se modifica",14,195,200,210); text(24,94,"Corrección dinámica MASTER → cada SOURCE mediante time-warp",13,145,155,170)
   local n=reaper.CountSelectedMediaItems(0); text(720,24,"Seleccionados: "..n,15,205,210,220); text(720,48,"MASTER: "..(masterItem and "OK" or "—"),14,160,175,185)
   local y=125; rect(18,y,gfx.w-36,32,45,47,53); text(28,y+8,"SOURCE",14,190,195,205); text(145,y+8,"PUNTOS",14,190,195,205); text(245,y+8,"MAX |DELAY|",14,190,195,205); text(400,y+8,"MIN CONF",14,190,195,205); text(535,y+8,"TRAMO",14,190,195,205); text(705,y+8,"STATE",14,190,195,205)
   local rowY=y+32; for i,r in ipairs(results) do if rowY>gfx.h-105 then break end; local good=r.minConfidence>=MIN_CONFIDENCE; rect(18,rowY,gfx.w-36,36,(i%2==0) and 34 or 30,34,39); text(28,rowY+9,"SOURCE "..r.index,14,235,235,240); text(145,rowY+9,tostring(r.pointCount),14,225,230,235); text(245,rowY+9,string.format("%.2f samp",r.maxAbsDelay),14,225,230,235); text(400,rowY+9,string.format("%.3f",r.minConfidence),14,good and 120 or 235,good and 220 or 170,good and 150 or 130); text(535,rowY+9,string.format("%.1f s",r.commonEnd-r.commonStart),14,210,215,225); text(705,rowY+9,applied and "APPLIED" or (good and "READY" or "CHECK"),14,applied and 120 or (good and 145 or 235),applied and 220 or (good and 205 or 170),applied and 155 or (good and 235 or 130)); rowY=rowY+36 end

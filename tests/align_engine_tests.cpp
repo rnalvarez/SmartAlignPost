@@ -47,6 +47,33 @@ static std::vector<float> fractionallyDelayed(const std::vector<float>& x, doubl
     return y;
 }
 
+static std::vector<float> linearlyTimeVaryingDelayed(
+    const std::vector<float>& x,
+    double startDelaySamples,
+    double endDelaySamples)
+{
+    std::vector<float> y(x.size(), 0.0f);
+    if (x.empty()) return y;
+
+    const double denom = std::max<size_t>(1, x.size() - 1);
+    for (size_t i = 1; i < x.size(); ++i) {
+        const double u = static_cast<double>(i) / denom;
+        const double delay = startDelaySamples +
+                             (endDelaySamples - startDelaySamples) * u;
+        const double sourcePos = static_cast<double>(i) - delay;
+        if (sourcePos < 1.0 ||
+            sourcePos >= static_cast<double>(x.size()))
+            continue;
+
+        const size_t j = static_cast<size_t>(std::floor(sourcePos));
+        const double frac = sourcePos - static_cast<double>(j);
+        y[i] = static_cast<float>(
+            (1.0 - frac) * x[j] +
+            frac * x[std::min(j + 1, x.size() - 1)]);
+    }
+    return y;
+}
+
 static bool approx(double a, double b, double tolerance)
 {
     return std::abs(a - b) <= tolerance;
@@ -211,6 +238,82 @@ int main()
 
         std::cout << "WAVEFORM_MICRO max_error="
                   << maxMicroError << " samples\n";
+    }
+
+    std::cerr << "STAGE: moving-source landmark warp\\n" << std::flush;
+
+    // A moving SOURCE is modeled as a continuously varying acoustic delay.
+    // The important property is not merely that the curve changes, but that
+    // the measured delay follows the known trajectory without the old
+    // 35-60 ms low-pass behavior.
+    {
+        constexpr double startDelay = 40.0;
+        constexpr double endDelay = 64.0;
+        auto movingSource =
+            linearlyTimeVaryingDelayed(master, startDelay, endDelay);
+
+        sap::Settings moving;
+        moving.sampleRate = sr;
+        moving.mode = sap::Mode::Dynamic;
+        moving.maxDelayMs = 12.0;
+        moving.analysisWindowMs = 40.0;
+        moving.hopMs = 10.0;
+        moving.minConfidence = 0.80;
+        moving.smoothingMs = 10.0;
+        moving.maxSlewMsPerSecond = 600.0;
+        moving.dynamicFineWindowMs = 24.0;
+        moving.dynamicEventFrameMs = 3.0;
+        moving.dynamicEventMinSeparationMs = 20.0;
+        moving.dynamicEventMatchWindowMs = 15.0;
+        moving.dynamicMicroWindowMs = 12.0;
+        moving.dynamicMicroSearchMs = 3.0;
+
+        const auto movingResult =
+            sap::AlignEngine::analyze(master, movingSource, moving);
+
+        if (movingResult.curve.size() < 10) {
+            std::cerr << "Moving-source curve too short: "
+                      << movingResult.curve.size() << "\n";
+            return 18;
+        }
+
+        double maxMovingError = 0.0;
+        double firstDelay = movingResult.curve.front().delaySamples;
+        double lastDelay = movingResult.curve.back().delaySamples;
+
+        for (const auto& p : movingResult.curve) {
+            const double truth =
+                startDelay +
+                (endDelay - startDelay) *
+                    std::clamp(
+                        p.timeSec / 4.0,
+                        0.0,
+                        1.0);
+            maxMovingError = std::max(
+                maxMovingError,
+                std::abs(p.delaySamples - truth));
+        }
+
+        // Verify that the curve actually follows the physical movement rather
+        // than collapsing to a static delay.
+        if (lastDelay - firstDelay < 14.0) {
+            std::cerr << "Moving-source warp stayed too flat: first="
+                      << firstDelay << " last=" << lastDelay << "\n";
+            return 19;
+        }
+
+        if (maxMovingError > 3.5) {
+            std::cerr << "Moving-source landmark warp failed: max error "
+                      << maxMovingError << " samples first=" << firstDelay
+                      << " last=" << lastDelay << "\n";
+            return 20;
+        }
+
+        std::cout << "MOVING_SOURCE_WARP max_error="
+                  << maxMovingError
+                  << " first=" << firstDelay
+                  << " last=" << lastDelay
+                  << " points=" << movingResult.curve.size() << "\n";
     }
 
     std::cerr << "STAGE: dynamic tracking\\n" << std::flush;

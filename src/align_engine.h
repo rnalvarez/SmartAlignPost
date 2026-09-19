@@ -18,11 +18,14 @@ struct Settings {
     double smoothingMs = 200.0;
     double maxSlewMsPerSecond = 8.0;
     // DYNAMIC multi-resolution refinement.
-    double dynamicFineWindowMs = 32.0;
-    double dynamicEventFrameMs = 5.0;
-    double dynamicEventMinSeparationMs = 45.0;
+    // DYNAMIC is landmark-driven: the delay curve should follow acoustic
+    // events closely enough to build a genuinely time-varying warp.
+    double dynamicFineWindowMs = 24.0;
+    double dynamicEventFrameMs = 3.0;
+    double dynamicEventMinSeparationMs = 20.0;
     double dynamicEventThreshold = 0.20;
-    double dynamicMicroWindowMs = 16.0;
+    double dynamicEventMatchWindowMs = 15.0;
+    double dynamicMicroWindowMs = 12.0;
     double dynamicMicroSearchMs = 3.0;
     bool hasInitialDelaySamples = false;
     double initialDelaySamples = 0.0;
@@ -31,6 +34,10 @@ struct Settings {
 struct Point {
     double timeSec = 0.0;
     double delaySamples = 0.0;
+    // Direct MASTER->SOURCE correspondence in the local analysis buffer.
+    // Keeping this explicitly avoids reconstructing the source map from a
+    // separately smoothed delay later in the REAPER Lua layer.
+    double sourceTimeSec = 0.0;
     double confidence = 0.0;
     bool keyPoint = false;
 };

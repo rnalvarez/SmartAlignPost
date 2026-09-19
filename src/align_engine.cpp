@@ -188,6 +188,7 @@ struct DynamicObservation
 {
     double timeSec = 0.0;
     double delaySamples = 0.0;
+    double sourceTimeSec = 0.0;
     double confidence = 0.0;
     bool keyPoint = false;
 };
@@ -275,6 +276,88 @@ double normalizedWindowCorrelation(
 
     if (daEnergy <= 1e-15 || dbEnergy <= 1e-15) return 0.0;
     return num / std::sqrt(daEnergy * dbEnergy);
+}
+
+struct LocalRefinement
+{
+    double delaySamples = 0.0;
+    double score = 0.0;
+};
+
+LocalRefinement refinePairedWaveformDelay(
+    const float* master,
+    const float* source,
+    size_t n,
+    size_t masterCenter,
+    double predictedDelaySamples,
+    double sampleRate,
+    double microWindowMs,
+    double searchMs)
+{
+    LocalRefinement result{predictedDelaySamples, 0.0};
+    if (n < 128 || sampleRate <= 0.0) return result;
+
+    const size_t windowSamples = std::max<size_t>(
+        96,
+        static_cast<size_t>(
+            sampleRate * microWindowMs / 1000.0));
+    const size_t halfWindow = windowSamples / 2;
+    if (halfWindow < 48) return result;
+
+    const int radius = std::max(
+        1,
+        static_cast<int>(
+            sampleRate * searchMs / 1000.0));
+    const int centerLag = static_cast<int>(
+        std::llround(predictedDelaySamples));
+
+    std::vector<double> scores(
+        static_cast<size_t>(2 * radius + 1),
+        0.0);
+
+    int validCount = 0;
+    for (int i = -radius; i <= radius; ++i) {
+        const int lag = centerLag + i;
+        const double raw = std::abs(
+            normalizedWindowCorrelation(
+                master, source, n, lag, masterCenter, halfWindow, false));
+        const double slope = std::abs(
+            normalizedWindowCorrelation(
+                master, source, n, lag, masterCenter, halfWindow, true));
+        const double score = 0.60 * raw + 0.40 * slope;
+        scores[static_cast<size_t>(i + radius)] = score;
+        if (score > 0.0) ++validCount;
+    }
+
+    if (validCount == 0) return result;
+
+    int best = radius;
+    for (int i = 1; i < static_cast<int>(scores.size()); ++i) {
+        if (scores[static_cast<size_t>(i)] >
+            scores[static_cast<size_t>(best)]) {
+            best = i;
+        }
+    }
+
+    const int bestLag = centerLag + (best - radius);
+    double refined = static_cast<double>(bestLag);
+
+    if (best > 0 && best + 1 < static_cast<int>(scores.size())) {
+        const double ym = scores[static_cast<size_t>(best - 1)];
+        const double y0 = scores[static_cast<size_t>(best)];
+        const double yp = scores[static_cast<size_t>(best + 1)];
+        const double denom = ym - 2.0 * y0 + yp;
+        if (std::abs(denom) > 1e-12) {
+            refined += std::clamp(
+                0.5 * (ym - yp) / denom,
+                -0.5,
+                0.5);
+        }
+    }
+
+    result.delaySamples = refined;
+    result.score = scores[static_cast<size_t>(best)];
+    return result;
 }
 
 double refineLocalWaveformDelay(
@@ -773,9 +856,19 @@ Result AlignEngine::analyze(const std::vector<float>& master,
             const double alpha = 1.0 - std::exp(-dt / tau);
             d = previous + alpha * (d - previous);
 
+            // GCC/micro correlation is measured over the whole window.
+            // Its temporal reference is therefore the window CENTER, not its
+            // left edge. Labeling it at 'pos' shifts every warp control point
+            // backwards by half a window and makes a changing acoustic delay
+            // look less variable than it really is.
+            const double observationTime =
+                (static_cast<double>(pos) +
+                 0.5 * static_cast<double>(win)) / settings.sampleRate;
+
             observations.push_back({
-                static_cast<double>(pos) / settings.sampleRate,
+                observationTime,
                 d,
+                observationTime + d / settings.sampleRate,
                 c,
                 false
             });
@@ -787,88 +880,136 @@ Result AlignEngine::analyze(const std::vector<float>& master,
         // windows (-10/0/+10 ms) make the estimate less sensitive to choosing
         // one exact frame boundary. These points become hard temporal anchors
         // for the REAPER warp instead of being averaged away by consolidation.
-        const auto events = detectDynamicEvents(master, settings.sampleRate, settings);
-        const size_t fineWin = std::max<size_t>(
-            256,
-            static_cast<size_t>(
-                settings.sampleRate * settings.dynamicFineWindowMs / 1000.0));
-        const int fineMaxLag = std::max(
-            1,
-            std::min<int>(requestedMaxLag,
-                          static_cast<int>(fineWin / 2) - 1));
-        const int localOffsetSamples = static_cast<int>(
-            settings.sampleRate * 0.010);
+        const auto masterEvents =
+            detectDynamicEvents(master, settings.sampleRate, settings);
+        const auto sourceEvents =
+            detectDynamicEvents(source, settings.sampleRate, settings);
 
-        for (const auto& event : events) {
-            const size_t center = static_cast<size_t>(
+        // Explicit MASTER -> SOURCE landmark correspondence.  We first use
+        // the dense baseline delay estimate to predict where the same acoustic
+        // event should appear in SOURCE, then pair it to the nearest SOURCE
+        // event inside a physically plausible neighborhood.  This turns an
+        // event into a direct time-map constraint:
+        //
+        //     MASTER event time  ->  SOURCE event time
+        //
+        // instead of merely asking GCC for the delay of a window around the
+        // MASTER event.
+        const double eventMatchRadius =
+            settings.sampleRate *
+            settings.dynamicEventMatchWindowMs / 1000.0;
+
+        auto baselineDelayAt = [&](double timeSec) {
+            if (observations.empty()) return previous;
+
+            auto it = std::lower_bound(
+                observations.begin(),
+                observations.end(),
+                timeSec,
+                [](const DynamicObservation& obs, double t) {
+                    return obs.timeSec < t;
+                });
+
+            if (it == observations.begin())
+                return it->delaySamples;
+            if (it == observations.end())
+                return observations.back().delaySamples;
+
+            const auto& hi = *it;
+            const auto& lo = *(it - 1);
+            const double span = std::max(
+                1e-6, hi.timeSec - lo.timeSec);
+            const double u = std::clamp(
+                (timeSec - lo.timeSec) / span,
+                0.0,
+                1.0);
+            return lo.delaySamples +
+                   (hi.delaySamples - lo.delaySamples) * u;
+        };
+
+        size_t sourceEventCursor = 0;
+
+        for (const auto& event : masterEvents) {
+            const size_t masterCenter = static_cast<size_t>(
                 std::llround(event.timeSec * settings.sampleRate));
-            if (center >= n) continue;
+            if (masterCenter >= n) continue;
 
-            double weightedDelay = 0.0;
-            double weightSum = 0.0;
-            double confidenceSum = 0.0;
-            int successful = 0;
+            const double predictedDelay =
+                baselineDelayAt(event.timeSec);
+            const double predictedSourceTime =
+                event.timeSec +
+                predictedDelay / settings.sampleRate;
 
-            for (const int offset : {
-                -localOffsetSamples, 0, localOffsetSamples
-            }) {
-                long long startSigned =
-                    static_cast<long long>(center) +
-                    static_cast<long long>(offset) -
-                    static_cast<long long>(fineWin / 2);
-
-                if (startSigned < 0)
-                    startSigned = 0;
-
-                if (startSigned + static_cast<long long>(fineWin) >
-                    static_cast<long long>(n)) {
-                    startSigned =
-                        static_cast<long long>(n) -
-                        static_cast<long long>(fineWin);
-                }
-
-                if (startSigned < 0) continue;
-
-                const size_t start =
-                    static_cast<size_t>(startSigned);
-
-                double c = 0.0;
-                double peak = 0.0;
-                double d = gccPhatDelay(
-                    master.data() + start,
-                    source.data() + start,
-                    fineWin,
-                    fineMaxLag,
-                    settings.sampleRate,
-                    c,
-                    peak);
-
-                if (c < settings.minConfidence)
-                    continue;
-
-                d = microRefine(
-                    master.data() + start,
-                    source.data() + start,
-                    fineWin,
-                    d);
-
-                const double w = std::max(0.01, c * peak);
-                weightedDelay += d * w;
-                weightSum += w;
-                confidenceSum += c;
-                ++successful;
+            while (sourceEventCursor + 1 < sourceEvents.size() &&
+                   sourceEvents[sourceEventCursor + 1].timeSec <
+                       predictedSourceTime) {
+                ++sourceEventCursor;
             }
 
-            if (successful == 0 || weightSum <= 0.0)
-                continue;
+            size_t bestSourceIndex = sourceEvents.size();
+            double bestDistanceSamples = eventMatchRadius + 1.0;
 
-            const double refinedDelay = weightedDelay / weightSum;
-            const double refinedConfidence =
-                confidenceSum / static_cast<double>(successful);
+            const size_t begin =
+                sourceEventCursor > 0 ? sourceEventCursor - 1
+                                      : sourceEventCursor;
+            const size_t end =
+                std::min(
+                    sourceEvents.size(),
+                    sourceEventCursor + 2);
+
+            for (size_t j = begin; j < end; ++j) {
+                const double distanceSamples =
+                    std::abs(
+                        sourceEvents[j].timeSec -
+                        predictedSourceTime) *
+                    settings.sampleRate;
+                if (distanceSamples < bestDistanceSamples) {
+                    bestDistanceSamples = distanceSamples;
+                    bestSourceIndex = j;
+                }
+            }
+
+            if (bestSourceIndex >= sourceEvents.size() ||
+                bestDistanceSamples > eventMatchRadius) {
+                continue;
+            }
+
+            const size_t sourceCenter = static_cast<size_t>(
+                std::llround(
+                    sourceEvents[bestSourceIndex].timeSec *
+                    settings.sampleRate));
+            if (sourceCenter >= n) continue;
+
+            const double eventDelay =
+                static_cast<double>(
+                    static_cast<long long>(sourceCenter) -
+                    static_cast<long long>(masterCenter));
+
+            const LocalRefinement refined =
+                refinePairedWaveformDelay(
+                    master.data(),
+                    source.data(),
+                    n,
+                    masterCenter,
+                    eventDelay,
+                    settings.sampleRate,
+                    settings.dynamicMicroWindowMs,
+                    settings.dynamicMicroSearchMs);
+
+            const double refinedConfidence = std::clamp(
+                0.70 * refined.score +
+                0.30 * event.strength,
+                0.0,
+                1.0);
+
+            if (refinedConfidence < settings.minConfidence)
+                continue;
 
             observations.push_back({
                 event.timeSec,
-                refinedDelay,
+                refined.delaySamples,
+                event.timeSec +
+                    refined.delaySamples / settings.sampleRate,
                 refinedConfidence,
                 true
             });
@@ -885,10 +1026,21 @@ Result AlignEngine::analyze(const std::vector<float>& master,
                 return a.keyPoint > b.keyPoint;
             });
 
-        // Final robust pass. Normal measurements remain gently smoothed;
-        // event anchors retain substantially more of the locally measured
-        // delay so the warp can react where the acoustic geometry actually
-        // changes.
+        // Build a LANDMARK-LOCKED delay map.  The old implementation
+        // smoothed every point and then partially pulled event anchors toward
+        // that smoothed state.  That is appropriate for noise suppression but
+        // it also suppresses the very delay changes we need when the SOURCE
+        // microphone moves relative to a fixed MASTER.
+        //
+        // Here:
+        //   * normal windows get only light continuity limiting;
+        //   * keyPoint landmarks use their locally measured delay directly;
+        //   * no exponential smoothing is applied after the acoustic
+        //     measurement has been refined.
+        //
+        // The resulting points are actual temporal constraints for the
+        // REAPER stretch map, rather than samples of a heavily low-passed
+        // delay estimate.
         r.curve.clear();
         r.curve.reserve(observations.size());
 
@@ -918,11 +1070,14 @@ Result AlignEngine::analyze(const std::vector<float>& master,
                     tracked + maxStep);
 
                 if (obs.keyPoint) {
-                    // Key points are strong local observations. Keep most of
-                    // their measurement instead of the slower baseline
-                    // exponential smoothing.
-                    tracked = tracked + 0.80 * (target - tracked);
+                    // A landmark is a measured MASTER<->SOURCE correspondence,
+                    // so do not blur it with neighbouring measurements.
+                    tracked = target;
                 } else {
+                    // Keep continuity protection, but retain almost all of
+                    // the local measurement. The CLI default is intentionally
+                    // short (10 ms), so a moving microphone is not forced into
+                    // a static-delay trajectory.
                     const double tau =
                         std::max(0.001, settings.smoothingMs / 1000.0);
                     const double alpha =
@@ -932,9 +1087,17 @@ Result AlignEngine::analyze(const std::vector<float>& master,
                 trackedTime = obs.timeSec;
             }
 
+            double mappedSourceTime =
+                obs.sourceTimeSec;
+            if (mappedSourceTime <= 0.0) {
+                mappedSourceTime =
+                    obs.timeSec + tracked / settings.sampleRate;
+            }
+
             r.curve.push_back({
                 obs.timeSec,
                 tracked,
+                mappedSourceTime,
                 obs.confidence,
                 obs.keyPoint
             });
