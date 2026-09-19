@@ -264,6 +264,7 @@ int main()
         moving.dynamicFineWindowMs = 24.0;
         moving.dynamicEventFrameMs = 3.0;
         moving.dynamicEventMinSeparationMs = 20.0;
+        moving.dynamicEventMatchWindowMs = 15.0;
         moving.dynamicMicroWindowMs = 12.0;
         moving.dynamicMicroSearchMs = 3.0;
 
