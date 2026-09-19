@@ -773,8 +773,17 @@ Result AlignEngine::analyze(const std::vector<float>& master,
             const double alpha = 1.0 - std::exp(-dt / tau);
             d = previous + alpha * (d - previous);
 
+            // GCC/micro correlation is measured over the whole window.
+            // Its temporal reference is therefore the window CENTER, not its
+            // left edge. Labeling it at 'pos' shifts every warp control point
+            // backwards by half a window and makes a changing acoustic delay
+            // look less variable than it really is.
+            const double observationTime =
+                (static_cast<double>(pos) +
+                 0.5 * static_cast<double>(win)) / settings.sampleRate;
+
             observations.push_back({
-                static_cast<double>(pos) / settings.sampleRate,
+                observationTime,
                 d,
                 c,
                 false
@@ -885,10 +894,21 @@ Result AlignEngine::analyze(const std::vector<float>& master,
                 return a.keyPoint > b.keyPoint;
             });
 
-        // Final robust pass. Normal measurements remain gently smoothed;
-        // event anchors retain substantially more of the locally measured
-        // delay so the warp can react where the acoustic geometry actually
-        // changes.
+        // Build a LANDMARK-LOCKED delay map.  The old implementation
+        // smoothed every point and then partially pulled event anchors toward
+        // that smoothed state.  That is appropriate for noise suppression but
+        // it also suppresses the very delay changes we need when the SOURCE
+        // microphone moves relative to a fixed MASTER.
+        //
+        // Here:
+        //   * normal windows get only light continuity limiting;
+        //   * keyPoint landmarks use their locally measured delay directly;
+        //   * no exponential smoothing is applied after the acoustic
+        //     measurement has been refined.
+        //
+        // The resulting points are actual temporal constraints for the
+        // REAPER stretch map, rather than samples of a heavily low-passed
+        // delay estimate.
         r.curve.clear();
         r.curve.reserve(observations.size());
 
@@ -918,11 +938,14 @@ Result AlignEngine::analyze(const std::vector<float>& master,
                     tracked + maxStep);
 
                 if (obs.keyPoint) {
-                    // Key points are strong local observations. Keep most of
-                    // their measurement instead of the slower baseline
-                    // exponential smoothing.
-                    tracked = tracked + 0.80 * (target - tracked);
+                    // A landmark is a measured MASTER<->SOURCE correspondence,
+                    // so do not blur it with neighbouring measurements.
+                    tracked = target;
                 } else {
+                    // Keep continuity protection, but retain almost all of
+                    // the local measurement. The CLI default is intentionally
+                    // short (10 ms), so a moving microphone is not forced into
+                    // a static-delay trajectory.
                     const double tau =
                         std::max(0.001, settings.smoothingMs / 1000.0);
                     const double alpha =
