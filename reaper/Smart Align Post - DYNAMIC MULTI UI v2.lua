@@ -51,6 +51,9 @@ local function parse_process_output(processResult)
 end
 local function run_chunk(masterFile,sourceFile,masterStart,sourceStart,duration,initialDelay)
   local exe=script_dir().."\\SmartAlignPostPrototype.exe"
+  if reaper.file_exists and not reaper.file_exists(exe) then
+    return nil,"No se encontró SmartAlignPostPrototype.exe en la misma carpeta del Lua.\\n\\nRuta buscada:\\n"..exe
+  end
   local cmd=quote(exe).." "..quote(masterFile).." "..quote(sourceFile).." "..quote(string.format("%.12f",masterStart)).." "..quote(string.format("%.12f",sourceStart)).." "..quote(string.format("%.6f",duration))
   if initialDelay~=nil then cmd=cmd.." "..quote(string.format("%.6f",initialDelay)) end
   local code,out,norm=parse_process_output(reaper.ExecProcess(cmd,120000))
