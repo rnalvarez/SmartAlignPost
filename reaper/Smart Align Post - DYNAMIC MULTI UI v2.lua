@@ -13,8 +13,12 @@ local MIN_CONFIDENCE = 0.80
 local CHUNK_SEC = 5.0
 local CHUNK_OVERLAP_SEC = 1.0
 local CURVE_SKIP_START_SEC = 0.10
-local CONSOLIDATE_MAX_SEC = 0.25
-local CONSOLIDATE_MIN_DELTA_SAMPLES = 1.0
+local CONSOLIDATE_MAX_SEC = 0.08
+local CONSOLIDATE_MIN_DELTA_SAMPLES = 0.25
+-- Ganancia adicional aplicada SOLO a la variación de delay durante el
+-- time-warp. 1.0 = curva medida; valores mayores hacen que REAPER adapte
+-- temporalmente el SOURCE con más decisión. El offset inicial permanece igual.
+local DYNAMIC_WARP_GAIN = 1.75
 local WIN_W, WIN_H = 920, 600
 
 local results = {}
@@ -161,10 +165,17 @@ local function apply_source(r)
   local inserted = 0
   local lastPos = -1e12
   local lastSrc = -1e12
+  local anchorDelayMs = points[1].delayMs
+
+  local function amplified_delay(delayMs)
+    return anchorDelayMs +
+      (delayMs - anchorDelayMs) * DYNAMIC_WARP_GAIN
+  end
 
   local function add_marker(itemTime, delayMs)
     itemTime = math.max(0.0, math.min(itemLen, itemTime))
-    local correction = correction_seconds(delayMs)
+    local effectiveDelayMs = amplified_delay(delayMs)
+    local correction = correction_seconds(effectiveDelayMs)
     local baselineSrc = r.sourceOffs + itemTime * rate
     local srcPos = baselineSrc + correction * rate
 
@@ -191,6 +202,10 @@ local function apply_source(r)
   local first = points[1]
   if not add_marker(0.0, first.delayMs) then return 0,false end
 
+  -- Insert the complete measured curve (now consolidated at a much finer
+  -- temporal resolution). More markers let REAPER follow small changes in
+  -- delay instead of approximating several hundred milliseconds with one
+  -- long stretch segment.
   for _,p in ipairs(points) do
     local relative = p.time - r.sourcePos
     if relative > 0.001 and relative < itemLen - 0.001 then
@@ -215,7 +230,7 @@ local function apply_results()
   local masterAfter=reaper.GetMediaItemInfo_Value(masterItem,"D_POSITION"); reaper.UpdateArrange(); reaper.Undo_EndBlock("Smart Align Post - DYNAMIC MULTI APPLY",-1)
   if math.abs(masterAfter-masterBefore)>1e-8 then failures=failures+1 end
   if failures>0 then set_status(string.format("APPLY: %d error(es). MASTER permaneció protegido.",failures),"error"); return end
-  applied=true; set_status(string.format("Aplicado contra MASTER: %d SOURCE(s), %d stretch markers. D_POSITION intacto. Time-warp DYNAMIC aplicado. Undo disponible.",#results,totalSplits),"ok")
+  applied=true; set_status(string.format("Aplicado contra MASTER: %d SOURCE(s), %d stretch markers. Warp x%.2f. D_POSITION intacto. Undo disponible.",#results,totalSplits,DYNAMIC_WARP_GAIN),"ok")
 end
 local function rgb(r,g,b) gfx.set(r/255,g/255,b/255,1) end
 local function rect(x,y,w,h,r,g,b) rgb(r,g,b); gfx.rect(x,y,w,h,1) end
