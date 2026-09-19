@@ -520,6 +520,61 @@ local function applyDynamic(job)
       itemTime + delayMs / 1000.0)
   end
 
+  -- The first/last measured anchors normally sit inside the common overlap.
+  -- Extrapolate only a short distance to the item boundaries; do not hold a
+  -- potentially stale interior delay over a long unmeasured region.
+  local function delayAtProjectTime(projectTime)
+    local t = projectTime - job.commonStart
+    local points = job.curve
+    if #points == 0 then
+      return job.delayMs or 0.0
+    end
+    if #points == 1 then
+      return points[1].delayMs
+    end
+
+    local first = points[1]
+    local second = points[2]
+    local penult = points[#points - 1]
+    local last = points[#points]
+
+    local edgeHorizon = 0.75
+    if t <= first.time then
+      if first.time - t <= edgeHorizon and
+         second.time > first.time + 1e-9 then
+        local u = (t - first.time) /
+                  (second.time - first.time)
+        return first.delayMs +
+               (second.delayMs - first.delayMs) * u
+      end
+      return first.delayMs
+    end
+
+    if t >= last.time then
+      if t - last.time <= edgeHorizon and
+         last.time > penult.time + 1e-9 then
+        local u = (t - last.time) /
+                  (last.time - penult.time)
+        return last.delayMs +
+               (last.delayMs - penult.delayMs) * u
+      end
+      return last.delayMs
+    end
+
+    for i = 1, #points - 1 do
+      local a = points[i]
+      local b = points[i + 1]
+      if t >= a.time and t <= b.time then
+        local u = (t - a.time) /
+                  math.max(1e-9, b.time - a.time)
+        return a.delayMs +
+               (b.delayMs - a.delayMs) * u
+      end
+    end
+
+    return last.delayMs
+  end
+
   local function addMarker(itemTime, delayMs)
     itemTime =
       math.max(0.0,
@@ -551,9 +606,9 @@ local function applyDynamic(job)
     return true
   end
 
-  local first = job.curve[1]
+  local firstDelay = delayAtProjectTime(itemPos)
   if not addMarker(
-      0.0, first.delayMs) then
+      0.0, firstDelay) then
     return false, "falló marker inicial"
   end
 
@@ -572,9 +627,10 @@ local function applyDynamic(job)
     end
   end
 
-  local last = job.curve[#job.curve]
+  local lastDelay =
+    delayAtProjectTime(itemPos + itemLen)
   if not addMarker(
-      itemLen, last.delayMs) then
+      itemLen, lastDelay) then
     return false, "falló marker final"
   end
 
