@@ -7,6 +7,10 @@
 -- D_POSITION nunca se modifica.
 
 local MIN_CONFIDENCE = 0.80
+-- Umbral interno para conservar una trayectoria DYNAMIC cuando el predictor
+-- mantiene el solapamiento pero la correlación real entre boom y lav es menor
+-- que el umbral de presentación de 0.80.
+local DYNAMIC_TRACKING_MIN_CONFIDENCE = 0.30
 -- Procesamos en bloques cortos para que REAPER no quede esperando más de 120 s
 -- aunque el equipo/archivo real sea mucho más lento que el smoke test de CI.
 -- El resultado final se consolida entre bloques; MASTER siempre es la referencia.
@@ -106,7 +110,7 @@ local function consolidate(points)
 
   local out,last={},nil
   for _,p in ipairs(points) do
-    if (p.confidence or 0)>=MIN_CONFIDENCE then
+    if (p.confidence or 0)>=DYNAMIC_TRACKING_MIN_CONFIDENCE then
       -- Key points are temporal anchors. Never average them with nearby
       -- ordinary measurements; they represent a locally refined acoustic
       -- event where the warp should have a control point.
@@ -219,8 +223,8 @@ local function analyze_selection()
         local middle = r.curve[math.max(1, math.floor((#r.curve + 1) / 2))].delayMs or first
         local last = r.curve[#r.curve].delayMs or middle
         trajectory[#trajectory+1] = string.format(
-          "S%d %.2f/%.2f/%.2f ms",
-          r.index, first, middle, last)
+          "S%d %.2f/%.2f/%.2f ms (conf %.3f)",
+          r.index, first, middle, last, r.minConfidence or 0)
       end
     end
     local suffix = #trajectory > 0
