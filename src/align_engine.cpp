@@ -832,27 +832,17 @@ Result AlignEngine::analyze(const std::vector<float>& master,
         // sub-window inside each analysis window.  Dynamic alignment should
         // be driven by these informative regions, not by silence/room tone.
         std::vector<double> masterEnergyPrefix(n + 1, 0.0);
-        std::vector<double> sourceEnergyPrefix(n + 1, 0.0);
         for (size_t i = 0; i < n; ++i) {
             const double m = master[i];
-            const double ss = source[i];
             masterEnergyPrefix[i + 1] =
                 masterEnergyPrefix[i] + m * m;
-            sourceEnergyPrefix[i + 1] =
-                sourceEnergyPrefix[i] + ss * ss;
         }
 
         const double masterGlobalRms =
             std::sqrt(masterEnergyPrefix[n] / static_cast<double>(n));
-        const double sourceGlobalRms =
-            std::sqrt(sourceEnergyPrefix[n] / static_cast<double>(n));
         const double masterEnergyGate =
             std::max(1e-10,
                      masterGlobalRms * settings.dynamicEnergyGateRatio);
-        const double sourceEnergyGate =
-            std::max(1e-10,
-                     sourceGlobalRms * settings.dynamicEnergyGateRatio);
-
         const size_t focusWindowSamples = std::max<size_t>(
             32,
             static_cast<size_t>(
@@ -935,23 +925,10 @@ Result AlignEngine::analyze(const std::vector<float>& master,
                     : prefixRms(masterEnergyPrefix,
                                 pos,
                                 win);
-            const double sourceFocusStart =
-                pos + focusCenter >= focusHalf
-                    ? pos + focusCenter - focusHalf
-                    : pos;
-            const double sourceFocusEnergy =
-                (sourceFocusStart + focusWindowSamples <= n)
-                    ? prefixRms(
-                        sourceEnergyPrefix,
-                        sourceFocusStart,
-                        focusWindowSamples)
-                    : 0.0;
-
-            // Ignore windows dominated by room tone/silence.  This does not
-            // stop the tracker; it simply holds the last trustworthy delay and
-            // lets the final curve interpolate between informative points.
-            if (masterFocusEnergy < masterEnergyGate ||
-                sourceFocusEnergy < sourceEnergyGate) {
+            // Ignore windows dominated by room tone/silence.  MASTER is
+            // the absolute reference, so its local energy is the primary
+            // criterion for deciding where a warp control point is useful.
+            if (masterFocusEnergy < masterEnergyGate) {
                 continue;
             }
 
