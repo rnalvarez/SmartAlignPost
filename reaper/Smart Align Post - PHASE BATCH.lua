@@ -226,7 +226,11 @@ end
 
 local function parse_output(output)
   local result = {
-    modeUsed = output:match("MODE_USED=([A-Z]+)") or "STATIC",
+    engineVersion = output:match("ENGINE_VERSION=([^%s]+)"),
+    modeRequested = output:match("MODE_REQUESTED=([A-Z]+)"),
+    modeEffective = output:match("MODE_EFFECTIVE=([A-Z]+)"),
+    modeUsed = output:match("MODE_USED=([A-Z]+)"),
+    rateRatio = tonumber(output:match("RATE_RATIO=([%+%-]?[%d%.eE]+)")),
     delaySamples = tonumber(output:match("DELAY_SAMPLES=([%+%-]?[%d%.]+)")) or 0.0,
     delayMs = tonumber(output:match("DELAY_MS=([%+%-]?[%d%.]+)")) or 0.0,
     confidence = tonumber(output:match("CONFIDENCE=([%+%-]?[%d%.]+)")) or 0.0,
@@ -299,6 +303,9 @@ local function analyze_job(job)
     return
   end
 
+  job.masterRate = masterRate
+  job.sourceRate = sourceRate
+
   local cmd =
     quote(exe) .. " " ..
     quote(job.masterPath) .. " " ..
@@ -356,11 +363,31 @@ local function analyze_job(job)
 
   local result = parse_output(output)
 
-  job.modeUsed = result.modeUsed
+  if not result.engineVersion then
+    job.status = "ERROR"
+    job.error = "El ejecutable no reportó ENGINE_VERSION. Reemplazá SmartAlignPostPrototype.exe por el del último artefacto."
+    return
+  end
+
+  job.engineVersion = result.engineVersion
+  job.modeRequested = result.modeRequested
+  job.modeEffective = result.modeEffective
+  job.modeUsed = result.modeUsed or "UNKNOWN"
+  job.rateRatio = result.rateRatio
   job.confidence = result.confidence
   job.delayMs = result.delayMs
   job.curve = result.curve
   job.analyzeMs = result.analyzeMs
+
+  if job.rateRatio and math.abs(job.rateRatio - 1.0) > 1e-6 and job.modeUsed ~= "DYNAMIC" then
+    job.status = "ERROR"
+    job.error = string.format(
+      "Inconsistencia del motor: RATE_RATIO=%.9f pero MODE_USED=%s.",
+      job.rateRatio,
+      job.modeUsed)
+    return
+  end
+
   job.status = "READY"
 
   if job.modeUsed == "DYNAMIC" and #job.curve >= 2 then
@@ -419,10 +446,24 @@ local function run_analysis(items)
         end
       end
 
+      local diagnostics = {}
+      for _, job in ipairs(jobs) do
+        diagnostics[#diagnostics + 1] = string.format(
+          "%s: rate %.6f/%.6f ratio %.6f · %s→%s→%s",
+          track_label(job.sourceTrack),
+          job.masterRate or 0.0,
+          job.sourceRate or 0.0,
+          job.rateRatio or 1.0,
+          job.modeRequested or "?",
+          job.modeEffective or "?",
+          job.modeUsed or "?")
+      end
+
       set_status(
         string.format(
-          "ANÁLISIS COMPLETO · %d/%d listos · %d DYNAMIC · %d con confidence < %.2f",
-          ready, #jobs, dynamic, low, MIN_CONFIDENCE),
+          "ANÁLISIS COMPLETO · %d/%d listos · %d DYNAMIC · %d con confidence < %.2f · %s",
+          ready, #jobs, dynamic, low, MIN_CONFIDENCE,
+          table.concat(diagnostics, " | ")),
         low > 0 and "warn" or "ok")
 
       return
