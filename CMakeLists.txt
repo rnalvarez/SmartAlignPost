@@ -71,23 +71,6 @@ if(SAP_BUILD_TESTS)
     add_test(NAME SmartAlignEngineTests COMMAND smartalign_engine_tests)
     set_tests_properties(SmartAlignEngineTests PROPERTIES TIMEOUT 30)
 
-    if(WIN32 AND MSVC)
-        # Diagnostic build only: temporarily disable the new phase-slope block
-        # in the native test binaries. The VST3 target remains unchanged.
-
-        add_executable(smartalign_dynamic_diagnostic
-            tests/dynamic_tracking_diagnostic.cpp
-            src/align_engine.cpp
-        )
-        target_include_directories(smartalign_dynamic_diagnostic PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-        target_compile_definitions(smartalign_dynamic_diagnostic PRIVATE
-            SAP_GCC_DIAGNOSTIC=1
-        )
-        target_compile_options(smartalign_dynamic_diagnostic PRIVATE /Od /Zi)
-        add_test(NAME SmartAlignDynamicDiagnostic COMMAND smartalign_dynamic_diagnostic)
-        set_tests_properties(SmartAlignDynamicDiagnostic PROPERTIES TIMEOUT 30)
-    endif()
-
     if(SAP_BUILD_PROTOTYPE)
         add_executable(smartalign_prototype_tests
             tests/prototype_cli_tests.cpp
