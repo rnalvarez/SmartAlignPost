@@ -22,7 +22,7 @@ local CONSOLIDATE_MIN_DELTA_SAMPLES = 0.10
 -- time-warp. 1.0 = curva medida; valores mayores hacen que REAPER adapte
 -- temporalmente el SOURCE con más decisión. El offset inicial permanece igual.
 local DYNAMIC_WARP_GAIN = 1.0
-local LANDMARK_WARP_VERSION = "LANDMARK WARP"
+local LANDMARK_WARP_VERSION = "LANDMARK WARP v3 · RATE AWARE"
 local WIN_W, WIN_H = 920, 600
 
 local results = {}
@@ -53,13 +53,20 @@ local function parse_process_output(processResult)
   if e then return tonumber((n:sub(1,e-1)):match("^%s*(%-?%d+)%s*$")),n:sub(e+1),n end
   return tonumber(n:match("^%s*(%-?%d+)%s*$")),"",n
 end
-local function run_chunk(masterFile,sourceFile,masterStart,sourceStart,duration,initialDelay)
+local function run_chunk(masterFile,sourceFile,masterStart,sourceStart,duration,initialDelay,masterRate,sourceRate)
+  masterRate=masterRate or 1.0
+  sourceRate=sourceRate or 1.0
   local exe=script_dir().."\\SmartAlignPostPrototype.exe"
   if reaper.file_exists and not reaper.file_exists(exe) then
     return nil,"No se encontró SmartAlignPostPrototype.exe en la misma carpeta del Lua.\\n\\nRuta buscada:\\n"..exe
   end
   local cmd=quote(exe).." "..quote(masterFile).." "..quote(sourceFile).." "..quote(string.format("%.12f",masterStart)).." "..quote(string.format("%.12f",sourceStart)).." "..quote(string.format("%.6f",duration))
-  if initialDelay~=nil then cmd=cmd.." "..quote(string.format("%.6f",initialDelay)) end
+  -- The prototype analyzes audio in PROJECT TIME. Pass the existing take
+  -- playback rates so a non-destructive REAPER time-stretch is included in
+  -- the measurement instead of being mistaken for static drift.
+  cmd=cmd.." "..quote(string.format("%.6f",initialDelay or 0.0))
+      .." "..quote(string.format("%.9f",masterRate))
+      .." "..quote(string.format("%.9f",sourceRate))
   local code,out,norm=parse_process_output(reaper.ExecProcess(cmd,120000))
   if code~=0 then
     if code==259 then
@@ -176,7 +183,7 @@ local function analyze_source(item,index)
   while chunkStart<commonEnd-0.05 do
     local duration=math.min(CHUNK_SEC,commonEnd-chunkStart); if duration<0.5 then break end
     local masterStart=masterOffs+(chunkStart-masterPos)*masterRate; local sourceStart=offs+(chunkStart-pos)*rate
-    local a,e=run_chunk(masterPath,path,masterStart,sourceStart,duration,priorDelay); if not a then return nil,string.format("SOURCE #%d: %s",index,tostring(e)) end
+    local a,e=run_chunk(masterPath,path,masterStart,sourceStart,duration,priorDelay,masterRate,rate); if not a then return nil,string.format("SOURCE #%d: %s",index,tostring(e)) end
     fallbackDelay,fallbackDelayMs,fallbackConf=a.staticDelay,a.staticDelayMs,a.staticConfidence
     if #a.curve>0 then priorDelay=a.curve[#a.curve].delay end
     for _,p in ipairs(a.curve) do
@@ -254,6 +261,11 @@ local function apply_source(r)
   local rate = r.sourceRate
   if rate <= 0 or itemLen <= 0 then return 0,false end
 
+  -- LANDMARK WARP owns the complete time map. Reset any pre-existing global
+  -- playrate so the measured stretch is not applied twice; the local rate
+  -- then comes exclusively from the stretch-marker source-position map.
+  reaper.SetMediaItemTakeInfo_Value(take, "D_PLAYRATE", 1.0)
+
   local function correction_seconds(delayMs)
     return (delayMs / 1000.0)
   end
@@ -303,10 +315,11 @@ local function apply_source(r)
     return true
   end
 
-  -- Boundary at the start: extend the first measured correction backwards
-  -- so the whole item participates in the same mapping.
+  -- Boundary at the start: the first measured landmark may be a few ms
+  -- inside the item. Reconstruct t=0 from its measured delay rather than
+  -- reusing the later absolute source position.
   local first = points[1]
-  if not add_marker(0.0, first.delayMs, first.sourceAbsoluteSec) then return 0,false end
+  if not add_marker(0.0, first.delayMs, nil) then return 0,false end
 
   -- Insert the complete measured curve. The curve is deliberately
   -- dense: moving the SOURCE changes the acoustic delay continuously, so
@@ -319,10 +332,10 @@ local function apply_source(r)
     end
   end
 
-  -- Boundary at the end: hold the last measured correction through the tail.
+  -- Boundary at the end: reconstruct the endpoint from its delay.
   local last = points[#points]
   if itemLen > 0.001 then
-    if not add_marker(itemLen, last.delayMs, last.sourceAbsoluteSec) then return inserted,false end
+    if not add_marker(itemLen, last.delayMs, nil) then return inserted,false end
   end
 
   reaper.UpdateItemInProject(r.item)
