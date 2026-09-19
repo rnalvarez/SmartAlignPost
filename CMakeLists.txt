@@ -74,7 +74,6 @@ if(SAP_BUILD_TESTS)
     if(WIN32 AND MSVC)
         # Diagnostic build only: temporarily disable the new phase-slope block
         # in the native test binaries. The VST3 target remains unchanged.
-        target_compile_definitions(smartalign_engine_tests PRIVATE SAP_DISABLE_PHASE_REFINE=1)
 
         add_executable(smartalign_dynamic_diagnostic
             tests/dynamic_tracking_diagnostic.cpp
@@ -82,7 +81,6 @@ if(SAP_BUILD_TESTS)
         )
         target_include_directories(smartalign_dynamic_diagnostic PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
         target_compile_definitions(smartalign_dynamic_diagnostic PRIVATE
-            SAP_DISABLE_PHASE_REFINE=1
             SAP_GCC_DIAGNOSTIC=1
         )
         target_compile_options(smartalign_dynamic_diagnostic PRIVATE /Od /Zi)
