@@ -432,6 +432,8 @@ int main(int argc, char** argv)
     settings.anchorSeparationMs = 180.0;
     settings.staticAnchorCount = 8;
     settings.maxDynamicAnchors = 240;
+    settings.playbackRateRatio =
+        sourceRate / std::max(1.0e-12, masterRate);
     settings.hasInitialDelaySamples = false;
     settings.initialDelaySamples = 0.0;
 
