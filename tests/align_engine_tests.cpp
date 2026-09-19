@@ -322,7 +322,9 @@ int main()
             r.curve.back().delaySamples -
             r.curve.front().delaySamples;
 
-        if (drift < 400.0 || drift > 700.0) {
+        // The test take is 6 s long, so a 0.999 playback-rate ratio
+        // accumulates about 288 samples of project-time drift.
+        if (drift < 220.0 || drift > 360.0) {
             std::cerr
                 << "known-rate drift unexpected: "
                 << drift << " samples\n";
