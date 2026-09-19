@@ -17,6 +17,11 @@ struct Settings {
     double minConfidence = 0.80;
     double smoothingMs = 200.0;
     double maxSlewMsPerSecond = 8.0;
+    // DYNAMIC multi-resolution refinement.
+    double dynamicFineWindowMs = 32.0;
+    double dynamicEventFrameMs = 5.0;
+    double dynamicEventMinSeparationMs = 45.0;
+    double dynamicEventThreshold = 0.20;
     bool hasInitialDelaySamples = false;
     double initialDelaySamples = 0.0;
 };
@@ -25,6 +30,7 @@ struct Point {
     double timeSec = 0.0;
     double delaySamples = 0.0;
     double confidence = 0.0;
+    bool keyPoint = false;
 };
 
 struct Result {
