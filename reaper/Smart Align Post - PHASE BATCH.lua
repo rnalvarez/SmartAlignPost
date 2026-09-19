@@ -27,6 +27,7 @@ local EXE_NAME = "SmartAlignPostPrototype.exe"
 local status = "Seleccioná primero un item del MASTER y luego al menos un item de cada SOURCE."
 local statusKind = "info"
 local masterTrack = nil
+local masterItem = nil
 local jobs = {}
 local analyzing = false
 local analyzingIndex = 0
@@ -322,12 +323,23 @@ local function analyze_job(job)
   draw_ui()
   gfx.update()
 
-  local output, code = reaper.ExecProcess(cmd, 120000)
-
-  if not output then
+  local processResult = reaper.ExecProcess(cmd, 120000)
+  if not processResult then
     job.status = "ERROR"
     job.error = "ExecProcess falló."
     return
+  end
+
+  processResult = processResult:gsub("\r\n", "\n"):gsub("\r", "\n")
+  local firstNl = processResult:find("\n", 1, true)
+  local code = nil
+  local output = processResult
+
+  if firstNl then
+    code = tonumber(processResult:sub(1, firstNl - 1))
+    if code ~= nil then
+      output = processResult:sub(firstNl + 1)
+    end
   end
 
   if output:sub(1, 6) == "ERROR=" then
@@ -336,9 +348,9 @@ local function analyze_job(job)
     return
   end
 
-  if code ~= 0 then
+  if code ~= nil and code ~= 0 then
     job.status = "ERROR"
-    job.error = output
+    job.error = output ~= "" and output or ("exit code " .. tostring(code))
     return
   end
 
@@ -915,24 +927,33 @@ local function initializeMaster()
     reaper.CountSelectedMediaItems(0)
 
   if count < 1 then
-    masterTrack = nil
-    set_status(
-      "Seleccioná al menos un item. El primero seleccionado define el MASTER.",
-      "warn")
+    if masterItem ~= nil then
+      masterItem = nil
+      masterTrack = nil
+      jobs = {}
+    end
+    if not analyzing then
+      set_status(
+        "Seleccioná al menos un item. El primero seleccionado define el MASTER.",
+        "warn")
+    end
     return
   end
 
   local first =
     reaper.GetSelectedMediaItem(0, 0)
 
-  masterTrack =
-    reaper.GetMediaItem_Track(first)
-
-  set_status(
-    "MASTER = " ..
-      track_label(masterTrack) ..
-      " · seleccioná items SOURCE en los demás tracks.",
-    "info")
+  if first ~= masterItem then
+    masterItem = first
+    masterTrack = reaper.GetMediaItem_Track(first)
+    if not analyzing then
+      set_status(
+        "MASTER = " ..
+          track_label(masterTrack) ..
+          " · seleccioná items SOURCE en los demás tracks.",
+        "info")
+    end
+  end
 end
 
 local function mouse_handler()
