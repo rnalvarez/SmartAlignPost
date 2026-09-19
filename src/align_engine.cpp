@@ -110,11 +110,8 @@ double gccPhatDelay(const float* master,
     std::cerr << "GCC 3: after fft B" << std::endl;
 #endif
 
-    // Keep the original cross-spectrum phase long enough to refine the
-    // coarse GCC-PHAT delay. GCC-PHAT is excellent for finding the correct
-    // correlation basin, but the integer/3-point peak refinement alone is
-    // not sufficient for phase-critical alignment. A phase-slope fit of
-    // A*conj(B) gives sub-sample delay precision over a useful audio band.
+    // Keep the original cross-spectrum phase for robust fractional-delay
+    // refinement after the coarse GCC-PHAT peak is found.
     std::vector<Complex> crossSpectrum(fftSize, Complex(0.0, 0.0));
     double maxCrossMagnitude = 0.0;
     for (size_t k = 0; k < fftSize; ++k) {
@@ -182,77 +179,120 @@ double gccPhatDelay(const float* master,
     }
 
 #ifndef SAP_DISABLE_PHASE_REFINE
-    // Phase-slope refinement around the coarse delay.
-    // This implementation deliberately avoids std::exp(std::complex<>) in the
-    // hot path. The Windows CI crash appeared only after the first GCC-PHAT
-    // dynamic window, so keep this refinement simple and allocation-free.
+    // Robust fractional-delay refinement:
+    // 1) start from the GCC-PHAT coarse/parabolic estimate;
+    // 2) remove that coarse delay from the cross-spectrum;
+    // 3) fit only the small residual phase slope.
+    //
+    // This avoids globally unwrapping the raw cross-spectrum phase. Global
+    // unwrap is fragile with sparse/low-energy bins and was the main reason
+    // the previous refinement could under-correct or jump between phase
+    // branches on real production material.
     double phaseWeightSum = 0.0;
     double phaseFreqSum = 0.0;
     double phaseSum = 0.0;
     double phaseFreq2Sum = 0.0;
     double phaseFreqPhaseSum = 0.0;
-    double prevPhase = 0.0;
-    double unwrappedPhase = 0.0;
-    bool havePhase = false;
     int phaseBins = 0;
 
     const double nyquist = sampleRate * 0.5;
-    const double fMin = std::max(100.0, sampleRate * 0.004);
-    const double fMax = std::min(16000.0, nyquist * 0.90);
-    const double magnitudeFloor = maxCrossMagnitude * 1e-4;
+    const double fMin = std::max(250.0, sampleRate * 0.006);
+    const double fMax = std::min(14000.0, nyquist * 0.88);
+    const double magnitudeFloor = maxCrossMagnitude * 1e-3;
 
-    for (size_t k = 1; k < fftSize / 2; ++k) {
-        const double freq = static_cast<double>(k) * sampleRate /
-                            static_cast<double>(fftSize);
-        if (freq < fMin || freq > fMax) continue;
+    auto fitResidualSlope = [&](bool rejectOutliers, double& slope, int& usedBins) -> bool {
+        double wSum = 0.0;
+        double fSum = 0.0;
+        double pSum = 0.0;
+        double f2Sum = 0.0;
+        double fpSum = 0.0;
+        usedBins = 0;
 
-        const Complex cross = crossSpectrum[k];
-        const double mag = std::abs(cross);
-        if (mag <= magnitudeFloor) continue;
+        for (size_t k = 1; k < fftSize / 2; ++k) {
+            const double freq = static_cast<double>(k) * sampleRate /
+                                static_cast<double>(fftSize);
+            if (freq < fMin || freq > fMax) continue;
 
-        double phase = std::atan2(cross.imag(), cross.real());
-        if (havePhase) {
-            double delta = phase - prevPhase;
-            while (delta > kPi) delta -= 2.0 * kPi;
-            while (delta < -kPi) delta += 2.0 * kPi;
-            unwrappedPhase += delta;
-        } else {
-            unwrappedPhase = phase;
-            havePhase = true;
+            const Complex cross = crossSpectrum[k];
+            const double mag = std::abs(cross);
+            if (mag <= magnitudeFloor) continue;
+
+            const double coarseAngle =
+                2.0 * kPi * freq * phaseDelay / sampleRate;
+            const Complex derot(std::cos(coarseAngle), -std::sin(coarseAngle));
+            const double residualPhase = std::atan2(
+                (cross * derot).imag(), (cross * derot).real());
+
+            if (rejectOutliers && std::abs(residualPhase) > 0.80)
+                continue;
+
+            const double w = std::sqrt(mag);
+            wSum += w;
+            fSum += w * freq;
+            pSum += w * residualPhase;
+            f2Sum += w * freq * freq;
+            fpSum += w * freq * residualPhase;
+            ++usedBins;
         }
-        prevPhase = phase;
 
-        const double w = std::sqrt(mag);
-        phaseWeightSum += w;
-        phaseFreqSum += w * freq;
-        phaseSum += w * unwrappedPhase;
-        phaseFreq2Sum += w * freq * freq;
-        phaseFreqPhaseSum += w * freq * unwrappedPhase;
-        ++phaseBins;
-    }
+        if (usedBins < 32 || wSum <= 0.0) return false;
 
-    if (n >= 2048 && phaseBins >= 24 && phaseWeightSum > 0.0) {
-        const double meanF = phaseFreqSum / phaseWeightSum;
-        const double meanP = phaseSum / phaseWeightSum;
-        const double denom = phaseFreq2Sum - phaseWeightSum * meanF * meanF;
-        if (std::abs(denom) > 1e-12) {
-            const double slope =
-                (phaseFreqPhaseSum - phaseWeightSum * meanF * meanP) / denom;
+        const double meanF = fSum / wSum;
+        const double meanP = pSum / wSum;
+        const double denom = f2Sum - wSum * meanF * meanF;
+        if (std::abs(denom) <= 1e-12) return false;
 
-            // Phase(A*conj(B)) has a linear slope opposite to SOURCE's
-            // public delay convention.
-            const double candidateDelay =
-                -slope * sampleRate / (2.0 * kPi);
+        slope = (fpSum - wSum * meanF * meanP) / denom;
+        return std::isfinite(slope);
+    };
 
-            const double correction = candidateDelay - phaseDelay;
-            if (std::abs(correction) <= 4.0 &&
-                std::abs(candidateDelay) <= static_cast<double>(maxLag)) {
-                phaseDelay = candidateDelay;
+    double slope = 0.0;
+    int phaseBinsFirst = 0;
+    if (n >= 1024 && fitResidualSlope(false, slope, phaseBinsFirst)) {
+        double candidateDelay =
+            phaseDelay + slope * sampleRate / (2.0 * kPi);
+
+        // Reject implausibly large fractional corrections. The coarse
+        // GCC-PHAT/parabolic peak is authoritative for the integer basin;
+        // phase refinement is only allowed to improve the local sub-sample
+        // position.
+        const double correction = candidateDelay - phaseDelay;
+        if (std::abs(correction) <= 1.5 &&
+            std::abs(candidateDelay) <= static_cast<double>(maxLag) &&
+            std::isfinite(candidateDelay)) {
+            phaseDelay = candidateDelay;
+
+            // One robust second fit after the coarse correction. Outlying
+            // bins from weak/reverberant spectral regions are removed.
+            double slopeRefined = 0.0;
+            int phaseBinsSecond = 0;
+            if (fitResidualSlope(true, slopeRefined, phaseBinsSecond)) {
+                const double secondCandidate =
+                    phaseDelay + slopeRefined * sampleRate / (2.0 * kPi);
+                const double secondCorrection =
+                    secondCandidate - phaseDelay;
+
+                if (std::abs(secondCorrection) <= 0.75 &&
+                    std::abs(secondCandidate) <= static_cast<double>(maxLag) &&
+                    std::isfinite(secondCandidate)) {
+                    phaseDelay = secondCandidate;
+                    phaseBins = phaseBinsSecond;
+                } else {
+                    phaseBins = phaseBinsFirst;
+                }
+            } else {
+                phaseBins = phaseBinsFirst;
             }
         }
     }
 
+#ifdef SAP_GCC_DIAGNOSTIC
+    std::cerr << "GCC PHASE: bins=" << phaseBins
+              << " delay=" << phaseDelay << std::endl;
 #endif
+
+#endif
+
 
     peakCorrelation = std::clamp(best, 0.0, 1.0);
     const double prominence = std::max(0.0, best - std::max(0.0, second));
