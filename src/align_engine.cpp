@@ -5,6 +5,9 @@
 #include <cstddef>
 #include <cmath>
 #include <vector>
+#ifdef SAP_GCC_DIAGNOSTIC
+#include <iostream>
+#endif
 
 namespace sap {
 
@@ -66,6 +69,10 @@ double gccPhatDelay(const float* master,
     peakCorrelation = 0.0;
     if (n < 32 || sampleRate <= 0.0) return 0.0;
 
+#ifdef SAP_GCC_DIAGNOSTIC
+    std::cerr << "GCC 0: enter n=" << n << " maxLag=" << maxLag << std::endl;
+#endif
+
     // The zero-padding (fftSize - n) must cover the full lag search range,
     // or the circular correlation wraps around and contaminates results at
     // lags near +-maxLag. This matters most for short buffers (analyze()'s
@@ -74,6 +81,9 @@ double gccPhatDelay(const float* master,
     const size_t fftSize = nextPowerOfTwo(n + lagMargin);
     std::vector<Complex> A(fftSize, Complex(0.0, 0.0));
     std::vector<Complex> B(fftSize, Complex(0.0, 0.0));
+#ifdef SAP_GCC_DIAGNOSTIC
+    std::cerr << "GCC 1: allocated fftSize=" << fftSize << std::endl;
+#endif
 
     double meanA = 0.0;
     double meanB = 0.0;
@@ -92,7 +102,13 @@ double gccPhatDelay(const float* master,
     }
 
     fft(A, false);
+#ifdef SAP_GCC_DIAGNOSTIC
+    std::cerr << "GCC 2: after fft A" << std::endl;
+#endif
     fft(B, false);
+#ifdef SAP_GCC_DIAGNOSTIC
+    std::cerr << "GCC 3: after fft B" << std::endl;
+#endif
 
     // Keep the original cross-spectrum phase long enough to refine the
     // coarse GCC-PHAT delay. GCC-PHAT is excellent for finding the correct
@@ -106,6 +122,9 @@ double gccPhatDelay(const float* master,
         crossSpectrum[k] = cross;
         maxCrossMagnitude = std::max(maxCrossMagnitude, std::abs(cross));
     }
+#ifdef SAP_GCC_DIAGNOSTIC
+    std::cerr << "GCC 4: after cross max=" << maxCrossMagnitude << std::endl;
+#endif
 
     for (size_t k = 0; k < fftSize; ++k) {
         const Complex cross = crossSpectrum[k];
@@ -114,12 +133,18 @@ double gccPhatDelay(const float* master,
     }
 
     fft(A, true);
+#ifdef SAP_GCC_DIAGNOSTIC
+    std::cerr << "GCC 5: after inverse fft" << std::endl;
+#endif
 
     double best = -1.0;
     double second = -1.0;
     int bestLag = 0;
     const int span = std::min(maxLag, static_cast<int>(fftSize / 2) - 1);
 
+#ifdef SAP_GCC_DIAGNOSTIC
+    std::cerr << "GCC 6: before lag scan span=" << span << std::endl;
+#endif
     for (int lag = -span; lag <= span; ++lag) {
         const size_t index = lag >= 0
             ? static_cast<size_t>(lag)
@@ -134,6 +159,9 @@ double gccPhatDelay(const float* master,
         }
     }
 
+#ifdef SAP_GCC_DIAGNOSTIC
+    std::cerr << "GCC 7: bestLag=" << bestLag << " best=" << best << std::endl;
+#endif
     double refinedLag = static_cast<double>(bestLag);
     double phaseDelay = -refinedLag;
     if (bestLag > -span && bestLag < span) {
