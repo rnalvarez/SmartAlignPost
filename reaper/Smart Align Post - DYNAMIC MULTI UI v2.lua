@@ -67,7 +67,28 @@ local function run_chunk(masterFile,sourceFile,masterStart,sourceStart,duration,
     end
     return nil,norm
   end
-  local curve={}; for t,ms,d,c,k in out:gmatch("POINT=([%+%-]?[%d%.]+),([%+%-]?[%d%.]+),([%+%-]?[%d%.]+),([%+%-]?[%d%.]+),([01]?)") do curve[#curve+1]={time=tonumber(t),delayMs=tonumber(ms),delay=tonumber(d),confidence=tonumber(c),keyPoint=(k=="1")} end
+  local curve={}
+  for t,ms,d,c,k,src in out:gmatch("POINT=([%+%-]?[%d%.]+),([%+%-]?[%d%.]+),([%+%-]?[%d%.]+),([%+%-]?[%d%.]+),([01]?),([%+%-]?[%d%.]+)") do
+    curve[#curve+1]={
+      time=tonumber(t),
+      delayMs=tonumber(ms),
+      delay=tonumber(d),
+      confidence=tonumber(c),
+      keyPoint=(k=="1"),
+      sourceAbsoluteSec=tonumber(src)
+    }
+  end
+  if #curve==0 then
+    for t,ms,d,c,k in out:gmatch("POINT=([%+%-]?[%d%.]+),([%+%-]?[%d%.]+),([%+%-]?[%d%.]+),([%+%-]?[%d%.]+),([01]?)") do
+      curve[#curve+1]={
+        time=tonumber(t),
+        delayMs=tonumber(ms),
+        delay=tonumber(d),
+        confidence=tonumber(c),
+        keyPoint=(k=="1")
+      }
+    end
+  end
   return {staticDelay=tonumber(out:match("DELAY_SAMPLES=([%+%-]?[%d%.]+)")) or 0,staticDelayMs=tonumber(out:match("DELAY_MS=([%+%-]?[%d%.]+)")) or 0,staticConfidence=tonumber(out:match("CONFIDENCE=([%+%-]?[%d%.]+)")) or 0,curve=curve},nil
 end
 local function consolidate(points)
@@ -88,7 +109,8 @@ local function consolidate(points)
           delay=p.delay,
           delayMs=p.delayMs,
           confidence=p.confidence,
-          keyPoint=true
+          keyPoint=true,
+          sourceAbsoluteSec=p.sourceAbsoluteSec
         }
         out[#out+1]=anchor
         last=anchor
@@ -98,7 +120,8 @@ local function consolidate(points)
           delay=p.delay,
           delayMs=p.delayMs,
           confidence=p.confidence,
-          keyPoint=false
+          keyPoint=false,
+          sourceAbsoluteSec=p.sourceAbsoluteSec
         }
         out[#out+1]=last
       elseif last.keyPoint then
@@ -110,7 +133,8 @@ local function consolidate(points)
             delay=p.delay,
             delayMs=p.delayMs,
             confidence=p.confidence,
-            keyPoint=false
+            keyPoint=false,
+            sourceAbsoluteSec=p.sourceAbsoluteSec
           }
           out[#out+1]=last
         end
@@ -131,6 +155,11 @@ local function consolidate(points)
           last.time=p.time
           last.delay=(last.delay+p.delay)*0.5
           last.delayMs=(last.delayMs+p.delayMs)*0.5
+          if p.sourceAbsoluteSec and last.sourceAbsoluteSec then
+            last.sourceAbsoluteSec=(last.sourceAbsoluteSec+p.sourceAbsoluteSec)*0.5
+          elseif p.sourceAbsoluteSec then
+            last.sourceAbsoluteSec=p.sourceAbsoluteSec
+          end
         end
       end
     end
@@ -150,7 +179,19 @@ local function analyze_source(item,index)
     local a,e=run_chunk(masterPath,path,masterStart,sourceStart,duration,priorDelay); if not a then return nil,string.format("SOURCE #%d: %s",index,tostring(e)) end
     fallbackDelay,fallbackDelayMs,fallbackConf=a.staticDelay,a.staticDelayMs,a.staticConfidence
     if #a.curve>0 then priorDelay=a.curve[#a.curve].delay end
-    for _,p in ipairs(a.curve) do local abs=chunkStart+p.time; if abs>=commonStart+((first and 0) or CURVE_SKIP_START_SEC) and abs<commonEnd-0.05 then points[#points+1]={time=abs,delay=p.delay,delayMs=p.delayMs,confidence=p.confidence,keyPoint=p.keyPoint==true} end end
+    for _,p in ipairs(a.curve) do
+      local abs=chunkStart+p.time
+      if abs>=commonStart+((first and 0) or CURVE_SKIP_START_SEC) and abs<commonEnd-0.05 then
+        points[#points+1]={
+          time=abs,
+          delay=p.delay,
+          delayMs=p.delayMs,
+          confidence=p.confidence,
+          keyPoint=p.keyPoint==true,
+          sourceAbsoluteSec=p.sourceAbsoluteSec
+        }
+      end
+    end
     if commonEnd-chunkStart<=CHUNK_SEC+0.001 then break end; chunkStart=chunkStart+CHUNK_SEC-CHUNK_OVERLAP_SEC; first=false
   end
   local curve=consolidate(points); if #curve==0 then curve[1]={time=commonStart,delay=fallbackDelay,delayMs=fallbackDelayMs,confidence=fallbackConf,keyPoint=false} elseif curve[1].time>commonStart+1e-6 then table.insert(curve,1,{time=commonStart,delay=curve[1].delay,delayMs=curve[1].delayMs,confidence=curve[1].confidence,keyPoint=false}) end
@@ -230,12 +271,19 @@ local function apply_source(r)
       (delayMs - anchorDelayMs) * DYNAMIC_WARP_GAIN
   end
 
-  local function add_marker(itemTime, delayMs)
+  local function add_marker(itemTime, delayMs, directSourceAbsoluteSec)
     itemTime = math.max(0.0, math.min(itemLen, itemTime))
     local effectiveDelayMs = amplified_delay(delayMs)
     local correction = correction_seconds(effectiveDelayMs)
-    local baselineSrc = r.sourceOffs + itemTime * rate
-    local srcPos = baselineSrc + correction * rate
+    local srcPos
+    if directSourceAbsoluteSec then
+      -- LANDMARK WARP: use the measured MASTER->SOURCE correspondence
+      -- directly instead of reconstructing it from delay(t).
+      srcPos = directSourceAbsoluteSec
+    else
+      local baselineSrc = r.sourceOffs + itemTime * rate
+      srcPos = baselineSrc + correction * rate
+    end
 
     -- El mapeo fuente debe ser estrictamente creciente. El control de
     -- maxSlew del motor debería garantizarlo, pero protegemos el APPLY
@@ -258,7 +306,7 @@ local function apply_source(r)
   -- Boundary at the start: extend the first measured correction backwards
   -- so the whole item participates in the same mapping.
   local first = points[1]
-  if not add_marker(0.0, first.delayMs) then return 0,false end
+  if not add_marker(0.0, first.delayMs, first.sourceAbsoluteSec) then return 0,false end
 
   -- Insert the complete measured curve. The curve is deliberately
   -- dense: moving the SOURCE changes the acoustic delay continuously, so
@@ -267,14 +315,14 @@ local function apply_source(r)
   for _,p in ipairs(points) do
     local relative = p.time - r.sourcePos
     if relative > 0.001 and relative < itemLen - 0.001 then
-      if not add_marker(relative, p.delayMs) then return inserted,false end
+      if not add_marker(relative, p.delayMs, p.sourceAbsoluteSec) then return inserted,false end
     end
   end
 
   -- Boundary at the end: hold the last measured correction through the tail.
   local last = points[#points]
   if itemLen > 0.001 then
-    if not add_marker(itemLen, last.delayMs) then return inserted,false end
+    if not add_marker(itemLen, last.delayMs, last.sourceAbsoluteSec) then return inserted,false end
   end
 
   reaper.UpdateItemInProject(r.item)
