@@ -114,15 +114,99 @@ local function set_absolute_correction(item,startPos,originalPos,originalOffs,ra
   return math.abs(reaper.GetMediaItemTakeInfo_Value(take,"D_STARTOFFS")-target)<1e-7
 end
 local function apply_source(r)
-  if r.minConfidence<MIN_CONFIDENCE then local ans=reaper.ShowMessageBox(string.format("SOURCE %d tiene confidence mínima %.3f.\n\n¿Aplicar igualmente?",r.index,r.minConfidence),"Smart Align Post — DYNAMIC CONFIDENCE",4); if ans~=6 then return 0,true end end
-  local current=r.item; local splits=0; local tol=0.005; local first=r.curve[1]
-  if first.time>r.sourcePos+tol then local right=reaper.SplitMediaItem(current,first.time); if not right then return 0,false end; current=right; splits=splits+1 end
-  if not set_absolute_correction(current,reaper.GetMediaItemInfo_Value(current,"D_POSITION"),r.sourcePos,r.sourceOffs,r.sourceRate,first.delayMs) then return splits,false end
-  for i=2,#r.curve do local p=r.curve[i]; local curPos=reaper.GetMediaItemInfo_Value(current,"D_POSITION"); local curLen=reaper.GetMediaItemInfo_Value(current,"D_LENGTH")
-    if p.time>curPos+tol and p.time<curPos+curLen-tol then local right=reaper.SplitMediaItem(current,p.time); if right then current=right; splits=splits+1; if not set_absolute_correction(current,p.time,r.sourcePos,r.sourceOffs,r.sourceRate,p.delayMs) then return splits,false end end end
+  if r.minConfidence<MIN_CONFIDENCE then
+    local ans=reaper.ShowMessageBox(
+      string.format(
+        "SOURCE %d tiene confidence mínima %.3f.\\n\\n¿Aplicar igualmente el time-warp DYNAMIC?",
+        r.index,r.minConfidence
+      ),
+      "Smart Align Post — DYNAMIC CONFIDENCE",4
+    )
+    if ans~=6 then return 0,true end
   end
-  return splits,true
+
+  local take = r.take
+  if not take then return 0,false end
+
+  -- DYNAMIC no usa splits + D_STARTOFFS. La curva delay(t) se convierte
+  -- en una deformación temporal continua mediante stretch markers de REAPER.
+  -- Cada marcador fija:
+  --   pos    = posición temporal dentro del item
+  --   srcpos = posición equivalente dentro del source, corregida por delay(t)
+  --
+  -- El item conserva D_POSITION y D_LENGTH. La compensación varía suavemente
+  -- entre marcadores, que es exactamente lo que necesitamos para seguir un
+  -- delay acústico que cambia durante la toma.
+  local markerCount = reaper.GetTakeNumStretchMarkers(take)
+  if markerCount and markerCount > 0 then
+    reaper.DeleteTakeStretchMarkers(take, 0, markerCount)
+  end
+
+  -- Preservar pitch mientras REAPER realiza el time-warp.
+  reaper.SetMediaItemTakeInfo_Value(take, "B_PPITCH", 1)
+
+  local itemPos = r.sourcePos
+  local itemLen = reaper.GetMediaItemInfo_Value(r.item, "D_LENGTH")
+  local rate = r.sourceRate
+  if rate <= 0 or itemLen <= 0 then return 0,false end
+
+  local function correction_seconds(delayMs)
+    return (delayMs / 1000.0)
+  end
+
+  local points = r.curve
+  if #points == 0 then return 0,false end
+
+  local inserted = 0
+  local lastPos = -1e12
+  local lastSrc = -1e12
+
+  local function add_marker(itemTime, delayMs)
+    itemTime = math.max(0.0, math.min(itemLen, itemTime))
+    local correction = correction_seconds(delayMs)
+    local baselineSrc = r.sourceOffs + itemTime * rate
+    local srcPos = baselineSrc + correction * rate
+
+    -- El mapeo fuente debe ser estrictamente creciente. El control de
+    -- maxSlew del motor debería garantizarlo, pero protegemos el APPLY
+    -- contra una curva excepcional o ruido residual.
+    if itemTime <= lastPos + 1e-7 then
+      return true
+    end
+    if srcPos <= lastSrc + 1e-7 then
+      srcPos = lastSrc + 1e-7
+    end
+
+    local idx = reaper.SetTakeStretchMarker(take, -1, itemTime, srcPos)
+    if idx < 0 then return false end
+    lastPos = itemTime
+    lastSrc = srcPos
+    inserted = inserted + 1
+    return true
+  end
+
+  -- Boundary at the start: extend the first measured correction backwards
+  -- so the whole item participates in the same mapping.
+  local first = points[1]
+  if not add_marker(0.0, first.delayMs) then return 0,false end
+
+  for _,p in ipairs(points) do
+    local relative = p.time - r.sourcePos
+    if relative > 0.001 and relative < itemLen - 0.001 then
+      if not add_marker(relative, p.delayMs) then return inserted,false end
+    end
+  end
+
+  -- Boundary at the end: hold the last measured correction through the tail.
+  local last = points[#points]
+  if itemLen > 0.001 then
+    if not add_marker(itemLen, last.delayMs) then return inserted,false end
+  end
+
+  reaper.UpdateItemInProject(r.item)
+  return inserted, inserted >= 2
 end
+
 local function apply_results()
   if not analyzed or #results==0 then set_status("Primero ejecutá ANALYZE.","warn"); return end
   reaper.Undo_BeginBlock(); local totalSplits,failures=0,0; local masterBefore=reaper.GetMediaItemInfo_Value(masterItem,"D_POSITION")
@@ -130,7 +214,7 @@ local function apply_results()
   local masterAfter=reaper.GetMediaItemInfo_Value(masterItem,"D_POSITION"); reaper.UpdateArrange(); reaper.Undo_EndBlock("Smart Align Post - DYNAMIC MULTI APPLY",-1)
   if math.abs(masterAfter-masterBefore)>1e-8 then failures=failures+1 end
   if failures>0 then set_status(string.format("APPLY: %d error(es). MASTER permaneció protegido.",failures),"error"); return end
-  applied=true; set_status(string.format("Aplicado contra MASTER: %d SOURCE(s), %d segmentos. D_POSITION intacto. Undo disponible.",#results,totalSplits),"ok")
+  applied=true; set_status(string.format("Aplicado contra MASTER: %d SOURCE(s), %d stretch markers. D_POSITION intacto. Time-warp DYNAMIC aplicado. Undo disponible.",#results,totalSplits),"ok")
 end
 local function rgb(r,g,b) gfx.set(r/255,g/255,b/255,1) end
 local function rect(x,y,w,h,r,g,b) rgb(r,g,b); gfx.rect(x,y,w,h,1) end
