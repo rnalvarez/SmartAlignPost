@@ -135,6 +135,7 @@ double gccPhatDelay(const float* master,
     }
 
     double refinedLag = static_cast<double>(bestLag);
+    double phaseDelay = -refinedLag;
     if (bestLag > -span && bestLag < span) {
         const auto valueAt = [&](int lag) -> double {
             const size_t index = lag >= 0
@@ -157,7 +158,6 @@ double gccPhatDelay(const float* master,
     // This implementation deliberately avoids std::exp(std::complex<>) in the
     // hot path. The Windows CI crash appeared only after the first GCC-PHAT
     // dynamic window, so keep this refinement simple and allocation-free.
-    double phaseDelay = -refinedLag;
     double phaseWeightSum = 0.0;
     double phaseFreqSum = 0.0;
     double phaseSum = 0.0;
