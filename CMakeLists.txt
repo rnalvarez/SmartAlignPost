@@ -81,9 +81,11 @@ if(SAP_BUILD_TESTS)
             src/align_engine.cpp
         )
         target_include_directories(smartalign_dynamic_diagnostic PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-        target_compile_definitions(smartalign_dynamic_diagnostic PRIVATE SAP_DISABLE_PHASE_REFINE=1)
-        target_compile_options(smartalign_dynamic_diagnostic PRIVATE /fsanitize=address /Zi)
-        target_link_options(smartalign_dynamic_diagnostic PRIVATE /fsanitize=address)
+        target_compile_definitions(smartalign_dynamic_diagnostic PRIVATE
+            SAP_DISABLE_PHASE_REFINE=1
+            SAP_GCC_DIAGNOSTIC=1
+        )
+        target_compile_options(smartalign_dynamic_diagnostic PRIVATE /Od /Zi)
         add_test(NAME SmartAlignDynamicDiagnostic COMMAND smartalign_dynamic_diagnostic)
         set_tests_properties(SmartAlignDynamicDiagnostic PROPERTIES TIMEOUT 30)
     endif()
