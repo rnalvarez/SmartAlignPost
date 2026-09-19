@@ -1,186 +1,101 @@
 # Smart Align Post
 
-**Herramienta open source para alineación temporal de micrófonos de sonido directo, con motor de análisis offline y futura implementación VST3 multiplataforma.**
+Herramienta open source para alineación temporal de micrófonos de sonido directo, pensada para postproducción de ficción y documental en REAPER.
 
-> Proyecto independiente inspirado en flujos de trabajo profesionales como Sound Radix Auto-Align Post. No es una copia ni está afiliado a Sound Radix.
+## Objetivo
 
-## ¿Qué problema busca resolver?
+El objetivo principal del proyecto es una alineación temporal que produzca una mezcla acústicamente coherente entre MASTER (boom) y SOURCE (corbatero/lavalier).
 
-En postproducción de sonido directo es habitual combinar un **boom** con uno o más **corbateros (lavalier)**. La distancia entre los micrófonos y la fuente cambia durante la actuación: cuando el intérprete se mueve, gira la cabeza o cambia su posición, también puede cambiar la relación temporal entre las grabaciones.
+La velocidad y el flujo de trabajo importan, pero no sustituyen la precisión de la alineación.
 
-Smart Align Post busca analizar esas relaciones de forma **offline y precisa**, para mejorar la coherencia temporal y de fase entre los micrófonos.
+## Nuevo núcleo: PHASE ALIGNMENT CORE
 
-Ejemplo de uso previsto:
+La arquitectura anterior acumulaba varias capas de tracking dinámico, landmarks, recapturas y refinamientos locales. Esa aproximación produjo demasiado coste computacional y no dio una trayectoria suficientemente estable en tomas largas.
 
-```text
-BOOM / MASTER
-LAV 1
-LAV 2
-LAV 3...
-```
+El nuevo núcleo utiliza una cadena mucho más directa:
 
-## Modos de alineación
+1. selección de regiones acústicamente informativas mediante energía;
+2. GCC-PHAT para estimar el desplazamiento temporal a partir de la fase del espectro cruzado;
+3. refinamiento sub-muestra mediante correlación de forma de onda;
+4. comparación independiente entre ambas mediciones;
+5. aceptación únicamente de puntos con suficiente confianza y continuidad temporal.
 
-### STATIC — alineación fija
+GCC-PHAT es la medición primaria. La correlación waveform no reemplaza la medición de fase: funciona como comprobación independiente para evitar aceptar picos espurios.
 
-El sistema analiza el material y calcula un único desplazamiento temporal para cada micrófono fuente.
+## STATIC, DYNAMIC y AUTO
 
-```text
-BOOM  ─────────────────────────────
-LAV1  ──── +4,3 ms ────────────────
-LAV2  ──── +6,1 ms ────────────────
-```
+STATIC calcula un único delay robusto a partir de varios anchors independientes.
 
-La corrección permanece fija durante todo el material analizado.
+DYNAMIC construye una trayectoria delay(t) a partir de anchors temporales de alta energía. Entre anchors no se generan mediciones innecesarias: la curva es interpolada posteriormente en la integración con REAPER.
 
-### DYNAMIC — alineación dinámica
+AUTO es el modo previsto para trabajo de película. Primero obtiene una solución STATIC robusta. Sólo ejecuta tracking dinámico completo cuando mediciones independientes muestran una variación real del delay.
 
-El sistema analiza el material por ventanas y calcula una curva de desplazamiento temporal. La corrección puede cambiar suavemente cuando existe evidencia suficiente de que la relación acústica entre los micrófonos ha cambiado.
+La intención es que la mayoría de los planos sencillos no paguen el coste del análisis dinámico.
 
-El diseño incluye mecanismos para evitar movimientos erráticos:
+## D_PLAYRATE
 
-- estimación de confianza;
-- rechazo de valores poco confiables;
-- suavizado temporal;
-- limitación de la velocidad de cambio;
-- conservación del último valor confiable.
+El prototipo de REAPER normaliza MASTER y SOURCE al mismo eje temporal de proyecto antes del análisis. Por lo tanto un SOURCE que tenga, por ejemplo, D_PLAYRATE=0.999 no se compara a velocidad nativa: su deriva temporal también forma parte de la medición.
 
-## Flujo de trabajo previsto
+Esto permite distinguir un delay acústico fijo de una diferencia temporal acumulativa.
 
-La experiencia final que buscamos es:
+## Flujo de trabajo en REAPER
 
-```text
-Seleccionar grabaciones
-        ↓
-Elegir MASTER
-        ↓
-Elegir STATIC o DYNAMIC
-        ↓
-CALCULAR
-        ↓
-Revisar resultados
-        ↓
-APLICAR
-        ↓
-Escuchar
-        ↓
-Deshacer si es necesario
-```
+El script principal es reaper/Smart Align Post - PHASE BATCH.lua.
 
-El objetivo es que el análisis sea **offline**, no un proceso de alineación en tiempo real. Esto permite dedicar más tiempo de cálculo a encontrar una solución robusta.
+El primer item seleccionado define el MASTER TRACK.
 
-## Estado actual del proyecto
+Los demás tracks representados por los items seleccionados se consideran SOURCE TRACKS.
 
-### Ya implementado
+### ANALYZE SELECTION
 
-- Motor independiente en C++17.
-- Estimación de desplazamiento mediante correlación normalizada.
-- Limitación del rango de búsqueda.
-- Cálculo de confianza.
-- Puerta de confianza.
-- Suavizado temporal para modo dinámico.
-- Limitación de la velocidad de variación.
-- Resultados STATIC y DYNAMIC.
-- Estructura inicial de VST3.
-- Proyecto CMake multiplataforma.
-- Pruebas automatizadas del motor DSP.
-- Preparación para integración con REAPER.
+Analiza únicamente los SOURCE items actualmente seleccionados.
 
-### Todavía en desarrollo
+### ANALYZE PROJECT
 
-La primera entrega pública **no es todavía un Auto-Align completo**.
+Recorre todos los items de los SOURCE TRACKS declarados por la selección y busca automáticamente el item MASTER con mayor solapamiento temporal.
 
-El VST3 actual funciona como una base de integración del motor, pero todavía no implementa el flujo final de selección de items del timeline, análisis offline completo y aplicación de las correcciones.
+Esto permite seleccionar los tracks de boom/corbateros y procesar el proyecto completo sin tener que ir plano por plano.
 
-Esto es intencional. Un VST3 estándar recibe audio y parámetros del host, pero no dispone de una API portátil para acceder directamente a los items seleccionados en el timeline de cada DAW. Por eso el proyecto separa:
+### APPLY ALL
 
-1. **Motor de alineación** — independiente del DAW.
-2. **VST3** — interfaz y procesamiento estándar multiplataforma.
-3. **Integración con cada DAW** — capa específica cuando sea necesaria.
+Los resultados con confidence suficiente se aplican de manera no destructiva:
+
+- STATIC: corrección mediante D_STARTOFFS;
+- DYNAMIC: time-warp mediante stretch markers;
+- D_POSITION del item no se modifica;
+- todos los cambios quedan dentro de un único Undo de REAPER.
+
+Los resultados por debajo del umbral de confianza se omiten para revisión manual.
+
+## Qué valida el motor
+
+Las pruebas del DSP están orientadas a la necesidad real del proyecto:
+
+- delay entero;
+- delay fraccional;
+- delay variable en el tiempo;
+- presencia de ruido;
+- detección AUTO de un plano estable;
+- reproducción SOURCE con D_PLAYRATE diferente.
+
+El criterio no es solamente producir una curva o una confidence alta: las pruebas verifican que el delay recuperado coincida con el delay conocido dentro de una tolerancia explícita.
 
 ## Arquitectura
 
-```text
-                 SMART ALIGN ENGINE
-                        │
-        ┌───────────────┼────────────────┐
-        │               │                │
-       VST3           REAPER          otros DAW
-        │               │                │
-      audio          integración      integración
-      + UI            específica       específica
-```
+El motor DSP está separado de la integración con REAPER.
 
-El motor DSP no debe depender de REAPER. Esto permite que el proyecto pueda crecer hacia otros DAW y, eventualmente, otras plataformas de plugin.
+REAPER se ocupa de descubrir items, construir pares MASTER/SOURCE, lanzar el análisis y aplicar el mapa temporal.
 
-## Estructura del repositorio
+El ejecutable SmartAlignPostPrototype funciona como interfaz offline del motor para la integración actual.
 
-```text
-SmartAlignPost/
-├── src/                 # Motor DSP y código VST3
-├── tests/               # Pruebas automatizadas del motor
-├── reaper/              # Prototipos de integración con REAPER
-├── docs/                # Diseño y documentación técnica
-├── .github/workflows/   # Compilación y pruebas automáticas
-├── CMakeLists.txt
-├── LICENSE
-├── THIRD_PARTY_LICENSES.md
-└── CONTRIBUTING.md
-```
+La futura integración VST3 puede reutilizar el mismo motor, pero no forma parte del flujo offline de REAPER.
 
-## Compilación
+## Estado
 
-El proyecto utiliza CMake.
+Esta rama inaugura el rediseño PHASE ALIGNMENT CORE.
 
-El SDK oficial de VST3 de Steinberg es una dependencia externa y no se copia dentro de este repositorio. El SDK oficial documenta compilación mediante CMake para Windows, macOS y Linux.
-
-Para el desarrollo local, la configuración del proyecto descargará/obtendrá el SDK externo cuando sea necesario.
-
-### Pruebas del motor DSP
-
-Las pruebas del motor no necesitan REAPER ni una instalación del plugin. Su objetivo es comprobar primero que el algoritmo matemático funciona correctamente.
-
-```text
-cmake -S . -B build-dsp -DSAP_BUILD_VST3=OFF -DSAP_BUILD_TESTS=ON
-cmake --build build-dsp --config Release
-ctest --test-dir build-dsp --output-on-failure
-```
-
-## REAPER
-
-REAPER es el primer DAW de referencia para el desarrollo porque permite probar rápidamente el flujo de trabajo de producción de sonido.
-
-La integración prevista será:
-
-1. seleccionar los items de audio;
-2. indicar cuál es el MASTER;
-3. identificar las fuentes;
-4. analizar los archivos completos offline;
-5. calcular la corrección STATIC o DYNAMIC;
-6. mostrar resultados y confianza;
-7. aplicar la corrección sin destruir los originales;
-8. permitir escuchar y deshacer.
-
-## Relación con Auto-Align Post
-
-Auto-Align Post de Sound Radix es una referencia conceptual importante para este proyecto, especialmente por sus conceptos de alineación estática y dinámica.
-
-Smart Align Post es un proyecto independiente y open source. No utiliza código propietario de Sound Radix.
-
-Las futuras funciones avanzadas se estudiarán de forma independiente, incluyendo la posibilidad de investigar correcciones espectrales de fase después de que la alineación temporal básica sea sólida.
+El objetivo de esta etapa es validar primero la calidad de la medición temporal/fásica con material sintético y real. El flujo batch se construye alrededor de ese núcleo, no al revés.
 
 ## Licencia
 
-El código propio del proyecto está publicado bajo **MIT**. Consultar `LICENSE`.
-
-El SDK de VST3 de Steinberg es una dependencia independiente y conserva sus propias condiciones de licencia. Consultar `THIRD_PARTY_LICENSES.md` y la documentación oficial del SDK.
-
-## Estado del desarrollo
-
-**Versión:** 0.1 — base experimental pública.
-
-El proyecto está en desarrollo activo. Las primeras versiones priorizan la validación del algoritmo y la calidad del análisis antes de añadir funciones avanzadas de interfaz.
-
-## Contribuciones
-
-Las sugerencias, pruebas con material real y reportes de errores son bienvenidos. Consultar `CONTRIBUTING.md`.
+El código propio del proyecto está publicado bajo MIT.

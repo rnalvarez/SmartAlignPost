@@ -1,70 +1,43 @@
-# Smart Align Post — entrega 1
+# Smart Align Post — REAPER Quickstart
 
-## Objetivo de esta entrega
+## Preparación
 
-Esta primera entrega sirve para poner el proyecto público en GitHub, comprobar que compila en CI y validar el motor DSP antes de construir la integración offline con REAPER.
+1. Colocá SmartAlignPostPrototype.exe en la misma carpeta que el script Lua.
+2. En REAPER, seleccioná un item de audio perteneciente al track BOOM.
+3. Seleccioná además al menos un item perteneciente a cada track de corbateros que quieras declarar como SOURCE.
 
-**No intentes todavía usarla como Auto-Align Post terminado.** El VST3 incluido es un shell/pass-through y el motor DSP se prueba de forma independiente.
+El primer item seleccionado define el MASTER TRACK.
 
-## Entrega 1 — GitHub
+## Procesar una selección
 
-1. Crear un repositorio público llamado `SmartAlignPost`.
-2. Subir el contenido de esta carpeta (no hace falta subir el ZIP).
-3. Mantener `extern/vst3sdk` como submodule; no subir el SDK entero al repositorio.
-4. Verificar que GitHub Actions termina en verde.
+Abrí reaper/Smart Align Post - PHASE BATCH.lua y presioná ANALYZE SELECTION.
 
-El SDK oficial de Steinberg se obtiene con submodules y utiliza CMake para compilar VST3. 
+Se analizarán solamente los SOURCE items seleccionados. El MASTER correspondiente se obtiene automáticamente por solapamiento temporal.
 
-## Entrega 2 — prueba del motor DSP
+## Procesar todo un proyecto
 
-En tu PC:
+Seleccioná un item del MASTER y al menos un item de cada SOURCE track.
 
-```bash
-cmake -S . -B build-dsp -DSAP_BUILD_VST3=OFF -DSAP_BUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Release
-cmake --build build-dsp --config Release
-ctest --test-dir build-dsp --output-on-failure
-```
+Presioná ANALYZE PROJECT.
 
-Resultado esperado:
+El script recorrerá todos los items existentes en esos SOURCE tracks y buscará para cada uno el item del MASTER con mayor solapamiento.
 
-```text
-100% tests passed
-```
+Esto permite procesar muchas escenas/tomas de una sola vez.
 
-Esta prueba usa una señal sintética con un retardo conocido y verifica que STATIC recupere el desplazamiento y que DYNAMIC produzca una curva.
+## Interpretación
 
-## Entrega 3 — VST3 en REAPER
+Cada resultado muestra STATIC o DYNAMIC, cantidad de anchors, confidence y delay al inicio, medio y final.
 
-Cuando CI compile correctamente:
+DYNAMIC solamente aparece cuando el motor detecta una variación temporal que justifica una trayectoria.
 
-1. Construir el VST3 con el SDK.
-2. Instalar el `.vst3` en la carpeta VST3 del sistema.
-3. En REAPER: `Preferences → Plug-ins → VST → Re-scan`.
-4. Buscar `Smart Align Post`.
-5. Insertarlo en una pista de prueba.
-6. Confirmar que el plugin carga y pasa audio sin alterar.
+## Aplicar
 
-Todavía no esperes el botón final `CALCULATE/APPLY` ni la selección automática de items.
+Presioná APPLY ALL.
 
-## Entrega 4 — material real
+Los casos por debajo de la confidence mínima no se aplican.
 
-Cuando lleguemos al puente offline, usaremos primero una toma real sencilla:
+Todos los cambios se registran en un único Undo.
 
-```text
-BOOM.wav
-LAV1.wav
-```
+## Importante
 
-Después:
-
-```text
-BOOM.wav
-LAV1.wav
-LAV2.wav
-```
-
-Idealmente una escena donde el actor se mueva respecto al boom. Eso permitirá comparar STATIC contra DYNAMIC y ajustar el algoritmo con material real.
-
-## Regla importante
-
-No subas grabaciones de producción al repositorio público. El código y los tests deben permanecer libres de material con derechos, voces identificables o información de rodaje.
+El algoritmo está diseñado para medir el delay acústico entre MASTER y SOURCE. No utiliza la energía como sustituto de la medición temporal: la energía sólo selecciona regiones donde tiene sentido hacer la medición de fase.

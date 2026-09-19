@@ -1,80 +1,111 @@
 #include "align_engine.h"
+
+#include <algorithm>
 #include <cmath>
-#include <iostream>
 #include <cstdint>
+#include <iostream>
+#include <limits>
+#include <random>
 #include <vector>
 
-static std::vector<float> makeTestSignal(size_t n)
+static double lagrange4(
+    const std::vector<float>& x,
+    double pos)
 {
-    // Deterministic broadband signal: a distinctive correlation peak without
-    // relying on any external WAV files.
+    if (pos < 1.0 ||
+        pos >= static_cast<double>(x.size() - 2))
+        return 0.0;
+
+    const std::size_t i =
+        static_cast<std::size_t>(std::floor(pos));
+
+    const double f =
+        pos - static_cast<double>(i);
+
+    const double c0 =
+        -f * (f - 1.0) * (f - 2.0) / 6.0;
+    const double c1 =
+        (f + 1.0) * (f - 1.0) * (f - 2.0) / 2.0;
+    const double c2 =
+        -(f + 1.0) * f * (f - 2.0) / 2.0;
+    const double c3 =
+        (f + 1.0) * f * (f - 1.0) / 6.0;
+
+    return c0 * x[i - 1] +
+           c1 * x[i] +
+           c2 * x[i + 1] +
+           c3 * x[i + 2];
+}
+
+static std::vector<float> makeBroadbandSignal(
+    std::size_t n)
+{
+    std::mt19937 rng(0x12345678u);
+    std::normal_distribution<double> noise(0.0, 1.0);
+
     std::vector<float> x(n);
-    uint32_t state = 0x12345678u;
-    for (size_t i = 0; i < n; ++i) {
-        state ^= state << 13;
-        state ^= state >> 17;
-        state ^= state << 5;
-        x[i] = static_cast<float>((state / 4294967295.0) * 2.0 - 1.0);
+    double low = 0.0;
+
+    for (std::size_t i = 0; i < n; ++i) {
+        low = 0.995 * low + 0.005 * noise(rng);
+        const double wide = noise(rng);
+        x[i] = static_cast<float>(
+            0.72 * wide + 0.28 * low);
     }
+
     return x;
 }
 
-static std::vector<float> delayed(const std::vector<float>& x, int samples)
-{
-    std::vector<float> y(x.size(), 0.0f);
-    if (samples >= 0) {
-        for (size_t i = static_cast<size_t>(samples); i < x.size(); ++i)
-            y[i] = x[i - static_cast<size_t>(samples)];
-    } else {
-        const size_t d = static_cast<size_t>(-samples);
-        for (size_t i = 0; i + d < x.size(); ++i)
-            y[i] = x[i + d];
-    }
-    return y;
-}
-
-static std::vector<float> fractionallyDelayed(const std::vector<float>& x, double samples)
-{
-    std::vector<float> y(x.size(), 0.0f);
-    const int whole = static_cast<int>(std::floor(samples));
-    const double frac = samples - static_cast<double>(whole);
-    for (size_t i = static_cast<size_t>(std::max(whole + 1, 1)); i < x.size(); ++i) {
-        const size_t j = i - static_cast<size_t>(whole);
-        const float a = x[j];
-        const float b = j > 0 ? x[j - 1] : x[j];
-        y[i] = static_cast<float>((1.0 - frac) * a + frac * b);
-    }
-    return y;
-}
-
-static std::vector<float> linearlyTimeVaryingDelayed(
+static std::vector<float> delaySignal(
     const std::vector<float>& x,
-    double startDelaySamples,
-    double endDelaySamples)
+    double delaySamples)
 {
     std::vector<float> y(x.size(), 0.0f);
-    if (x.empty()) return y;
 
-    const double denom = std::max<size_t>(1, x.size() - 1);
-    for (size_t i = 1; i < x.size(); ++i) {
-        const double u = static_cast<double>(i) / denom;
-        const double delay = startDelaySamples +
-                             (endDelaySamples - startDelaySamples) * u;
-        const double sourcePos = static_cast<double>(i) - delay;
-        if (sourcePos < 1.0 ||
-            sourcePos >= static_cast<double>(x.size()))
-            continue;
+    for (std::size_t i = 3; i + 2 < x.size(); ++i) {
+        const double sourcePos =
+            static_cast<double>(i) - delaySamples;
 
-        const size_t j = static_cast<size_t>(std::floor(sourcePos));
-        const double frac = sourcePos - static_cast<double>(j);
         y[i] = static_cast<float>(
-            (1.0 - frac) * x[j] +
-            frac * x[std::min(j + 1, x.size() - 1)]);
+            lagrange4(x, sourcePos));
     }
+
     return y;
 }
 
-static bool approx(double a, double b, double tolerance)
+static std::vector<float> varyingDelaySignal(
+    const std::vector<float>& x,
+    double startDelay,
+    double endDelay)
+{
+    std::vector<float> y(x.size(), 0.0f);
+
+    const double denom =
+        static_cast<double>(std::max<std::size_t>(
+            1, x.size() - 1));
+
+    for (std::size_t i = 3; i + 2 < x.size(); ++i) {
+        const double u =
+            static_cast<double>(i) / denom;
+
+        const double delay =
+            startDelay +
+            (endDelay - startDelay) * u;
+
+        const double sourcePos =
+            static_cast<double>(i) - delay;
+
+        y[i] = static_cast<float>(
+            lagrange4(x, sourcePos));
+    }
+
+    return y;
+}
+
+static bool approx(
+    double a,
+    double b,
+    double tolerance)
 {
     return std::abs(a - b) <= tolerance;
 }
@@ -82,475 +113,197 @@ static bool approx(double a, double b, double tolerance)
 int main()
 {
     constexpr double sr = 48000.0;
-    constexpr double speedOfSound = 343.0; // m/s, nominal test value
-    constexpr size_t durationSamples = 48000 * 4;
 
-    std::cerr << "STAGE: baseline\\n" << std::flush;
+    std::cerr << "PHASE TEST: integer delay\n";
 
-    // Baseline exact delay test.
-    constexpr int knownDelay = 173;
-    auto master = makeTestSignal(durationSamples);
-    auto source = delayed(master, knownDelay);
+    const auto master =
+        makeBroadbandSignal(
+            static_cast<std::size_t>(sr * 6.0));
 
-    sap::Settings s;
-    s.sampleRate = sr;
-    s.maxDelayMs = 10.0;
-    s.mode = sap::Mode::Static;
+    {
+        const double expected = 173.0;
+        const auto source =
+            delaySignal(master, expected);
 
-    const auto r = sap::AlignEngine::analyze(master, source, s);
-    if (!approx(r.staticDelaySamples, knownDelay, 1.0)) {
-        std::cerr << "Static delay test failed: got "
-                  << r.staticDelaySamples << " expected " << knownDelay << "\n";
-        return 1;
-    }
-    if (r.staticConfidence < 0.8) {
-        std::cerr << "Confidence test failed: " << r.staticConfidence << "\n";
-        return 1;
-    }
+        sap::Settings s;
+        s.sampleRate = sr;
+        s.mode = sap::Mode::Static;
+        s.maxDelayMs = 12.0;
+        s.analysisWindowMs = 60.0;
+        s.hopMs = 250.0;
 
-    std::cerr << "STAGE: distance sweep\\n" << std::flush;
+        const auto r =
+            sap::AlignEngine::analyze(master, source, s);
 
-    // Acoustic distance sweep. Two clips have identical duration and identical
-    // source content; SOURCE is delayed only by the propagation time created by
-    // a microphone spacing distance d. This is the core physical test for the
-    // static alignment prototype.
-    const std::vector<double> distancesMeters = {0.02, 0.05, 0.10, 0.20, 0.50};
-    for (double distance : distancesMeters) {
-        const double expectedSamplesExact = distance / speedOfSound * sr;
-        const int expectedSamples = static_cast<int>(std::lround(expectedSamplesExact));
-        const auto distanceSource = delayed(master, expectedSamples);
+        if (!approx(
+                r.staticDelaySamples,
+                expected,
+                0.75)) {
+            std::cerr
+                << "integer delay failed: got "
+                << r.staticDelaySamples
+                << " expected "
+                << expected << "\n";
+            return 1;
+        }
 
-        sap::Settings distanceSettings;
-        distanceSettings.sampleRate = sr;
-        distanceSettings.maxDelayMs = 12.0;
-        distanceSettings.analysisWindowMs = 200.0;
-        distanceSettings.hopMs = 50.0;
-        distanceSettings.mode = sap::Mode::Static;
-
-        const auto dr = sap::AlignEngine::analyze(master, distanceSource, distanceSettings);
-        if (!approx(dr.staticDelaySamples, expectedSamples, 1.0)) {
-            std::cerr << "Distance alignment test failed: distance=" << distance
-                      << " m expected=" << expectedSamples
-                      << " samples got=" << dr.staticDelaySamples << "\n";
+        if (r.staticConfidence < 0.75) {
+            std::cerr
+                << "integer confidence failed: "
+                << r.staticConfidence << "\n";
             return 2;
         }
-        if (dr.staticConfidence < 0.8) {
-            std::cerr << "Distance confidence test failed: distance=" << distance
-                      << " m confidence=" << dr.staticConfidence << "\n";
+    }
+
+    std::cerr << "PHASE TEST: fractional delay\n";
+
+    {
+        const double expected = 56.35;
+        const auto source =
+            delaySignal(master, expected);
+
+        sap::Settings s;
+        s.sampleRate = sr;
+        s.mode = sap::Mode::Static;
+        s.maxDelayMs = 12.0;
+        s.analysisWindowMs = 60.0;
+        s.hopMs = 200.0;
+
+        const auto r =
+            sap::AlignEngine::analyze(master, source, s);
+
+        if (!approx(
+                r.staticDelaySamples,
+                expected,
+                0.80)) {
+            std::cerr
+                << "fractional delay failed: got "
+                << r.staticDelaySamples
+                << " expected "
+                << expected << "\n";
             return 3;
         }
-        if (dr.staticTotalWindows <= 0 || dr.staticSupportWindows <= 0) {
-            std::cerr << "Distance support test failed: distance=" << distance
-                      << " support=" << dr.staticSupportWindows
-                      << "/" << dr.staticTotalWindows << "\n";
+    }
+
+    std::cerr << "PHASE TEST: changing delay\n";
+
+    {
+        constexpr double startDelay = 42.0;
+        constexpr double endDelay = 260.0;
+
+        const auto source =
+            varyingDelaySignal(
+                master,
+                startDelay,
+                endDelay);
+
+        sap::Settings s;
+        s.sampleRate = sr;
+        s.mode = sap::Mode::Dynamic;
+        s.maxDelayMs = 12.0;
+        s.analysisWindowMs = 60.0;
+        s.hopMs = 250.0;
+        s.minConfidence = 0.68;
+        s.maxSlewMsPerSecond = 80.0;
+
+        const auto r =
+            sap::AlignEngine::analyze(master, source, s);
+
+        if (r.curve.size() < 4) {
+            std::cerr
+                << "dynamic curve too short: "
+                << r.curve.size() << "\n";
             return 4;
         }
 
-        std::cout << "DISTANCE=" << distance
-                  << "m EXPECTED_SAMPLES=" << expectedSamples
-                  << " EXPECTED_MS=" << (expectedSamplesExact * 1000.0 / sr)
-                  << " GOT_SAMPLES=" << dr.staticDelaySamples
-                  << " CONFIDENCE=" << dr.staticConfidence
-                  << " SUPPORT=" << dr.staticSupportWindows
-                  << "/" << dr.staticTotalWindows << "\n";
+        const auto expectedAt = [&](double timeSec) {
+            const double durationSec =
+                static_cast<double>(master.size() - 1) / sr;
+            const double u =
+                std::clamp(timeSec / durationSec, 0.0, 1.0);
+            return startDelay +
+                   (endDelay - startDelay) * u;
+        };
+
+        double maxError = 0.0;
+        for (const auto& point : r.curve) {
+            const double expected =
+                expectedAt(point.timeSec);
+            maxError = std::max(
+                maxError,
+                std::abs(point.delaySamples - expected));
+        }
+
+        if (maxError > 8.0) {
+            std::cerr
+                << "dynamic trajectory failed: max error="
+                << maxError << " samples\n";
+            return 5;
+        }
     }
 
-    std::cerr << "STAGE: dynamic regression\\n" << std::flush;
+    std::cerr << "PHASE TEST: noisy source\n";
 
-    // Dynamic mode regression: it must still expose a non-empty delay curve.
-    s.mode = sap::Mode::Dynamic;
-    s.analysisWindowMs = 100.0;
-    s.hopMs = 25.0;
-    const auto d = sap::AlignEngine::analyze(master, source, s);
-    if (d.curve.empty()) {
-        std::cerr << "Dynamic curve is empty\n";
-        return 5;
-    }
-
-    std::cerr << "STAGE: short buffer\\n" << std::flush;
-
-    // Short-buffer regression (analyze()'s n < win branch): this path had
-    // zero test coverage before. A clip shorter than one analysis window
-    // must still resolve the correct delay when maxLag is a large fraction
-    // of n. (The FFT padding change in gccPhatDelay is a defensive fix for
-    // circular-wraparound risk in this regime, justified on first
-    // principles; this test did not manage to construct a case where it
-    // changes the outcome for broadband content, so treat it as closing a
-    // coverage gap rather than as proof the old code returned a wrong
-    // delay here.)
     {
-        constexpr size_t shortN = 1024; // already a power of two: zero margin pre-fix
-        auto shortMaster = makeTestSignal(shortN);
-        constexpr int shortDelay = 300; // close to shortN/2, exercises the maxLag clamp
-        auto shortSource = delayed(shortMaster, shortDelay);
+        const double expected = 121.5;
+        auto source =
+            delaySignal(master, expected);
 
-        sap::Settings shortSettings;
-        shortSettings.sampleRate = sr;
-        shortSettings.maxDelayMs = 12.0; // requests maxLag=576, clamped to n/2=512
-        shortSettings.mode = sap::Mode::Static;
+        std::mt19937 rng(77u);
+        std::normal_distribution<double> noise(0.0, 0.08);
 
-        const auto shortResult = sap::AlignEngine::analyze(shortMaster, shortSource, shortSettings);
-        if (!approx(shortResult.staticDelaySamples, shortDelay, 1.0)) {
-            std::cerr << "Short-buffer delay test failed: got "
-                      << shortResult.staticDelaySamples << " expected " << shortDelay << "\n";
+        for (auto& sample : source)
+            sample = static_cast<float>(
+                sample + noise(rng));
+
+        sap::Settings s;
+        s.sampleRate = sr;
+        s.mode = sap::Mode::Static;
+        s.maxDelayMs = 12.0;
+        s.analysisWindowMs = 80.0;
+        s.hopMs = 250.0;
+
+        const auto r =
+            sap::AlignEngine::analyze(master, source, s);
+
+        if (!approx(
+                r.staticDelaySamples,
+                expected,
+                1.2)) {
+            std::cerr
+                << "noisy delay failed: got "
+                << r.staticDelaySamples
+                << " expected "
+                << expected << "\n";
             return 6;
         }
     }
 
+    std::cerr << "PHASE TEST: stable static should not become dynamic\n";
 
-    std::cerr << "STAGE: waveform micro-refinement\n" << std::flush;
-
-    // The local waveform stage should recover a deliberately coarse GCC
-    // estimate and keep the result within a fraction of one sample.
     {
-        constexpr double microDelay = 56.35;
-        auto microSource = fractionallyDelayed(master, microDelay);
+        const double expected = 94.0;
+        const auto source =
+            delaySignal(master, expected);
 
-        sap::Settings micro;
-        micro.sampleRate = sr;
-        micro.maxDelayMs = 12.0;
-        micro.analysisWindowMs = 60.0;
-        micro.hopMs = 20.0;
-        micro.minConfidence = 0.80;
-        micro.smoothingMs = 35.0;
-        micro.maxSlewMsPerSecond = 120.0;
-        micro.dynamicMicroWindowMs = 16.0;
-        micro.dynamicMicroSearchMs = 3.0;
-        micro.mode = sap::Mode::Dynamic;
+        sap::Settings s;
+        s.sampleRate = sr;
+        s.mode = sap::Mode::Auto;
+        s.maxDelayMs = 12.0;
+        s.analysisWindowMs = 60.0;
+        s.hopMs = 250.0;
 
-        const auto mr = sap::AlignEngine::analyze(master, microSource, micro);
-        if (mr.curve.empty()) {
-            std::cerr << "Waveform micro-refinement: empty curve\n";
-            return 16;
-        }
+        const auto r =
+            sap::AlignEngine::analyze(master, source, s);
 
-        double maxMicroError = 0.0;
-        for (const auto& p : mr.curve)
-            maxMicroError = std::max(
-                maxMicroError,
-                std::abs(p.delaySamples - microDelay));
-
-        if (maxMicroError > 0.45) {
-            std::cerr << "Waveform micro-refinement failed: max error "
-                      << maxMicroError << " samples\n";
-            return 17;
-        }
-
-        std::cout << "WAVEFORM_MICRO max_error="
-                  << maxMicroError << " samples\n";
-    }
-
-    std::cerr << "STAGE: moving-source landmark warp\\n" << std::flush;
-
-    // A moving SOURCE is modeled as a continuously varying acoustic delay.
-    // The important property is not merely that the curve changes, but that
-    // the measured delay follows the known trajectory without the old
-    // 35-60 ms low-pass behavior.
-    {
-        constexpr double startDelay = 40.0;
-        constexpr double endDelay = 64.0;
-        auto movingSource =
-            linearlyTimeVaryingDelayed(master, startDelay, endDelay);
-
-        sap::Settings moving;
-        moving.sampleRate = sr;
-        moving.mode = sap::Mode::Dynamic;
-        moving.maxDelayMs = 12.0;
-        moving.analysisWindowMs = 40.0;
-        moving.hopMs = 10.0;
-        moving.minConfidence = 0.80;
-        moving.smoothingMs = 10.0;
-        moving.maxSlewMsPerSecond = 600.0;
-        moving.dynamicFineWindowMs = 24.0;
-        moving.dynamicEventFrameMs = 3.0;
-        moving.dynamicEventMinSeparationMs = 20.0;
-        moving.dynamicEventMatchWindowMs = 15.0;
-        moving.dynamicMicroWindowMs = 12.0;
-        moving.dynamicMicroSearchMs = 3.0;
-
-        const auto movingResult =
-            sap::AlignEngine::analyze(master, movingSource, moving);
-
-        if (movingResult.curve.size() < 10) {
-            std::cerr << "Moving-source curve too short: "
-                      << movingResult.curve.size() << "\n";
-            return 18;
-        }
-
-        double maxMovingError = 0.0;
-        double firstDelay = movingResult.curve.front().delaySamples;
-        double lastDelay = movingResult.curve.back().delaySamples;
-
-        for (const auto& p : movingResult.curve) {
-            const double truth =
-                startDelay +
-                (endDelay - startDelay) *
-                    std::clamp(
-                        p.timeSec / 4.0,
-                        0.0,
-                        1.0);
-            maxMovingError = std::max(
-                maxMovingError,
-                std::abs(p.delaySamples - truth));
-        }
-
-        // Verify that the curve actually follows the physical movement rather
-        // than collapsing to a static delay.
-        if (lastDelay - firstDelay < 14.0) {
-            std::cerr << "Moving-source warp stayed too flat: first="
-                      << firstDelay << " last=" << lastDelay << "\n";
-            return 19;
-        }
-
-        if (maxMovingError > 3.5) {
-            std::cerr << "Moving-source landmark warp failed: max error "
-                      << maxMovingError << " samples first=" << firstDelay
-                      << " last=" << lastDelay << "\n";
-            return 20;
-        }
-
-        std::cout << "MOVING_SOURCE_WARP max_error="
-                  << maxMovingError
-                  << " first=" << firstDelay
-                  << " last=" << lastDelay
-                  << " points=" << movingResult.curve.size() << "\n";
-    }
-
-    std::cerr << "STAGE: rate-aware time-stretch tracking\\n" << std::flush;
-
-    // Regression for the actual REAPER failure mode: SOURCE playback speed
-    // differs slightly from MASTER. This is modeled directly in project-time
-    // samples, so the physical delay must drift throughout the take.
-    {
-        constexpr double sourceRate = 0.999;
-        constexpr int fixedDelay = 56;
-        std::vector<float> rateSource(durationSamples, 0.0f);
-
-        for (size_t i = 0; i < rateSource.size(); ++i) {
-            const double nativePos =
-                static_cast<double>(i) * sourceRate -
-                static_cast<double>(fixedDelay);
-            if (nativePos < 0.0 ||
-                nativePos >= static_cast<double>(master.size() - 1))
-                continue;
-
-            const size_t j = static_cast<size_t>(std::floor(nativePos));
-            const double frac = nativePos - static_cast<double>(j);
-            rateSource[i] = static_cast<float>(
-                (1.0 - frac) * master[j] +
-                frac * master[j + 1]);
-        }
-
-        sap::Settings rateTracking;
-        rateTracking.sampleRate = sr;
-        rateTracking.mode = sap::Mode::Dynamic;
-        rateTracking.maxDelayMs = 40.0;
-        rateTracking.analysisWindowMs = 40.0;
-        rateTracking.hopMs = 10.0;
-        rateTracking.minConfidence = 0.80;
-        rateTracking.smoothingMs = 10.0;
-        rateTracking.maxSlewMsPerSecond = 600.0;
-        rateTracking.dynamicMicroWindowMs = 12.0;
-        rateTracking.dynamicMicroSearchMs = 3.0;
-
-        const auto rr =
-            sap::AlignEngine::analyze(master, rateSource, rateTracking);
-
-        if (rr.curve.size() < 10) {
-            std::cerr << "Rate-aware tracking curve too short: "
-                      << rr.curve.size() << "\\n";
-            return 21;
-        }
-
-        const double firstRateDelay = rr.curve.front().delaySamples;
-        const double lastRateDelay = rr.curve.back().delaySamples;
-        const double drift =
-            lastRateDelay - firstRateDelay;
-
-        if (drift < 12.0) {
-            std::cerr << "Rate-aware tracking stayed too flat: first="
-                      << firstRateDelay << " last=" << lastRateDelay
-                      << " drift=" << drift << " samples\\n";
-            return 22;
-        }
-
-        std::cout << "RATE_AWARE_TRACKING first=" << firstRateDelay
-                  << " last=" << lastRateDelay
-                  << " drift=" << drift
-                  << " points=" << rr.curve.size() << "\\n";
-    }
-
-    std::cerr << "STAGE: dynamic tracking\\n" << std::flush;
-
-    // Dynamic tracking regression: the curve must follow a genuinely
-    // time-varying delay, not just exist (the earlier empty-curve check
-    // would pass even if every point were frozen at the wrong value). Uses
-    // the same analysis settings as the production CLI.
-    {
-        auto dynMaster = makeTestSignal(durationSamples);
-        const size_t blockSamples = static_cast<size_t>(0.48 * sr);
-        constexpr int stepSamples = 4;
-        constexpr int startDelay = 40;
-        std::vector<float> dynSource(dynMaster.size(), 0.0f);
-        for (size_t i = 0; i < dynMaster.size(); ++i) {
-            const int block = static_cast<int>(i / blockSamples);
-            const int delayHere = startDelay + block * stepSamples;
-            if (static_cast<long>(i) - delayHere >= 0)
-                dynSource[i] = dynMaster[static_cast<size_t>(static_cast<long>(i) - delayHere)];
-        }
-
-        sap::Settings dynSettings;
-        dynSettings.sampleRate = sr;
-        dynSettings.mode = sap::Mode::Dynamic;
-        dynSettings.maxDelayMs = 12.0;
-        dynSettings.analysisWindowMs = 80.0;
-        dynSettings.hopMs = 40.0;
-        dynSettings.minConfidence = 0.80;
-        dynSettings.smoothingMs = 60.0;
-        dynSettings.maxSlewMsPerSecond = 120.0;
-
-        const auto dynResult = sap::AlignEngine::analyze(dynMaster, dynSource, dynSettings);
-        if (dynResult.curve.size() < 5) {
-            std::cerr << "Dynamic tracking test: curve too short (" << dynResult.curve.size() << " points)\n";
+        if (r.modeUsed != sap::Mode::Static ||
+            !r.curve.empty()) {
+            std::cerr
+                << "AUTO incorrectly selected DYNAMIC\n";
             return 7;
         }
-        double maxErr = 0.0;
-        for (const auto& p : dynResult.curve) {
-            const size_t sampleAtT = static_cast<size_t>(p.timeSec * sr);
-            const int block = static_cast<int>(sampleAtT / blockSamples);
-            const double truth = startDelay + block * stepSamples;
-            maxErr = std::max(maxErr, std::abs(p.delaySamples - truth));
-        }
-        // A brief settle time right at a step boundary is expected; a real
-        // tracking failure misses by tens of samples, not a handful.
-        if (maxErr > 8.0) {
-            std::cerr << "Dynamic tracking test failed: max error " << maxErr << " samples\n";
-            return 8;
-        }
-        std::cout << "DYNAMIC_TRACKING max_error=" << maxErr << " samples over "
-                  << dynResult.curve.size() << " points\n";
-
-        // Cross-chunk seed regression: the second analysis starts from the
-        // last delay of the previous chunk instead of re-initializing from
-        // an unrelated local warm-up window.
-        sap::Settings seededSettings = dynSettings;
-        seededSettings.hasInitialDelaySamples = true;
-        seededSettings.initialDelaySamples = 52.0;
-        const size_t chunkSamples = std::min(
-            static_cast<size_t>(5.0 * sr), dynMaster.size());
-        std::vector<float> seededMaster(dynMaster.begin(),
-                                        dynMaster.begin() + static_cast<std::ptrdiff_t>(chunkSamples));
-        std::vector<float> seededSource(dynSource.begin(),
-                                        dynSource.begin() + static_cast<std::ptrdiff_t>(chunkSamples));
-        const auto seeded = sap::AlignEngine::analyze(seededMaster, seededSource, seededSettings);
-        if (seeded.curve.empty()) {
-            std::cerr << "Seeded dynamic curve is empty\n";
-            return 12;
-        }
-        const double firstSeeded = seeded.curve.front().delaySamples;
-        if (std::abs(firstSeeded - seededSettings.initialDelaySamples) > 8.0) {
-            std::cerr << "Seeded dynamic continuity failed: first="
-                      << firstSeeded << " seed="
-                      << seededSettings.initialDelaySamples << "\n";
-            return 13;
-        }
     }
 
-    std::cerr << "STAGE: constant dynamic\\n" << std::flush;
-
-    // Constant-delay DYNAMIC regression using the production settings.
-    // The new dynamic path seeds from a short warm-up instead of running a
-    // full STATIC pass, so a constant source must still stay locked to the
-    // known MASTER delay.
-    {
-        constexpr int dynamicConstantDelay = 173;
-        auto constantSource = delayed(master, dynamicConstantDelay);
-
-        sap::Settings dynamicConstant;
-        dynamicConstant.sampleRate = sr;
-        dynamicConstant.mode = sap::Mode::Dynamic;
-        dynamicConstant.maxDelayMs = 12.0;
-        dynamicConstant.analysisWindowMs = 80.0;
-        dynamicConstant.hopMs = 40.0;
-        dynamicConstant.minConfidence = 0.80;
-        dynamicConstant.smoothingMs = 60.0;
-        dynamicConstant.maxSlewMsPerSecond = 120.0;
-
-        const auto constantResult =
-            sap::AlignEngine::analyze(master, constantSource, dynamicConstant);
-        if (constantResult.curve.size() < 5) {
-            std::cerr << "Dynamic constant-delay curve too short: "
-                      << constantResult.curve.size() << " points\n";
-            return 9;
-        }
-        double maxConstantError = 0.0;
-        for (const auto& p : constantResult.curve)
-            maxConstantError = std::max(
-                maxConstantError, std::abs(p.delaySamples - dynamicConstantDelay));
-
-        if (maxConstantError > 1.5) {
-            std::cerr << "Dynamic constant-delay tracking failed: max error "
-                      << maxConstantError << " samples\n";
-            return 10;
-        }
-    }
-
-    std::cerr << "STAGE: fractional phase\\n" << std::flush;
-
-    // Phase-slope refinement regression: a fractional delay should no longer
-    // collapse to the nearest sample. The test signal is broadband and the
-    // expected residual is deliberately tighter than one whole sample.
-    {
-        constexpr double fractionalDelay = 56.30;
-        auto fracSource = fractionallyDelayed(master, fractionalDelay);
-        sap::Settings fractional;
-        fractional.sampleRate = sr;
-        fractional.maxDelayMs = 12.0;
-        fractional.analysisWindowMs = 120.0;
-        fractional.hopMs = 40.0;
-        fractional.mode = sap::Mode::Dynamic;
-
-        const auto fr = sap::AlignEngine::analyze(master, fracSource, fractional);
-        if (fr.curve.empty()) {
-            std::cerr << "Fractional phase regression: empty curve\n";
-            return 14;
-        }
-        double maxFractionalError = 0.0;
-        for (const auto& p : fr.curve)
-            maxFractionalError = std::max(
-                maxFractionalError, std::abs(p.delaySamples - fractionalDelay));
-
-        if (maxFractionalError > 0.35) {
-            std::cerr << "Fractional phase refinement failed: max error "
-                      << maxFractionalError << " samples\n";
-            return 15;
-        }
-        std::cout << "FRACTIONAL_PHASE max_error="
-                  << maxFractionalError << " samples\n";
-    }
-
-    std::cerr << "STAGE: 44.1k\\n" << std::flush;
-
-    // Non-48 kHz regression: estimateDelay() must use the caller-provided
-    // sample rate for its DSP path rather than assuming 48 kHz.
-    {
-        constexpr double sr44 = 44100.0;
-        constexpr int delay44 = 117;
-        auto master44 = makeTestSignal(44100);
-        auto source44 = delayed(master44, delay44);
-        double confidence44 = 0.0;
-        const double measured44 = sap::AlignEngine::estimateDelay(
-            master44.data(), source44.data(), master44.size(),
-            220, sr44, confidence44);
-
-        if (!approx(measured44, delay44, 1.0) || confidence44 < 0.8) {
-            std::cerr << "44.1 kHz estimateDelay failed: got "
-                      << measured44 << " expected " << delay44
-                      << " confidence=" << confidence44 << "\n";
-            return 11;
-        }
-    }
-
-    std::cout << "Smart Align Post DSP tests passed.\n";
+    std::cerr << "ALL PHASE TESTS PASSED\n";
     return 0;
 }

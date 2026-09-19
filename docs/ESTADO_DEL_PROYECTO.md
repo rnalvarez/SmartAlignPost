@@ -1,56 +1,32 @@
-# Estado del proyecto
+# Estado del proyecto — PHASE ALIGNMENT CORE
 
-## Versión actual
+## Rediseño actual
 
-**0.1 — base experimental pública**
+El motor anterior de DYNAMIC acumulaba tracking por ventanas, landmarks, refinamiento waveform, recaptura GCC, smoothing y consolidación en Lua.
 
-## Objetivo de esta etapa
+Esa arquitectura fue retirada.
 
-Comprobar que el motor matemático de Smart Align Post puede estimar de forma fiable la diferencia temporal entre una señal MASTER y una señal SOURCE antes de construir la interfaz final y la integración profunda con REAPER.
+## Núcleo vigente
 
-## Qué está funcionando
+El motor actual usa:
 
-- Motor C++ independiente del DAW.
-- Estimación de delay mediante correlación normalizada.
-- Modo STATIC.
-- Modo DYNAMIC.
-- Confianza de la estimación.
-- Suavizado temporal.
-- Limitación de cambios bruscos.
-- Pruebas automatizadas básicas.
-- Estructura inicial VST3.
+- anchors guiados por energía;
+- GCC-PHAT como estimador primario del delay;
+- refinamiento sub-muestra por waveform;
+- comparación entre ambas estimaciones;
+- trayectoria dinámica sólo cuando existe evidencia suficiente;
+- normalización a tiempo de proyecto para D_PLAYRATE.
 
-## Qué todavía no debe considerarse terminado
+## Integración vigente
 
-- Selección de items desde el timeline de REAPER.
-- Selección visual de MASTER y SOURCES dentro del plugin.
-- Análisis completo de archivos de audio desde la interfaz del plugin.
-- Aplicación offline de una curva de delay sobre el audio.
-- Preview antes de aplicar.
-- Aplicación no destructiva integrada con el DAW.
-- Undo específico de la operación del plugin.
-- Interfaz gráfica final.
+La integración REAPER se concentra en reaper/Smart Align Post - PHASE BATCH.lua.
 
-## Próximo objetivo
+El flujo admite selección puntual o análisis de todos los items de los SOURCE tracks declarados.
 
-### V1 funcional — STATIC
+## Criterio de desarrollo
 
-La primera meta funcional será conseguir:
+Primero se valida la alineación temporal/fásica con tests deterministas.
 
-1. seleccionar BOOM y LAV en REAPER;
-2. indicar BOOM como MASTER;
-3. ejecutar CALCULAR;
-4. obtener el delay y la confianza;
-5. aplicar una corrección fija;
-6. escuchar el resultado;
-7. poder deshacerlo.
+Después se optimiza el flujo batch.
 
-Una vez que STATIC sea estable, se desarrollará DYNAMIC sobre la misma arquitectura.
-
-## Principio de desarrollo
-
-No se incorporarán funciones avanzadas solamente para aumentar la cantidad de características. Cada etapa deberá probarse con señales controladas y después con material real de producción de sonido.
-
-La prioridad es:
-
-**precisión → estabilidad → flujo de trabajo → interfaz → funciones avanzadas.**
+No se añade complejidad al algoritmo mientras la precisión de la medición primaria no esté demostrada.
