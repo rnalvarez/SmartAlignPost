@@ -39,21 +39,18 @@ jobs:
           $vst3 = Get-ChildItem -Path build -Filter '*.vst3' -Recurse | Select-Object -First 1
           if (-not $vst3) { throw 'No se encontró ningún archivo .vst3' }
           Copy-Item -Recurse $vst3.FullName artifacts/package/SmartAlignPost/
+
           $exe = 'build/Release/SmartAlignPostPrototype.exe'
           if (-not (Test-Path $exe)) { throw "No se encontró $exe" }
           Copy-Item $exe artifacts/package/SmartAlignPost/
-          Copy-Item 'reaper/Smart Align Post - Selection Helper.lua' artifacts/package/SmartAlignPost/
-          Copy-Item 'reaper/Smart Align Post - Selection Helper MULTI.lua' artifacts/package/SmartAlignPost/
-          Copy-Item 'reaper/Smart Align Post - Static Multi UI v2.lua' artifacts/package/SmartAlignPost/
-          Copy-Item 'reaper/Smart Align Post - Static Multi UI v3 Stable.lua' artifacts/package/SmartAlignPost/
-          Copy-Item 'reaper/Smart Align Post - Static Multi UI v4.lua' artifacts/package/SmartAlignPost/
-          Copy-Item 'reaper/Smart Align Post - DYNAMIC MULTI UI v1.lua' artifacts/package/SmartAlignPost/
-          Copy-Item 'reaper/Smart Align Post - DYNAMIC MULTI UI v2.lua' artifacts/package/SmartAlignPost/
 
-          # Verificación explícita del contenido antes de comprimir.
+          $lua = 'reaper/Smart Align Post - PHASE BATCH.lua'
+          if (-not (Test-Path $lua)) { throw "No se encontró $lua" }
+          Copy-Item $lua artifacts/package/SmartAlignPost/
+
           $required = @(
             'SmartAlignPostPrototype.exe',
-            'Smart Align Post - DYNAMIC MULTI UI v2.lua'
+            'Smart Align Post - PHASE BATCH.lua'
           )
           foreach ($name in $required) {
             if (-not (Test-Path (Join-Path 'artifacts/package/SmartAlignPost' $name))) {
@@ -74,7 +71,7 @@ jobs:
             $names = $archive.Entries | ForEach-Object { $_.FullName }
             $expected = @(
               'SmartAlignPost/SmartAlignPostPrototype.exe',
-              'SmartAlignPost/Smart Align Post - DYNAMIC MULTI UI v2.lua'
+              'SmartAlignPost/Smart Align Post - PHASE BATCH.lua'
             )
             foreach ($entry in $expected) {
               if ($names -notcontains $entry) { throw "El ZIP no contiene: $entry" }
@@ -89,4 +86,3 @@ jobs:
           name: SmartAlignPost-Windows-VST3-Prototype
           path: artifacts/SmartAlignPost-Windows-VST3-Prototype.zip
 
-# Verificación de empaquetado DYNAMIC v2
