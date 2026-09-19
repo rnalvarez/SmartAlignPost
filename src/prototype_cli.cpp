@@ -512,6 +512,16 @@ int main(int argc, char** argv)
               << result.staticTotalWindows << "\n";
     std::cout << "CURVE_COUNT="
               << result.curve.size() << "\n";
+    std::cout << "SCOUT_POINTS="
+              << result.scoutPoints << "\n";
+    std::cout << "SCOUT_FIRST_MS="
+              << result.scoutFirstDelaySamples * 1000.0 / sr << "\n";
+    std::cout << "SCOUT_LAST_MS="
+              << result.scoutLastDelaySamples * 1000.0 / sr << "\n";
+    std::cout << "SCOUT_R2="
+              << result.scoutR2 << "\n";
+    std::cout << "SCOUT_COHERENT="
+              << (result.scoutCoherent ? 1 : 0) << "\n";
 
     for (const auto& p : result.curve) {
         const double delayMs =
