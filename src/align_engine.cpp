@@ -298,6 +298,55 @@ std::vector<Anchor> selectAnchors(
     return candidates;
 }
 
+
+std::vector<Anchor> selectTimelineAnchors(
+    const std::vector<float>& master,
+    const std::vector<float>& source,
+    std::size_t window,
+    std::size_t hop,
+    std::size_t maxAnchors)
+{
+    std::vector<Anchor> anchors;
+    const std::size_t usable = std::min(master.size(), source.size());
+    const std::size_t half = window / 2;
+
+    if (usable < window || maxAnchors == 0)
+        return anchors;
+
+    std::size_t effectiveHop = std::max<std::size_t>(1, hop);
+    const std::size_t span = usable - window;
+
+    if (span > 0 && maxAnchors > 1) {
+        const std::size_t maxByCount =
+            (span + maxAnchors - 2) / (maxAnchors - 1);
+        effectiveHop = std::max(effectiveHop, maxByCount);
+    }
+
+    for (std::size_t center = half;
+         center + half < usable;
+         center += effectiveHop) {
+        anchors.push_back({
+            center,
+            rmsAround(master, center, half)
+        });
+
+        if (anchors.size() >= maxAnchors)
+            break;
+    }
+
+    const std::size_t lastCenter = usable - half - 1;
+    if (anchors.size() < maxAnchors &&
+        lastCenter > half &&
+        (anchors.empty() || anchors.back().center < lastCenter)) {
+        anchors.push_back({
+            lastCenter,
+            rmsAround(master, lastCenter, half)
+        });
+    }
+
+    return anchors;
+}
+
 Measurement measurePhase(
     const std::vector<float>& master,
     const std::vector<float>& source,
@@ -577,18 +626,96 @@ Result AlignEngine::analyze(
         return result;
     }
 
-    // A dynamic trajectory is justified only when independent high-energy
-    // measurements disagree materially. This is the key throughput gate for
-    // whole-film batch operation.
+    // AUTO must not decide "STATIC" only from the handful of highest-energy
+    // anchors. A gentle time-stretch can produce a perfectly coherent drift
+    // while those high-energy anchors happen to cluster in one part of the
+    // take. First run a very cheap temporal scout across the whole overlap.
     const double staticCenter = result.staticDelaySamples;
     double staticSpread = 0.0;
     for (double d : staticDelays)
         staticSpread = std::max(staticSpread, std::abs(d - staticCenter));
 
+    const double dynamicThreshold =
+        std::max(0.75, 0.45 * settings.sampleRate / 1000.0);
+
+    bool coherentTemporalDrift = false;
+    if (settings.mode != Mode::Static) {
+        const auto scoutAnchors = selectTimelineAnchors(
+            master,
+            source,
+            window,
+            std::max<std::size_t>(
+                1,
+                static_cast<std::size_t>(
+                    std::llround(
+                        std::max(250.0, settings.hopMs) *
+                        settings.sampleRate / 1000.0))),
+            7);
+
+        std::vector<std::pair<double, double>> scout;
+        scout.reserve(scoutAnchors.size());
+
+        for (const auto& anchor : scoutAnchors) {
+            const Measurement m = measurePhase(
+                master,
+                source,
+                anchor.center,
+                window,
+                staticCenter,
+                -static_cast<double>(maxLag),
+                static_cast<double>(maxLag),
+                settings.sampleRate);
+
+            if (m.confidence >= settings.minConfidence * 0.75) {
+                scout.emplace_back(
+                    static_cast<double>(anchor.center) /
+                        settings.sampleRate,
+                    m.finalDelay);
+            }
+        }
+
+        if (scout.size() >= 3) {
+            const double firstDelay = scout.front().second;
+            const double lastDelay = scout.back().second;
+            const double endToEnd = std::abs(lastDelay - firstDelay);
+
+            double meanT = 0.0;
+            double meanD = 0.0;
+            for (const auto& p : scout) {
+                meanT += p.first;
+                meanD += p.second;
+            }
+            meanT /= static_cast<double>(scout.size());
+            meanD /= static_cast<double>(scout.size());
+
+            double cov = 0.0;
+            double varT = 0.0;
+            double varD = 0.0;
+            for (const auto& p : scout) {
+                const double dt = p.first - meanT;
+                const double dd = p.second - meanD;
+                cov += dt * dd;
+                varT += dt * dt;
+                varD += dd * dd;
+            }
+
+            double rSquared = 0.0;
+            if (varT > 1.0e-12 && varD > 1.0e-12) {
+                const double corr =
+                    cov / std::sqrt(varT * varD);
+                rSquared = std::clamp(corr * corr, 0.0, 1.0);
+            }
+
+            coherentTemporalDrift =
+                endToEnd > dynamicThreshold &&
+                rSquared >= 0.45;
+        }
+    }
+
     const bool explicitDynamic = settings.mode == Mode::Dynamic;
     const bool needsDynamic = explicitDynamic ||
-        staticSpread >
-            std::max(0.75, 0.45 * settings.sampleRate / 1000.0);
+        staticSpread > dynamicThreshold ||
+        coherentTemporalDrift;
 
     if (!needsDynamic) {
         result.modeUsed = Mode::Static;
@@ -602,13 +729,15 @@ Result AlignEngine::analyze(
                 std::max(120.0, settings.hopMs) *
                 settings.sampleRate / 1000.0)));
 
-    auto anchors = selectAnchors(
-        master, source,
+    // Once AUTO has established a coherent temporal drift, the dynamic
+    // trajectory must also be sampled over the whole take. The old
+    // energy-only selector could concentrate all dynamic points inside one
+    // short high-energy region and miss a real phase walk outside it.
+    auto anchors = selectTimelineAnchors(
+        master,
+        source,
         window,
         dynamicHop,
-        settings.energyGateRatio,
-        settings.anchorSeparationMs / 1000.0,
-        settings.sampleRate,
         std::max<std::size_t>(1, settings.maxDynamicAnchors));
 
     if (anchors.empty()) {
