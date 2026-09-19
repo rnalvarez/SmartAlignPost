@@ -926,12 +926,6 @@ Result AlignEngine::analyze(const std::vector<float>& master,
         };
 
         size_t sourceEventCursor = 0;
-        const size_t masterSearchRadius =
-            static_cast<size_t>(
-                std::ceil(eventMatchRadius / std::max(1.0, settings.sampleRate) *
-                          settings.sampleRate));
-
-        (void)masterSearchRadius;
 
         for (const auto& event : masterEvents) {
             const size_t masterCenter = static_cast<size_t>(
