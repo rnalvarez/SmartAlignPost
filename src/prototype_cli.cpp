@@ -434,7 +434,22 @@ int main(int argc, char** argv)
     settings.maxDynamicAnchors = 240;
     settings.hasInitialDelaySamples = false;
     settings.initialDelaySamples = 0.0;
-    settings.mode = requestedMode;
+
+    // When AUTO is used with different item playback rates, the resulting
+    // project-time relationship already contains a deterministic temporal
+    // drift. Do not discard that known evidence merely because the highest-
+    // energy acoustic anchors happen to cluster in one part of the take.
+    const double rateRatio =
+        sourceRate / std::max(1.0e-12, masterRate);
+    const bool knownRateDrift =
+        std::abs(rateRatio - 1.0) > 1.0e-6;
+
+    const sap::Mode effectiveMode =
+        (requestedMode == sap::Mode::Auto && knownRateDrift)
+            ? sap::Mode::Dynamic
+            : requestedMode;
+
+    settings.mode = effectiveMode;
 
     const auto analyzeStart =
         std::chrono::steady_clock::now();
@@ -465,6 +480,10 @@ int main(int argc, char** argv)
 
     std::cout << "MODE_REQUESTED="
               << modeName(requestedMode) << "\n";
+    std::cout << "MODE_EFFECTIVE="
+              << modeName(effectiveMode) << "\n";
+    std::cout << "RATE_RATIO="
+              << rateRatio << "\n";
     std::cout << "MODE_USED="
               << modeName(result.modeUsed) << "\n";
     std::cout << "LOAD_MS="
