@@ -520,6 +520,8 @@ int main(int argc, char** argv)
               << result.scoutLastDelaySamples * 1000.0 / sr << "\n";
     std::cout << "SCOUT_R2="
               << result.scoutR2 << "\n";
+    std::cout << "SCOUT_DIRECTION="
+              << result.scoutDirectionConsistency << "\n";
     std::cout << "SCOUT_COHERENT="
               << (result.scoutCoherent ? 1 : 0) << "\n";
 
