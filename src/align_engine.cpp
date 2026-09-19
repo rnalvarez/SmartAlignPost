@@ -152,6 +152,7 @@ double gccPhatDelay(const float* master,
         }
     }
 
+#ifndef SAP_DISABLE_PHASE_REFINE
     // Phase-slope refinement around the coarse delay.
     // This implementation deliberately avoids std::exp(std::complex<>) in the
     // hot path. The Windows CI crash appeared only after the first GCC-PHAT
@@ -222,6 +223,8 @@ double gccPhatDelay(const float* master,
             }
         }
     }
+
+#endif
 
     peakCorrelation = std::clamp(best, 0.0, 1.0);
     const double prominence = std::max(0.0, best - std::max(0.0, second));
