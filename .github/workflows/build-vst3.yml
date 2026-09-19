@@ -7,6 +7,7 @@ on:
       - 'src/**'
       - 'reaper/**'
       - 'resources/**'
+      - 'tests/**'
       - 'CMakeLists.txt'
       - '.gitmodules'
       - '.github/workflows/build-vst3.yml'
