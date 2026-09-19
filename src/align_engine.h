@@ -18,11 +18,13 @@ struct Settings {
     double smoothingMs = 200.0;
     double maxSlewMsPerSecond = 8.0;
     // DYNAMIC multi-resolution refinement.
-    double dynamicFineWindowMs = 32.0;
-    double dynamicEventFrameMs = 5.0;
-    double dynamicEventMinSeparationMs = 45.0;
+    // DYNAMIC is landmark-driven: the delay curve should follow acoustic
+    // events closely enough to build a genuinely time-varying warp.
+    double dynamicFineWindowMs = 24.0;
+    double dynamicEventFrameMs = 3.0;
+    double dynamicEventMinSeparationMs = 20.0;
     double dynamicEventThreshold = 0.20;
-    double dynamicMicroWindowMs = 16.0;
+    double dynamicMicroWindowMs = 12.0;
     double dynamicMicroSearchMs = 3.0;
     bool hasInitialDelaySamples = false;
     double initialDelaySamples = 0.0;
