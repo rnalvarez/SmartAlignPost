@@ -10,18 +10,18 @@ local MIN_CONFIDENCE = 0.80
 -- Umbral interno para conservar una trayectoria DYNAMIC cuando el predictor
 -- mantiene el solapamiento pero la correlación real entre boom y lav es menor
 -- que el umbral de presentación de 0.80.
-local DYNAMIC_TRACKING_MIN_CONFIDENCE = 0.30
+local DYNAMIC_TRACKING_MIN_CONFIDENCE = 0.45
 -- Procesamos en bloques cortos para que REAPER no quede esperando más de 120 s
 -- aunque el equipo/archivo real sea mucho más lento que el smoke test de CI.
 -- El resultado final se consolida entre bloques; MASTER siempre es la referencia.
-local CHUNK_SEC = 5.0
-local CHUNK_OVERLAP_SEC = 1.0
+local CHUNK_SEC = 30.0
+local CHUNK_OVERLAP_SEC = 1.5
 local CURVE_SKIP_START_SEC = 0.05
 -- Keep the temporal control grid dense enough to follow real motion of the
 -- SOURCE microphone. The analyzer now measures at 10 ms, so collapsing to
 -- 40 ms was unnecessarily low-pass filtering the physical delay trajectory.
-local CONSOLIDATE_MAX_SEC = 0.02
-local CONSOLIDATE_MIN_DELTA_SAMPLES = 0.10
+local CONSOLIDATE_MAX_SEC = 0.08
+local CONSOLIDATE_MIN_DELTA_SAMPLES = 1.0
 -- Ganancia adicional aplicada SOLO a la variación de delay durante el
 -- time-warp. 1.0 = curva medida; valores mayores hacen que REAPER adapte
 -- temporalmente el SOURCE con más decisión. El offset inicial permanece igual.
@@ -36,6 +36,7 @@ local masterPos, masterOffs, masterRate, masterLength = 0, 0, 1, 0
 local status, statusKind = "Esperando selección.", "info"
 local analyzed, applied = false, false
 local lastMouseDown = false
+local draw_ui
 
 local function script_dir()
   local src = debug.getinfo(1, "S").source
@@ -71,7 +72,7 @@ local function run_chunk(masterFile,sourceFile,masterStart,sourceStart,duration,
   cmd=cmd.." "..quote(string.format("%.6f",initialDelay or 0.0))
       .." "..quote(string.format("%.9f",masterRate))
       .." "..quote(string.format("%.9f",sourceRate))
-  local code,out,norm=parse_process_output(reaper.ExecProcess(cmd,120000))
+  local code,out,norm=parse_process_output(reaper.ExecProcess(cmd,180000))
   if code~=0 then
     if code==259 then
       return nil,"timeout del analizador (>120 s) en un bloque de "..string.format("%.1f",duration).." s."
@@ -186,6 +187,22 @@ local function analyze_source(item,index)
   local points={}; local chunkStart=commonStart; local first=true; local fallbackDelay,fallbackDelayMs,fallbackConf=0,0,0; local priorDelay=nil
   while chunkStart<commonEnd-0.05 do
     local duration=math.min(CHUNK_SEC,commonEnd-chunkStart); if duration<0.5 then break end
+    -- Paint progress before the blocking child process starts.  The Lua
+    -- analyzer is synchronous, so the UI cannot redraw while the EXE runs;
+    -- this at least keeps the window visibly alive and shows which block is
+    -- about to be processed.
+    set_status(
+      string.format(
+        "SOURCE %d · analizando %.1f–%.1f s de %.1f s…",
+        index,
+        chunkStart-commonStart,
+        math.min(commonEnd,chunkStart+duration)-commonStart,
+        commonEnd-commonStart),
+      "info")
+    if draw_ui then
+      draw_ui()
+      gfx.update()
+    end
     local masterStart=masterOffs+(chunkStart-masterPos)*masterRate; local sourceStart=offs+(chunkStart-pos)*rate
     local a,e=run_chunk(masterPath,path,masterStart,sourceStart,duration,priorDelay,masterRate,rate); if not a then return nil,string.format("SOURCE #%d: %s",index,tostring(e)) end
     fallbackDelay,fallbackDelayMs,fallbackConf=a.staticDelay,a.staticDelayMs,a.staticConfidence
@@ -205,6 +222,8 @@ local function analyze_source(item,index)
     end
     if commonEnd-chunkStart<=CHUNK_SEC+0.001 then break end; chunkStart=chunkStart+CHUNK_SEC-CHUNK_OVERLAP_SEC; first=false
   end
+  set_status(string.format("SOURCE %d · consolidando curva (%d mediciones)…",index,#points),"info")
+  if draw_ui then draw_ui(); gfx.update() end
   local curve=consolidate(points); if #curve==0 then curve[1]={time=commonStart,delay=fallbackDelay,delayMs=fallbackDelayMs,confidence=fallbackConf,keyPoint=false} elseif curve[1].time>commonStart+1e-6 then table.insert(curve,1,{time=commonStart,delay=curve[1].delay,delayMs=curve[1].delayMs,confidence=curve[1].confidence,keyPoint=false}) end
   local minConf,maxAbs=1,0; for _,p in ipairs(curve) do minConf=math.min(minConf,p.confidence or 0); maxAbs=math.max(maxAbs,math.abs(p.delay or 0)) end
   return {index=index,item=item,take=take,sourcePos=pos,sourceOffs=offs,sourceRate=rate,commonStart=commonStart,commonEnd=commonEnd,curve=curve,pointCount=#curve,minConfidence=minConf,maxAbsDelay=maxAbs},nil
@@ -423,7 +442,7 @@ local function draw_button(x,y,w,h,label,enabled,primary)
   if not enabled then rect(x,y,w,h,55,55,60) elseif primary then rect(x,y,w,h,hover and 70 or 52,hover and 155 or 125,hover and 245 or 210) else rect(x,y,w,h,hover and 78 or 64,hover and 78 or 64,hover and 85 or 70) end
   local tw=gfx.measurestr(label); text(x+(w-tw)/2,y+10,label,16,enabled and 245 or 135,enabled and 245 or 135,enabled and 250 or 135)
 end
-local function draw_ui()
+draw_ui=function()
   rect(0,0,gfx.w,gfx.h,24,25,29); text(24,18,"SMART ALIGN POST",25,245,245,250); text(24,49,"DYNAMIC · MULTI SOURCE v2 · "..LANDMARK_WARP_VERSION,15,160,170,185); text(24,73,"MASTER = referencia absoluta · nunca se modifica",14,195,200,210); text(24,94,"Corrección dinámica MASTER → cada SOURCE mediante time-warp",13,145,155,170)
   local n=reaper.CountSelectedMediaItems(0); text(720,24,"Seleccionados: "..n,15,205,210,220); text(720,48,"MASTER: "..(masterItem and "OK" or "—"),14,160,175,185)
   local y=125; rect(18,y,gfx.w-36,32,45,47,53); text(28,y+8,"SOURCE",14,190,195,205); text(145,y+8,"PUNTOS",14,190,195,205); text(245,y+8,"MAX |DELAY|",14,190,195,205); text(400,y+8,"MIN CONF",14,190,195,205); text(535,y+8,"TRAMO",14,190,195,205); text(705,y+8,"STATE",14,190,195,205)
