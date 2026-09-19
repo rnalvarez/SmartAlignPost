@@ -264,9 +264,9 @@ int main(int argc, char** argv) {
     // hop provide adequate temporal resolution while reducing FFT work by
     // several times versus the original 200/100 ms configuration.
     if (dynamic) {
-        settings.analysisWindowMs = 80.0;
-        settings.hopMs = 40.0;
-        settings.smoothingMs = 60.0;
+        settings.analysisWindowMs = 60.0;
+        settings.hopMs = 20.0;
+        settings.smoothingMs = 35.0;
         settings.maxSlewMsPerSecond = 120.0;
         settings.hasInitialDelaySamples = hasInitialDelay;
         settings.initialDelaySamples = initialDelaySamples;
@@ -305,7 +305,8 @@ int main(int argc, char** argv) {
             // scripts did) is a unit-conversion bug, not a valid seconds
             // conversion.
             std::cout << "POINT=" << p.timeSec << "," << delayMs << ","
-                       << p.delaySamples << "," << p.confidence << "\n";
+                       << p.delaySamples << "," << p.confidence << ","
+                       << (p.keyPoint ? 1 : 0) << "\n";
         }
     }
 
