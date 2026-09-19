@@ -832,6 +832,13 @@ Result AlignEngine::analyze(
             }
         }
 
+        result.scoutPoints = static_cast<int>(scout.size());
+
+        if (scout.size() >= 1) {
+            result.scoutFirstDelaySamples = scout.front().second;
+            result.scoutLastDelaySamples = scout.back().second;
+        }
+
         if (scout.size() >= 3) {
             const double firstDelay = scout.front().second;
             const double lastDelay = scout.back().second;
@@ -864,9 +871,11 @@ Result AlignEngine::analyze(
                 rSquared = std::clamp(corr * corr, 0.0, 1.0);
             }
 
+            result.scoutR2 = rSquared;
             coherentTemporalDrift =
                 endToEnd > dynamicThreshold &&
                 rSquared >= 0.45;
+            result.scoutCoherent = coherentTemporalDrift;
         }
     }
 
