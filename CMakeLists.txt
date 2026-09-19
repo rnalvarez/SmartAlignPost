@@ -68,15 +68,20 @@ if(SAP_BUILD_TESTS)
         src/align_engine.cpp
     )
     target_include_directories(smartalign_engine_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-
-    # Windows-only diagnostic instrumentation for the native DSP test binary.
-    # This does not affect the VST3 or REAPER prototype targets.
-    if(WIN32 AND MSVC)
-        target_compile_options(smartalign_engine_tests PRIVATE /fsanitize=address /Zi)
-        target_link_options(smartalign_engine_tests PRIVATE /fsanitize=address)
-    endif()
-
     add_test(NAME SmartAlignEngineTests COMMAND smartalign_engine_tests)
+    set_tests_properties(SmartAlignEngineTests PROPERTIES TIMEOUT 30)
+
+    if(WIN32 AND MSVC)
+        add_executable(smartalign_dynamic_diagnostic
+            tests/dynamic_tracking_diagnostic.cpp
+            src/align_engine.cpp
+        )
+        target_include_directories(smartalign_dynamic_diagnostic PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+        target_compile_options(smartalign_dynamic_diagnostic PRIVATE /fsanitize=address /Zi)
+        target_link_options(smartalign_dynamic_diagnostic PRIVATE /fsanitize=address)
+        add_test(NAME SmartAlignDynamicDiagnostic COMMAND smartalign_dynamic_diagnostic)
+        set_tests_properties(SmartAlignDynamicDiagnostic PROPERTIES TIMEOUT 30)
+    endif()
 
     if(SAP_BUILD_PROTOTYPE)
         add_executable(smartalign_prototype_tests
