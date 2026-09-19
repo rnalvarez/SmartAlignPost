@@ -216,29 +216,28 @@ int main()
             return 4;
         }
 
-        double firstError =
-            std::numeric_limits<double>::infinity();
-        double lastError =
-            std::numeric_limits<double>::infinity();
+        const auto expectedAt = [&](double timeSec) {
+            const double durationSec =
+                static_cast<double>(master.size() - 1) / sr;
+            const double u =
+                std::clamp(timeSec / durationSec, 0.0, 1.0);
+            return startDelay +
+                   (endDelay - startDelay) * u;
+        };
 
-        firstError = std::abs(
-            r.curve.front().delaySamples -
-            startDelay);
+        double maxError = 0.0;
+        for (const auto& point : r.curve) {
+            const double expected =
+                expectedAt(point.timeSec);
+            maxError = std::max(
+                maxError,
+                std::abs(point.delaySamples - expected));
+        }
 
-        lastError = std::abs(
-            r.curve.back().delaySamples -
-            endDelay);
-
-        if (firstError > 8.0 ||
-            lastError > 8.0) {
+        if (maxError > 8.0) {
             std::cerr
-                << "dynamic endpoints failed: first="
-                << r.curve.front().delaySamples
-                << " last="
-                << r.curve.back().delaySamples
-                << " expected="
-                << startDelay << " -> "
-                << endDelay << "\n";
+                << "dynamic trajectory failed: max error="
+                << maxError << " samples\n";
             return 5;
         }
     }
