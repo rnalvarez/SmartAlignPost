@@ -316,6 +316,70 @@ int main()
                   << " points=" << movingResult.curve.size() << "\n";
     }
 
+    std::cerr << "STAGE: rate-aware time-stretch tracking\\n" << std::flush;
+
+    // Regression for the actual REAPER failure mode: SOURCE playback speed
+    // differs slightly from MASTER. This is modeled directly in project-time
+    // samples, so the physical delay must drift throughout the take.
+    {
+        constexpr double sourceRate = 0.999;
+        constexpr int fixedDelay = 56;
+        std::vector<float> rateSource(durationSamples, 0.0f);
+
+        for (size_t i = 0; i < rateSource.size(); ++i) {
+            const double nativePos =
+                static_cast<double>(i) * sourceRate -
+                static_cast<double>(fixedDelay);
+            if (nativePos < 0.0 ||
+                nativePos >= static_cast<double>(master.size() - 1))
+                continue;
+
+            const size_t j = static_cast<size_t>(std::floor(nativePos));
+            const double frac = nativePos - static_cast<double>(j);
+            rateSource[i] = static_cast<float>(
+                (1.0 - frac) * master[j] +
+                frac * master[j + 1]);
+        }
+
+        sap::Settings rateTracking;
+        rateTracking.sampleRate = sr;
+        rateTracking.mode = sap::Mode::Dynamic;
+        rateTracking.maxDelayMs = 40.0;
+        rateTracking.analysisWindowMs = 40.0;
+        rateTracking.hopMs = 10.0;
+        rateTracking.minConfidence = 0.80;
+        rateTracking.smoothingMs = 10.0;
+        rateTracking.maxSlewMsPerSecond = 600.0;
+        rateTracking.dynamicMicroWindowMs = 12.0;
+        rateTracking.dynamicMicroSearchMs = 3.0;
+
+        const auto rr =
+            sap::AlignEngine::analyze(master, rateSource, rateTracking);
+
+        if (rr.curve.size() < 10) {
+            std::cerr << "Rate-aware tracking curve too short: "
+                      << rr.curve.size() << "\\n";
+            return 21;
+        }
+
+        const double firstRateDelay = rr.curve.front().delaySamples;
+        const double lastRateDelay = rr.curve.back().delaySamples;
+        const double drift =
+            lastRateDelay - firstRateDelay;
+
+        if (drift < 12.0) {
+            std::cerr << "Rate-aware tracking stayed too flat: first="
+                      << firstRateDelay << " last=" << lastRateDelay
+                      << " drift=" << drift << " samples\\n";
+            return 22;
+        }
+
+        std::cout << "RATE_AWARE_TRACKING first=" << firstRateDelay
+                  << " last=" << lastRateDelay
+                  << " drift=" << drift
+                  << " points=" << rr.curve.size() << "\\n";
+    }
+
     std::cerr << "STAGE: dynamic tracking\\n" << std::flush;
 
     // Dynamic tracking regression: the curve must follow a genuinely
