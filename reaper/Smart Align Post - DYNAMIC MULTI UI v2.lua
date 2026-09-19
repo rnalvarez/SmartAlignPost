@@ -12,13 +12,13 @@ local MIN_CONFIDENCE = 0.80
 -- El resultado final se consolida entre bloques; MASTER siempre es la referencia.
 local CHUNK_SEC = 5.0
 local CHUNK_OVERLAP_SEC = 1.0
-local CURVE_SKIP_START_SEC = 0.10
-local CONSOLIDATE_MAX_SEC = 0.08
+local CURVE_SKIP_START_SEC = 0.05
+local CONSOLIDATE_MAX_SEC = 0.04
 local CONSOLIDATE_MIN_DELTA_SAMPLES = 0.25
 -- Ganancia adicional aplicada SOLO a la variación de delay durante el
 -- time-warp. 1.0 = curva medida; valores mayores hacen que REAPER adapte
 -- temporalmente el SOURCE con más decisión. El offset inicial permanece igual.
-local DYNAMIC_WARP_GAIN = 1.75
+local DYNAMIC_WARP_GAIN = 1.0
 local WIN_W, WIN_H = 920, 600
 
 local results = {}
@@ -60,26 +60,77 @@ local function run_chunk(masterFile,sourceFile,masterStart,sourceStart,duration,
     end
     return nil,norm
   end
-  local curve={}; for t,ms,d,c in out:gmatch("POINT=([%+%-]?[%d%.]+),([%+%-]?[%d%.]+),([%+%-]?[%d%.]+),([%+%-]?[%d%.]+)") do curve[#curve+1]={time=tonumber(t),delayMs=tonumber(ms),delay=tonumber(d),confidence=tonumber(c)} end
+  local curve={}; for t,ms,d,c,k in out:gmatch("POINT=([%+%-]?[%d%.]+),([%+%-]?[%d%.]+),([%+%-]?[%d%.]+),([%+%-]?[%d%.]+),([01]?)") do curve[#curve+1]={time=tonumber(t),delayMs=tonumber(ms),delay=tonumber(d),confidence=tonumber(c),keyPoint=(k=="1")} end
   return {staticDelay=tonumber(out:match("DELAY_SAMPLES=([%+%-]?[%d%.]+)")) or 0,staticDelayMs=tonumber(out:match("DELAY_MS=([%+%-]?[%d%.]+)")) or 0,staticConfidence=tonumber(out:match("CONFIDENCE=([%+%-]?[%d%.]+)")) or 0,curve=curve},nil
 end
 local function consolidate(points)
-  table.sort(points,function(a,b)return a.time<b.time end); local out,last={},nil
+  table.sort(points,function(a,b)
+    if a.time~=b.time then return a.time<b.time end
+    return (a.keyPoint and not b.keyPoint)
+  end)
+
+  local out,last={},nil
   for _,p in ipairs(points) do
     if (p.confidence or 0)>=MIN_CONFIDENCE then
-      if not last then last={time=p.time,delay=p.delay,delayMs=p.delayMs,confidence=p.confidence}; out[#out+1]=last
+      -- Key points are temporal anchors. Never average them with nearby
+      -- ordinary measurements; they represent a locally refined acoustic
+      -- event where the warp should have a control point.
+      if p.keyPoint then
+        local anchor={
+          time=p.time,
+          delay=p.delay,
+          delayMs=p.delayMs,
+          confidence=p.confidence,
+          keyPoint=true
+        }
+        out[#out+1]=anchor
+        last=anchor
+      elseif not last then
+        last={
+          time=p.time,
+          delay=p.delay,
+          delayMs=p.delayMs,
+          confidence=p.confidence,
+          keyPoint=false
+        }
+        out[#out+1]=last
+      elseif last.keyPoint then
+        -- Keep the anchor isolated until the next ordinary point is far
+        -- enough away to justify another control point.
+        if p.time-last.time>=CONSOLIDATE_MAX_SEC then
+          last={
+            time=p.time,
+            delay=p.delay,
+            delayMs=p.delayMs,
+            confidence=p.confidence,
+            keyPoint=false
+          }
+          out[#out+1]=last
+        end
       else
-        local dt=p.time-last.time; local dd=math.abs(p.delay-last.delay)
-        if dt>=CONSOLIDATE_MAX_SEC or dd>=CONSOLIDATE_MIN_DELTA_SAMPLES then last={time=p.time,delay=p.delay,delayMs=p.delayMs,confidence=p.confidence}; out[#out+1]=last
+        local dt=p.time-last.time
+        local dd=math.abs(p.delay-last.delay)
+        if dt>=CONSOLIDATE_MAX_SEC or dd>=CONSOLIDATE_MIN_DELTA_SAMPLES then
+          last={
+            time=p.time,
+            delay=p.delay,
+            delayMs=p.delayMs,
+            confidence=p.confidence,
+            keyPoint=false
+          }
+          out[#out+1]=last
         else
           if p.confidence>last.confidence then last.confidence=p.confidence end
-          last.time=p.time; last.delay=(last.delay+p.delay)*0.5; last.delayMs=(last.delayMs+p.delayMs)*0.5
+          last.time=p.time
+          last.delay=(last.delay+p.delay)*0.5
+          last.delayMs=(last.delayMs+p.delayMs)*0.5
         end
       end
     end
   end
   return out
 end
+
 local function analyze_source(item,index)
   local path,take,err=take_source_path(item); if not path then return nil,"SOURCE #"..index..": "..tostring(err) end
   local pos=reaper.GetMediaItemInfo_Value(item,"D_POSITION"); local len=reaper.GetMediaItemInfo_Value(item,"D_LENGTH"); local offs=reaper.GetMediaItemTakeInfo_Value(take,"D_STARTOFFS"); local rate=reaper.GetMediaItemTakeInfo_Value(take,"D_PLAYRATE")
@@ -95,7 +146,7 @@ local function analyze_source(item,index)
     for _,p in ipairs(a.curve) do local abs=chunkStart+p.time; if abs>=commonStart+((first and 0) or CURVE_SKIP_START_SEC) and abs<commonEnd-0.05 then points[#points+1]={time=abs,delay=p.delay,delayMs=p.delayMs,confidence=p.confidence} end end
     if commonEnd-chunkStart<=CHUNK_SEC+0.001 then break end; chunkStart=chunkStart+CHUNK_SEC-CHUNK_OVERLAP_SEC; first=false
   end
-  local curve=consolidate(points); if #curve==0 then curve[1]={time=commonStart,delay=fallbackDelay,delayMs=fallbackDelayMs,confidence=fallbackConf} elseif curve[1].time>commonStart+1e-6 then table.insert(curve,1,{time=commonStart,delay=curve[1].delay,delayMs=curve[1].delayMs,confidence=curve[1].confidence}) end
+  local curve=consolidate(points); if #curve==0 then curve[1]={time=commonStart,delay=fallbackDelay,delayMs=fallbackDelayMs,confidence=fallbackConf,keyPoint=false} elseif curve[1].time>commonStart+1e-6 then table.insert(curve,1,{time=commonStart,delay=curve[1].delay,delayMs=curve[1].delayMs,confidence=curve[1].confidence,keyPoint=false}) end
   local minConf,maxAbs=1,0; for _,p in ipairs(curve) do minConf=math.min(minConf,p.confidence or 0); maxAbs=math.max(maxAbs,math.abs(p.delay or 0)) end
   return {index=index,item=item,take=take,sourcePos=pos,sourceOffs=offs,sourceRate=rate,commonStart=commonStart,commonEnd=commonEnd,curve=curve,pointCount=#curve,minConfidence=minConf,maxAbsDelay=maxAbs},nil
 end
