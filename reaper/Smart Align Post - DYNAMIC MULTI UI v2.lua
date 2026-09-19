@@ -1,8 +1,9 @@
 -- Smart Align Post - DYNAMIC MULTI UI v2
 -- MASTER = única referencia. Nunca se alinea una SOURCE contra otra SOURCE.
 -- ANALYZE: calcula delay dinámico MASTER -> cada SOURCE.
--- APPLY: segmenta cada SOURCE y asigna un D_STARTOFFS ABSOLUTO calculado
--- desde la posición original del item + el delay medido respecto del MASTER.
+-- APPLY: convierte la curva delay(t) en time-warp mediante stretch markers
+-- de REAPER. DYNAMIC ya no intenta resolver cambios temporales variables
+-- únicamente con D_STARTOFFS.
 -- D_POSITION nunca se modifica.
 
 local MIN_CONFIDENCE = 0.80
@@ -225,7 +226,7 @@ local function draw_button(x,y,w,h,label,enabled,primary)
   local tw=gfx.measurestr(label); text(x+(w-tw)/2,y+10,label,16,enabled and 245 or 135,enabled and 245 or 135,enabled and 250 or 135)
 end
 local function draw_ui()
-  rect(0,0,gfx.w,gfx.h,24,25,29); text(24,18,"SMART ALIGN POST",25,245,245,250); text(24,49,"DYNAMIC · MULTI SOURCE v2",15,160,170,185); text(24,73,"MASTER = referencia absoluta · nunca se modifica",14,195,200,210); text(24,94,"Corrección dinámica MASTER → cada SOURCE mediante D_STARTOFFS",13,145,155,170)
+  rect(0,0,gfx.w,gfx.h,24,25,29); text(24,18,"SMART ALIGN POST",25,245,245,250); text(24,49,"DYNAMIC · MULTI SOURCE v2",15,160,170,185); text(24,73,"MASTER = referencia absoluta · nunca se modifica",14,195,200,210); text(24,94,"Corrección dinámica MASTER → cada SOURCE mediante time-warp",13,145,155,170)
   local n=reaper.CountSelectedMediaItems(0); text(720,24,"Seleccionados: "..n,15,205,210,220); text(720,48,"MASTER: "..(masterItem and "OK" or "—"),14,160,175,185)
   local y=125; rect(18,y,gfx.w-36,32,45,47,53); text(28,y+8,"SOURCE",14,190,195,205); text(145,y+8,"PUNTOS",14,190,195,205); text(245,y+8,"MAX |DELAY|",14,190,195,205); text(400,y+8,"MIN CONF",14,190,195,205); text(535,y+8,"TRAMO",14,190,195,205); text(705,y+8,"STATE",14,190,195,205)
   local rowY=y+32; for i,r in ipairs(results) do if rowY>gfx.h-105 then break end; local good=r.minConfidence>=MIN_CONFIDENCE; rect(18,rowY,gfx.w-36,36,(i%2==0) and 34 or 30,34,39); text(28,rowY+9,"SOURCE "..r.index,14,235,235,240); text(145,rowY+9,tostring(r.pointCount),14,225,230,235); text(245,rowY+9,string.format("%.2f samp",r.maxAbsDelay),14,225,230,235); text(400,rowY+9,string.format("%.3f",r.minConfidence),14,good and 120 or 235,good and 220 or 170,good and 150 or 130); text(535,rowY+9,string.format("%.1f s",r.commonEnd-r.commonStart),14,210,215,225); text(705,rowY+9,applied and "APPLIED" or (good and "READY" or "CHECK"),14,applied and 120 or (good and 145 or 235),applied and 220 or (good and 205 or 170),applied and 155 or (good and 235 or 130)); rowY=rowY+36 end
