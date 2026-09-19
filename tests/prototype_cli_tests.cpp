@@ -336,8 +336,8 @@ int main(int argc, char** argv)
             const double last = delays.back();
 
             // 12 seconds * 0.001 = roughly 12 ms of accumulated drift.
-            Allowable: the phase core may not place anchors exactly at
-            project boundaries, so require a substantial fraction.
+            // The phase core may not place anchors exactly at project
+            // boundaries, so require a substantial fraction.
             if (last - first < 6.0 * sr / 1000.0) {
                 std::cerr
                     << "rate-aware drift too small: "
