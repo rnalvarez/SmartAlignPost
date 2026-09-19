@@ -110,6 +110,9 @@ std::vector<DynamicEvent> detectDynamicEvents(
 
     const double minActivity =
         std::max(1e-8, averageEnergy * 0.02);
+    const double minEventEnergy =
+        std::max(1e-8,
+                 averageEnergy * settings.dynamicEnergyGateRatio);
     const size_t minSeparation = std::max<size_t>(
         1,
         static_cast<size_t>(
@@ -128,6 +131,8 @@ std::vector<DynamicEvent> detectDynamicEvents(
         const double right = env[i + 1];
 
         if (left + center + right < minActivity) continue;
+        // Low-energy envelope fluctuations are poor phase/time anchors.
+        if (center < minEventEnergy) continue;
 
         // Normalized local slope change catches both onsets and offsets.
         const double transition =
@@ -775,7 +780,7 @@ Result AlignEngine::analyze(const std::vector<float>& master,
             previous = settings.initialDelaySamples;
         } else {
             // First chunk: seed from the strongest of the first few windows.
-            constexpr int kWarmupWindows = 5;
+            constexpr int kWarmupWindows = 25;
             double seedScore = -1.0;
             double seedDelay = 0.0;
             double seedCorrelation = 0.0;
@@ -790,7 +795,17 @@ Result AlignEngine::analyze(const std::vector<float>& master,
                 const double d = gccPhatDelay(master.data() + warmupPos,
                                               source.data() + warmupPos,
                                               win, maxLag, settings.sampleRate, c, peak);
-                const double score = c * peak;
+                const double warmupEnergy =
+                    prefixRms(masterEnergyPrefix,
+                              warmupPos,
+                              win);
+                const double energyScore =
+                    std::clamp(
+                        warmupEnergy /
+                        std::max(masterEnergyGate, 1e-10),
+                        0.0,
+                        2.0);
+                const double score = c * peak * (0.5 + 0.5 * energyScore);
                 if (score > seedScore) {
                     seedScore = score;
                     seedDelay = d;
@@ -812,6 +827,56 @@ Result AlignEngine::analyze(const std::vector<float>& master,
 
         std::vector<DynamicObservation> observations;
         observations.reserve((n / hop) + 64);
+
+        // Prefix energy lets us cheaply locate the strongest acoustic
+        // sub-window inside each analysis window.  Dynamic alignment should
+        // be driven by these informative regions, not by silence/room tone.
+        std::vector<double> masterEnergyPrefix(n + 1, 0.0);
+        std::vector<double> sourceEnergyPrefix(n + 1, 0.0);
+        for (size_t i = 0; i < n; ++i) {
+            const double m = master[i];
+            const double ss = source[i];
+            masterEnergyPrefix[i + 1] =
+                masterEnergyPrefix[i] + m * m;
+            sourceEnergyPrefix[i + 1] =
+                sourceEnergyPrefix[i] + ss * ss;
+        }
+
+        const double masterGlobalRms =
+            std::sqrt(masterEnergyPrefix[n] / static_cast<double>(n));
+        const double sourceGlobalRms =
+            std::sqrt(sourceEnergyPrefix[n] / static_cast<double>(n));
+        const double masterEnergyGate =
+            std::max(1e-10,
+                     masterGlobalRms * settings.dynamicEnergyGateRatio);
+        const double sourceEnergyGate =
+            std::max(1e-10,
+                     sourceGlobalRms * settings.dynamicEnergyGateRatio);
+
+        const size_t focusWindowSamples = std::max<size_t>(
+            32,
+            static_cast<size_t>(
+                std::llround(
+                    settings.sampleRate *
+                    settings.dynamicFocusWindowMs / 1000.0)));
+        const size_t focusHalf = focusWindowSamples / 2;
+        const size_t focusStepSamples = std::max<size_t>(
+            16,
+            static_cast<size_t>(
+                std::llround(
+                    settings.sampleRate *
+                    settings.dynamicFocusStepMs / 1000.0)));
+
+        const auto prefixRms = [](const std::vector<double>& prefix,
+                                  size_t start,
+                                  size_t length) {
+            if (length == 0 || start + length >= prefix.size())
+                return 0.0;
+            return std::sqrt(
+                std::max(0.0,
+                    (prefix[start + length] - prefix[start]) /
+                    static_cast<double>(length)));
+        };
 
         const auto microRefine = [&](const float* m,
                                      const float* s,
@@ -837,6 +902,55 @@ Result AlignEngine::analyze(const std::vector<float>& master,
         // the curve follow the changing delay without requiring a huge FFT
         // window.
         for (size_t pos = 0; pos + win <= n; pos += hop) {
+            // Find the strongest short acoustic region inside this window.
+            // The SOURCE uses the same relative focus position after the
+            // predicted delay has aligned the two windows.
+            size_t focusCenter = win / 2;
+            double bestFocusEnergy = 0.0;
+
+            if (win > 2 * focusHalf + 2) {
+                const size_t firstCenter = focusHalf + 1;
+                const size_t lastCenter =
+                    win - focusHalf - 1;
+
+                for (size_t center = firstCenter;
+                     center <= lastCenter;
+                     center += focusStepSamples) {
+                    const size_t focusStart =
+                        pos + center - focusHalf;
+                    const double e =
+                        prefixRms(masterEnergyPrefix,
+                                  focusStart,
+                                  focusWindowSamples);
+                    if (e > bestFocusEnergy) {
+                        bestFocusEnergy = e;
+                        focusCenter = center;
+                    }
+                }
+            }
+
+            const double masterFocusEnergy =
+                bestFocusEnergy > 0.0
+                    ? bestFocusEnergy
+                    : prefixRms(masterEnergyPrefix,
+                                pos,
+                                win);
+            const double sourceFocusEnergy =
+                prefixRms(
+                    sourceEnergyPrefix,
+                    pos + focusCenter < n
+                        ? pos + focusCenter - std::min(focusCenter, focusHalf)
+                        : pos,
+                    focusWindowSamples);
+
+            // Ignore windows dominated by room tone/silence.  This does not
+            // stop the tracker; it simply holds the last trustworthy delay and
+            // lets the final curve interpolate between informative points.
+            if (masterFocusEnergy < masterEnergyGate ||
+                sourceFocusEnergy < sourceEnergyGate) {
+                continue;
+            }
+
             const long long predictedLag =
                 static_cast<long long>(std::llround(previous));
 
@@ -863,59 +977,59 @@ Result AlignEngine::analyze(const std::vector<float>& master,
                 c,
                 peak);
 
-            // Real production recordings can lose GCC-PHAT confidence when a
-            // SOURCE has been subjected to a very small non-destructive
-            // time-stretch, even though the local waveform shape is still
-            // strongly correlated.  Do not discard such a window solely
-            // because the spectral confidence fell below minConfidence.
-            //
-            // The local waveform stage searches only a few milliseconds around
-            // the predicted residual and is therefore a safe second estimator.
+            // Refine around the most energetic acoustic region, not the
+            // arbitrary center of the 40 ms analysis window.
             const LocalRefinement local = refinePairedWaveformDelay(
                 master.data() + masterPos,
                 source.data() + sourcePos,
                 win,
-                win / 2,
+                focusCenter,
                 residualDelay,
                 settings.sampleRate,
                 settings.dynamicMicroWindowMs,
                 settings.dynamicMicroSearchMs);
 
-            const double localConfidence = std::clamp(local.score, 0.0, 1.0);
+            const double localConfidence =
+                std::clamp(local.score, 0.0, 1.0);
             const double effectiveConfidence =
                 std::max(c, localConfidence);
+
             const double trackingMinConfidence =
                 std::min(settings.minConfidence,
                          settings.dynamicTrackingMinConfidence);
 
+            if (effectiveConfidence < trackingMinConfidence)
+                continue;
+
             double residualTracked = residualDelay;
-            if (localConfidence > 0.0) {
+            if (localConfidence > 0.0)
                 residualTracked = local.delaySamples;
-            }
 
-            double d = previous + residualTracked;
+            const double maxStep =
+                settings.maxSlewMsPerSecond / 1000.0 *
+                (static_cast<double>(hop) / settings.sampleRate) *
+                settings.sampleRate;
 
-            if (effectiveConfidence < trackingMinConfidence) {
-                d = previous;
-            } else {
-                const double maxStep =
-                    settings.maxSlewMsPerSecond / 1000.0 *
-                    (static_cast<double>(hop) / settings.sampleRate) *
-                    settings.sampleRate;
-                d = std::clamp(d, previous - maxStep, previous + maxStep);
-            }
+            double d = std::clamp(
+                previous + residualTracked,
+                previous - maxStep,
+                previous + maxStep);
 
-            const double tau = std::max(0.001, settings.smoothingMs / 1000.0);
-            const double dt = static_cast<double>(hop) / settings.sampleRate;
-            const double alpha = 1.0 - std::exp(-dt / tau);
+            const double tau =
+                std::max(0.001,
+                         settings.smoothingMs / 1000.0);
+            const double dt =
+                static_cast<double>(hop) / settings.sampleRate;
+            const double alpha =
+                1.0 - std::exp(-dt / tau);
             d = previous + alpha * (d - previous);
 
-            // The measurement is centered on the MASTER window in PROJECT
-            // TIME, regardless of how far the SOURCE window had to be shifted
-            // to keep the acoustic content overlapped.
+            // Time reference is the energetic focus point.  This makes every
+            // emitted marker answer the question "where is the SOURCE at the
+            // moment that actually carries useful acoustic information?"
             const double observationTime =
-                (static_cast<double>(pos) +
-                 0.5 * static_cast<double>(win)) / settings.sampleRate;
+                (static_cast<double>(pos + focusCenter)) /
+                settings.sampleRate;
 
             observations.push_back({
                 observationTime,
