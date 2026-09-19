@@ -53,13 +53,20 @@ local function parse_process_output(processResult)
   if e then return tonumber((n:sub(1,e-1)):match("^%s*(%-?%d+)%s*$")),n:sub(e+1),n end
   return tonumber(n:match("^%s*(%-?%d+)%s*$")),"",n
 end
-local function run_chunk(masterFile,sourceFile,masterStart,sourceStart,duration,initialDelay)
+local function run_chunk(masterFile,sourceFile,masterStart,sourceStart,duration,initialDelay,masterRate,sourceRate)
+  masterRate=masterRate or 1.0
+  sourceRate=sourceRate or 1.0
   local exe=script_dir().."\\SmartAlignPostPrototype.exe"
   if reaper.file_exists and not reaper.file_exists(exe) then
     return nil,"No se encontró SmartAlignPostPrototype.exe en la misma carpeta del Lua.\\n\\nRuta buscada:\\n"..exe
   end
   local cmd=quote(exe).." "..quote(masterFile).." "..quote(sourceFile).." "..quote(string.format("%.12f",masterStart)).." "..quote(string.format("%.12f",sourceStart)).." "..quote(string.format("%.6f",duration))
-  if initialDelay~=nil then cmd=cmd.." "..quote(string.format("%.6f",initialDelay)) end
+  -- The prototype analyzes audio in PROJECT TIME. Pass the existing take
+  -- playback rates so a non-destructive REAPER time-stretch is included in
+  -- the measurement instead of being mistaken for static drift.
+  cmd=cmd.." "..quote(string.format("%.6f",initialDelay or 0.0))
+      .." "..quote(string.format("%.9f",masterRate))
+      .." "..quote(string.format("%.9f",sourceRate))
   local code,out,norm=parse_process_output(reaper.ExecProcess(cmd,120000))
   if code~=0 then
     if code==259 then
@@ -176,7 +183,7 @@ local function analyze_source(item,index)
   while chunkStart<commonEnd-0.05 do
     local duration=math.min(CHUNK_SEC,commonEnd-chunkStart); if duration<0.5 then break end
     local masterStart=masterOffs+(chunkStart-masterPos)*masterRate; local sourceStart=offs+(chunkStart-pos)*rate
-    local a,e=run_chunk(masterPath,path,masterStart,sourceStart,duration,priorDelay); if not a then return nil,string.format("SOURCE #%d: %s",index,tostring(e)) end
+    local a,e=run_chunk(masterPath,path,masterStart,sourceStart,duration,priorDelay,masterRate,rate); if not a then return nil,string.format("SOURCE #%d: %s",index,tostring(e)) end
     fallbackDelay,fallbackDelayMs,fallbackConf=a.staticDelay,a.staticDelayMs,a.staticConfidence
     if #a.curve>0 then priorDelay=a.curve[#a.curve].delay end
     for _,p in ipairs(a.curve) do
@@ -253,6 +260,11 @@ local function apply_source(r)
   local itemLen = reaper.GetMediaItemInfo_Value(r.item, "D_LENGTH")
   local rate = r.sourceRate
   if rate <= 0 or itemLen <= 0 then return 0,false end
+
+  -- LANDMARK WARP owns the complete time map. Reset any pre-existing global
+  -- playrate so the measured stretch is not applied twice; the local rate
+  -- then comes exclusively from the stretch-marker source-position map.
+  reaper.SetMediaItemTakeInfo_Value(take, "D_PLAYRATE", 1.0)
 
   local function correction_seconds(delayMs)
     return (delayMs / 1000.0)
