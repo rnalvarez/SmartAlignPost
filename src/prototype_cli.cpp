@@ -312,7 +312,7 @@ int main(int argc, char** argv) {
     // between REAPER chunks. Previously argc==7 was accidentally treated
     // as STATIC, so every chunk after the first lost the dynamic settings
     // and re-ran the expensive STATIC consensus analysis.
-    const bool dynamic = (argc == 6 || argc == 7);
+    const bool dynamic = (argc == 6 || argc == 7 || argc == 9);
     settings.mode = dynamic ? sap::Mode::Dynamic : sap::Mode::Static;
 
     // DYNAMIC prioritizes throughput: the delay can change on the scale of
