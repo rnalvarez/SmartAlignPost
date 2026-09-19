@@ -210,7 +210,30 @@ local function analyze_selection()
   masterItem=reaper.GetSelectedMediaItem(0,0); masterPath,masterTake,masterErr=take_source_path(masterItem); if not masterPath then fail("MASTER: "..tostring(masterErr)); return end
   masterPos=reaper.GetMediaItemInfo_Value(masterItem,"D_POSITION"); masterLength=reaper.GetMediaItemInfo_Value(masterItem,"D_LENGTH"); masterOffs=reaper.GetMediaItemTakeInfo_Value(masterTake,"D_STARTOFFS"); masterRate=reaper.GetMediaItemTakeInfo_Value(masterTake,"D_PLAYRATE"); if masterRate<=0 then fail("PLAYRATE inválido en MASTER."); return end
   local low=0; for i=1,selectedCount-1 do local r,e=analyze_source(reaper.GetSelectedMediaItem(0,i),i); if not r then fail(e); return end; if r.minConfidence<MIN_CONFIDENCE then low=low+1 end; results[#results+1]=r end
-  analyzed=true; set_status(string.format("LANDMARK WARP: %d SOURCE(s) analizados contra MASTER. %d con confidence < %.2f.",#results,low,MIN_CONFIDENCE),low>0 and "warn" or "ok")
+  analyzed=true
+  if #results > 0 then
+    local trajectory = {}
+    for _,r in ipairs(results) do
+      if #r.curve >= 2 then
+        local first = r.curve[1].delayMs or 0
+        local middle = r.curve[math.max(1, math.floor((#r.curve + 1) / 2))].delayMs or first
+        local last = r.curve[#r.curve].delayMs or middle
+        trajectory[#trajectory+1] = string.format(
+          "S%d %.2f/%.2f/%.2f ms",
+          r.index, first, middle, last)
+      end
+    end
+    local suffix = #trajectory > 0
+      and (" · " .. table.concat(trajectory, " | "))
+      or ""
+    set_status(
+      string.format(
+        "LANDMARK WARP: %d SOURCE(s) analizados contra MASTER. %d con confidence < %.2f.%s",
+        #results, low, MIN_CONFIDENCE, suffix),
+      low>0 and "warn" or "ok")
+  else
+    set_status("Sin SOURCE para analizar.","error")
+  end
 end
 local function set_absolute_correction(item,startPos,originalPos,originalOffs,rate,delayMs)
   local take=reaper.GetActiveTake(item); if not take then return false end
@@ -293,6 +316,7 @@ local function apply_source(r)
   local inserted = 0
   local lastPos = -1e12
   local lastSrc = -1e12
+  local expectedMarkers = {}
   local anchorDelayMs = points[1].delayMs
 
   local function amplified_delay(delayMs)
@@ -323,6 +347,7 @@ local function apply_source(r)
 
     local idx = reaper.SetTakeStretchMarker(take, -1, itemTime, srcPos)
     if idx < 0 then return false end
+    expectedMarkers[#expectedMarkers + 1] = {pos=itemTime, src=srcPos}
     lastPos = itemTime
     lastSrc = srcPos
     inserted = inserted + 1
@@ -357,18 +382,24 @@ local function apply_source(r)
   -- Read back the actual markers. REAPER can constrain marker positions when
   -- inserting them; reject an APPLY that no longer represents the requested
   -- source map within a very small tolerance.
-  local verified = 0
+  local markerCountAfter = reaper.GetTakeNumStretchMarkers(take)
+  if markerCountAfter ~= #expectedMarkers then
+    return inserted,false
+  end
+
   local tolerance = 0.0005 -- 0.5 ms in source media time
-  local markerIndex = 0
-  while markerIndex < reaper.GetTakeNumStretchMarkers(take) do
-    local ok, markerPos, markerSrc = reaper.GetTakeStretchMarker(take, markerIndex)
+  for i,expected in ipairs(expectedMarkers) do
+    local ok, markerPos, markerSrc =
+      reaper.GetTakeStretchMarker(take, i - 1)
     if ok < 0 then return inserted,false end
-    verified = verified + 1
-    markerIndex = markerIndex + 1
+    if math.abs(markerPos - expected.pos) > tolerance or
+       math.abs(markerSrc - expected.src) > tolerance then
+      return inserted,false
+    end
   end
 
   reaper.UpdateItemInProject(r.item)
-  return inserted, inserted >= 2 and verified == inserted
+  return inserted, inserted >= 2
 end
 
 local function apply_results()
