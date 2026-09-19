@@ -45,6 +45,10 @@ int main()
     if (std::abs(measured - delay) > 1.0)
         return 1;
 
+    // Diagnostic step 1 only: isolate the native GCC-PHAT call on Windows.
+    // Do not enter AlignEngine::analyze() until this direct call is proven safe.
+    return 0;
+
     sap::Settings s;
     s.sampleRate = sr;
     s.mode = sap::Mode::Dynamic;
