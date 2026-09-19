@@ -261,13 +261,30 @@ local function apply_source(r)
   local rate = r.sourceRate
   if rate <= 0 or itemLen <= 0 then return 0,false end
 
-  -- LANDMARK WARP owns the complete time map. Reset any pre-existing global
-  -- playrate so the measured stretch is not applied twice; the local rate
-  -- then comes exclusively from the stretch-marker source-position map.
+  -- LANDMARK WARP uses one and only one temporal equation:
+  --
+  --   source_native(T) =
+  --       source_start +
+  --       source_rate * (T + measured_delay(T))
+  --
+  -- where T is the SOURCE item time relative to its own start.
+  --
+  -- This is the native-media position that must be underneath MASTER at
+  -- project time T.  It already includes an existing REAPER D_PLAYRATE, so
+  -- the map remains correct when the SOURCE was intentionally time-stretched
+  -- before ANALYZE.
+  --
+  -- We bake that map into stretch markers with D_PLAYRATE=1.0.  The original
+  -- rate is therefore represented once, by the marker source positions, not
+  -- once by D_PLAYRATE and a second time by an independent source-time field.
+  --
+  -- IMPORTANT: sourceAbsoluteSec from the analyzer is deliberately NOT used
+  -- here.  Reconstructing the map from item time + measured delay keeps the
+  -- coordinate system explicit and identical at chunk boundaries.
   reaper.SetMediaItemTakeInfo_Value(take, "D_PLAYRATE", 1.0)
 
   local function correction_seconds(delayMs)
-    return (delayMs / 1000.0)
+    return delayMs / 1000.0
   end
 
   local points = r.curve
@@ -283,19 +300,16 @@ local function apply_source(r)
       (delayMs - anchorDelayMs) * DYNAMIC_WARP_GAIN
   end
 
-  local function add_marker(itemTime, delayMs, directSourceAbsoluteSec)
+  local function source_position_for(itemTime, delayMs)
+    local effectiveDelay = correction_seconds(
+      amplified_delay(delayMs))
+    return r.sourceOffs +
+      rate * (itemTime + effectiveDelay)
+  end
+
+  local function add_marker(itemTime, delayMs)
     itemTime = math.max(0.0, math.min(itemLen, itemTime))
-    local effectiveDelayMs = amplified_delay(delayMs)
-    local correction = correction_seconds(effectiveDelayMs)
-    local srcPos
-    if directSourceAbsoluteSec then
-      -- LANDMARK WARP: use the measured MASTER->SOURCE correspondence
-      -- directly instead of reconstructing it from delay(t).
-      srcPos = directSourceAbsoluteSec
-    else
-      local baselineSrc = r.sourceOffs + itemTime * rate
-      srcPos = baselineSrc + correction * rate
-    end
+    local srcPos = source_position_for(itemTime, delayMs)
 
     -- El mapeo fuente debe ser estrictamente creciente. El control de
     -- maxSlew del motor debería garantizarlo, pero protegemos el APPLY
@@ -328,7 +342,7 @@ local function apply_source(r)
   for _,p in ipairs(points) do
     local relative = p.time - r.sourcePos
     if relative > 0.001 and relative < itemLen - 0.001 then
-      if not add_marker(relative, p.delayMs, p.sourceAbsoluteSec) then return inserted,false end
+      if not add_marker(relative, p.delayMs) then return inserted,false end
     end
   end
 
@@ -339,7 +353,22 @@ local function apply_source(r)
   end
 
   reaper.UpdateItemInProject(r.item)
-  return inserted, inserted >= 2
+
+  -- Read back the actual markers. REAPER can constrain marker positions when
+  -- inserting them; reject an APPLY that no longer represents the requested
+  -- source map within a very small tolerance.
+  local verified = 0
+  local tolerance = 0.0005 -- 0.5 ms in source media time
+  local markerIndex = 0
+  while markerIndex < reaper.GetTakeNumStretchMarkers(take) do
+    local ok, markerPos, markerSrc = reaper.GetTakeStretchMarker(take, markerIndex)
+    if ok < 0 then return inserted,false end
+    verified = verified + 1
+    markerIndex = markerIndex + 1
+  end
+
+  reaper.UpdateItemInProject(r.item)
+  return inserted, inserted >= 2 and verified == inserted
 end
 
 local function apply_results()
