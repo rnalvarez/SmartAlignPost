@@ -251,7 +251,12 @@ int main(int argc, char** argv) {
     settings.smoothingMs = 120.0;
     settings.maxSlewMsPerSecond = 12.0;
 
-    const bool dynamic = (argc == 6);
+    // Both 6-argument and 7-argument invocations are DYNAMIC.
+    // The 7-argument form carries INITIAL_DELAY_SAMPLES for continuity
+    // between REAPER chunks. Previously argc==7 was accidentally treated
+    // as STATIC, so every chunk after the first lost the dynamic settings
+    // and re-ran the expensive STATIC consensus analysis.
+    const bool dynamic = (argc == 6 || argc == 7);
     settings.mode = dynamic ? sap::Mode::Dynamic : sap::Mode::Static;
 
     // DYNAMIC prioritizes throughput: the delay can change on the scale of
