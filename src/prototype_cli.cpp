@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <cmath>
 #include <fstream>
 #include <iostream>
 #include <string>
@@ -300,7 +301,7 @@ const char* modeName(sap::Mode mode)
 
 int main(int argc, char** argv)
 {
-    if (argc != 3 && argc != 10) {
+    if (argc != 3 && argc != 9) {
         std::cout
             << "ERROR=Uso: SmartAlignPostPrototype.exe MASTER.wav SOURCE.wav "
                "[MASTER_START SOURCE_START DURATION MASTER_RATE SOURCE_RATE MODE]\n";
@@ -315,7 +316,7 @@ int main(int argc, char** argv)
     double sourceRate = 1.0;
     sap::Mode requestedMode = sap::Mode::Auto;
 
-    if (argc == 10) {
+    if (argc == 9) {
         if (!parseDouble(argv[3], "MASTER_START_SEC", masterStart, error) ||
             !parseDouble(argv[4], "SOURCE_START_SEC", sourceStart, error) ||
             !parseDouble(argv[5], "DURATION_SEC", duration, error) ||
