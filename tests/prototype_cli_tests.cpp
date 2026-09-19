@@ -146,15 +146,98 @@ std::string shellQuote(const std::string& s)
 }
 
 bool runCommand(
-    const std::string& command,
+    const std::string& exe,
+    const std::string& commandArgs,
     std::string& output,
     int& exitCode)
 {
 #ifdef _WIN32
-    FILE* pipe = _popen(command.c_str(), "r");
+    const auto outPath =
+        std::filesystem::temp_directory_path() /
+        "smartalign_phase_core_cli.txt";
+
+    HANDLE outHandle = CreateFileA(
+        outPath.string().c_str(),
+        GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        nullptr,
+        CREATE_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+
+    if (outHandle == INVALID_HANDLE_VALUE)
+        return false;
+
+    SetHandleInformation(
+        outHandle,
+        HANDLE_FLAG_INHERIT,
+        HANDLE_FLAG_INHERIT);
+
+    std::string commandLine =
+        "\"" + exe + "\" " + commandArgs;
+
+    std::vector<char> mutableCommandLine(
+        commandLine.begin(),
+        commandLine.end());
+    mutableCommandLine.push_back('\0');
+
+    STARTUPINFOA si{};
+    PROCESS_INFORMATION pi{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    si.hStdOutput = outHandle;
+    si.hStdError = outHandle;
+
+    const BOOL created = CreateProcessA(
+        nullptr,
+        mutableCommandLine.data(),
+        nullptr,
+        nullptr,
+        TRUE,
+        CREATE_NO_WINDOW,
+        nullptr,
+        nullptr,
+        &si,
+        &pi);
+
+    CloseHandle(outHandle);
+
+    if (!created) {
+        std::error_code ec;
+        std::filesystem::remove(outPath, ec);
+        return false;
+    }
+
+    WaitForSingleObject(pi.hProcess, INFINITE);
+
+    DWORD processCode = 1;
+    GetExitCodeProcess(
+        pi.hProcess,
+        &processCode);
+    exitCode =
+        static_cast<int>(processCode);
+
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+
+    std::ifstream in(
+        outPath,
+        std::ios::binary);
+
+    output.assign(
+        (std::istreambuf_iterator<char>(in)),
+        std::istreambuf_iterator<char>());
+
+    std::error_code ec;
+    std::filesystem::remove(outPath, ec);
+    return true;
 #else
-    FILE* pipe = popen(command.c_str(), "r");
-#endif
+    const std::string command =
+        shellQuote(exe) + " " + commandArgs;
+
+    FILE* pipe =
+        popen(command.c_str(), "r");
 
     if (!pipe)
         return false;
@@ -163,14 +246,14 @@ bool runCommand(
     while (std::fgets(buffer, sizeof(buffer), pipe))
         output += buffer;
 
-#ifdef _WIN32
-    exitCode = _pclose(pipe);
-#else
     const int status = pclose(pipe);
     exitCode =
-        WIFEXITED(status) ? WEXITSTATUS(status) : 1;
-#endif
+        WIFEXITED(status)
+            ? WEXITSTATUS(status)
+            : 1;
+
     return true;
+#endif
 }
 
 double field(
@@ -260,13 +343,12 @@ int main(int argc, char** argv)
             std::string output;
             int status = 1;
 
-            const std::string command =
-                shellQuote(argv[1]) + " " +
+            const std::string args =
                 shellQuote(masterPath.string()) + " " +
                 shellQuote(sourcePath.string()) +
                 " 0 0 12 1 1 STATIC";
 
-            if (!runCommand(command, output, status))
+            if (!runCommand(argv[1], args, output, status))
                 throw std::runtime_error(
                     "could not launch prototype");
 
@@ -304,13 +386,12 @@ int main(int argc, char** argv)
             std::string output;
             int status = 1;
 
-            const std::string command =
-                shellQuote(argv[1]) + " " +
+            const std::string args =
                 shellQuote(masterPath.string()) + " " +
                 shellQuote(sourcePath.string()) +
                 " 0 0 12 1 0.999 AUTO";
 
-            if (!runCommand(command, output, status))
+            if (!runCommand(argv[1], args, output, status))
                 throw std::runtime_error(
                     "could not launch rate-aware prototype");
 
