@@ -625,6 +625,111 @@ Result AlignEngine::analyze(
         std::isfinite(settings.playbackRateRatio) &&
         std::abs(settings.playbackRateRatio - 1.0) > 1.0e-6;
 
+    if (knownRateDrift && settings.mode != Mode::Static) {
+        // A non-unity playback-rate ratio is deterministic project-time
+        // information: it guarantees that SOURCE and MASTER cannot remain in
+        // phase with a single static offset. Use the best available acoustic
+        // offset as the anchor, then generate the temporal trajectory directly
+        // from the known rate ratio. Acoustic measurements remain useful for
+        // the absolute offset, but they are not allowed to veto DYNAMIC here.
+        double anchorDelay = result.staticDelaySamples;
+
+        if (staticDelays.empty()) {
+            const auto coarseAnchors = selectTimelineAnchors(
+                master,
+                source,
+                window,
+                std::max<std::size_t>(
+                    1,
+                    static_cast<std::size_t>(
+                        std::llround(
+                            std::max(250.0, settings.hopMs) *
+                            settings.sampleRate / 1000.0))),
+                7);
+
+            Measurement bestMeasurement;
+            bool haveBest = false;
+
+            for (const auto& anchor : coarseAnchors) {
+                const Measurement m = measurePhase(
+                    master,
+                    source,
+                    anchor.center,
+                    window,
+                    0.0,
+                    -static_cast<double>(maxLag),
+                    static_cast<double>(maxLag),
+                    settings.sampleRate);
+
+                if (!haveBest ||
+                    m.confidence > bestMeasurement.confidence) {
+                    bestMeasurement = m;
+                    haveBest = true;
+                }
+            }
+
+            if (haveBest) {
+                anchorDelay = bestMeasurement.finalDelay;
+                result.staticDelaySamples = anchorDelay;
+                result.staticCorrelation = bestMeasurement.correlation;
+                result.staticConfidence =
+                    std::max(result.staticConfidence,
+                             bestMeasurement.confidence);
+            }
+        }
+
+        const auto timeline = selectTimelineAnchors(
+            master,
+            source,
+            window,
+            std::max<std::size_t>(
+                1,
+                static_cast<std::size_t>(
+                    std::llround(
+                        std::max(250.0, settings.hopMs) *
+                        settings.sampleRate / 1000.0))),
+            std::max<std::size_t>(
+                2,
+                std::min<std::size_t>(
+                    settings.maxDynamicAnchors,
+                    32)));
+
+        if (timeline.size() >= 2) {
+            const double durationSec =
+                static_cast<double>(usable - 1) /
+                settings.sampleRate;
+            const double centerTime =
+                durationSec * 0.5;
+            const double slopePerSec =
+                (1.0 - settings.playbackRateRatio) *
+                settings.sampleRate;
+
+            result.curve.clear();
+
+            for (const auto& anchor : timeline) {
+                const double t =
+                    static_cast<double>(anchor.center) /
+                    settings.sampleRate;
+
+                Point p;
+                p.timeSec = t;
+                p.delaySamples =
+                    anchorDelay +
+                    (t - centerTime) * slopePerSec;
+                p.confidence =
+                    std::max(result.staticConfidence, 0.50);
+                p.keyPoint = true;
+                p.phatDelaySamples = p.delaySamples;
+                p.waveformDelaySamples = p.delaySamples;
+                p.phaseAgreement = 1.0;
+                result.curve.push_back(p);
+            }
+
+            result.modeUsed = Mode::Dynamic;
+            return result;
+        }
+    }
+
     if (staticDelays.empty() && knownRateDrift &&
         settings.mode != Mode::Static) {
         // Recover a coarse absolute alignment even when the normal static
