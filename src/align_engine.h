@@ -37,6 +37,7 @@ struct Settings {
     double dynamicEnergyGateRatio = 0.65;
     double dynamicFocusWindowMs = 6.0;
     double dynamicFocusStepMs = 3.0;
+    double dynamicRecaptureIntervalMs = 240.0;
     bool hasInitialDelaySamples = false;
     double initialDelaySamples = 0.0;
 };
