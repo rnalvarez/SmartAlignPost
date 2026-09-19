@@ -112,3 +112,5 @@ endif()
 # Trigger Windows package build after prototype smoke-test fix
 
 # CI trigger: validate Windows DYNAMIC phase test diagnostics.
+
+# CI rebuild trigger: regenerate the Windows REAPER prototype executable.
