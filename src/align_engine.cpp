@@ -823,22 +823,54 @@ Result AlignEngine::analyze(const std::vector<float>& master,
                 settings.dynamicMicroSearchMs);
         };
 
-        // Dense baseline tracking. The baseline is intentionally more
-        // frequent than the old 40 ms hop because the final warp should not
-        // be forced to infer a change from widely spaced measurements.
+        // Dense baseline tracking with PREDICTIVE ALIGNMENT. Instead of
+        // comparing MASTER[pos] with SOURCE[pos] and asking GCC to search the
+        // full absolute acoustic delay, the SOURCE window is first shifted by
+        // the delay measured in the previous step. GCC then only has to find
+        // the small residual error around that prediction.
+        //
+        // This is critical for real REAPER playrate drift: a small 0.999x
+        // SOURCE rate can accumulate tens of milliseconds over a long take.
+        // A fixed same-time window progressively loses overlap as the absolute
+        // delay grows, causing confidence to collapse and freezing the curve.
+        // Predictive alignment keeps the correlated audio overlapped and lets
+        // the curve follow the changing delay without requiring a huge FFT
+        // window.
         for (size_t pos = 0; pos + win <= n; pos += hop) {
+            const long long predictedLag =
+                static_cast<long long>(std::llround(previous));
+
+            size_t masterPos = pos;
+            size_t sourcePos = pos;
+
+            if (predictedLag >= 0) {
+                sourcePos += static_cast<size_t>(predictedLag);
+            } else {
+                masterPos += static_cast<size_t>(-predictedLag);
+            }
+
+            if (masterPos + win > n || sourcePos + win > n)
+                break;
+
             double c = 0.0;
             double peak = 0.0;
-            double d = gccPhatDelay(master.data() + pos,
-                                    source.data() + pos,
-                                    win, maxLag, settings.sampleRate, c, peak);
+            const double residualDelay = gccPhatDelay(
+                master.data() + masterPos,
+                source.data() + sourcePos,
+                win,
+                maxLag,
+                settings.sampleRate,
+                c,
+                peak);
+
+            double d = previous + residualDelay;
 
             if (c >= settings.minConfidence) {
-                d = microRefine(
-                    master.data() + pos,
-                    source.data() + pos,
+                d = previous + microRefine(
+                    master.data() + masterPos,
+                    source.data() + sourcePos,
                     win,
-                    d);
+                    residualDelay);
             }
 
             if (c < settings.minConfidence) {
@@ -856,11 +888,9 @@ Result AlignEngine::analyze(const std::vector<float>& master,
             const double alpha = 1.0 - std::exp(-dt / tau);
             d = previous + alpha * (d - previous);
 
-            // GCC/micro correlation is measured over the whole window.
-            // Its temporal reference is therefore the window CENTER, not its
-            // left edge. Labeling it at 'pos' shifts every warp control point
-            // backwards by half a window and makes a changing acoustic delay
-            // look less variable than it really is.
+            // The measurement is centered on the MASTER window in PROJECT
+            // TIME, regardless of how far the SOURCE window had to be shifted
+            // to keep the acoustic content overlapped.
             const double observationTime =
                 (static_cast<double>(pos) +
                  0.5 * static_cast<double>(win)) / settings.sampleRate;
