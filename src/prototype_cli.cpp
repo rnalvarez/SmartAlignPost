@@ -323,6 +323,9 @@ int main(int argc, char** argv) {
         // High temporal resolution for a moving SOURCE. The measurement time
         // is the window center; a 10 ms hop gives the warp frequent control
         // points while the landmark pass adds exact acoustic anchors.
+        // Dynamic drift can exceed the nominal single-mic acoustic offset
+        // during long takes or artificial rate-drift tests.
+        settings.maxDelayMs = 40.0;
         settings.analysisWindowMs = 40.0;
         settings.hopMs = 10.0;
         settings.smoothingMs = 10.0;
