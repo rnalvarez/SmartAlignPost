@@ -24,6 +24,7 @@ struct Settings {
     double dynamicEventFrameMs = 3.0;
     double dynamicEventMinSeparationMs = 20.0;
     double dynamicEventThreshold = 0.20;
+    double dynamicEventMatchWindowMs = 15.0;
     double dynamicMicroWindowMs = 12.0;
     double dynamicMicroSearchMs = 3.0;
     bool hasInitialDelaySamples = false;
