@@ -1160,7 +1160,16 @@ Result AlignEngine::analyze(const std::vector<float>& master,
 
         if (!r.curve.empty()) {
             r.staticDelaySamples = r.curve.back().delaySamples;
-            r.staticConfidence = r.curve.back().confidence;
+            // Keep the summary confidence representative of the global/DYNAMIC
+            // seed rather than letting one low-confidence local point make the
+            // entire analysis look invalid. Local confidence remains attached
+            // to every curve point for the REAPER layer.
+            double maxCurveConfidence = 0.0;
+            for (const auto& p : r.curve)
+                maxCurveConfidence = std::max(
+                    maxCurveConfidence, p.confidence);
+            r.staticConfidence = std::max(
+                r.staticConfidence, maxCurveConfidence);
         }
 
         r.staticTotalWindows =
