@@ -31,7 +31,12 @@ struct Settings {
     // correlation confidence is below the static 0.80 presentation threshold.
     // This lower bound is used only to decide whether a predicted local
     // measurement is trustworthy enough to advance the trajectory.
-    double dynamicTrackingMinConfidence = 0.30;
+    double dynamicTrackingMinConfidence = 0.45;
+    // Dynamic alignment follows acoustically informative moments instead of
+    // treating low-energy/noise-only windows as equally trustworthy.
+    double dynamicEnergyGateRatio = 0.65;
+    double dynamicFocusWindowMs = 6.0;
+    double dynamicFocusStepMs = 3.0;
     bool hasInitialDelaySamples = false;
     double initialDelaySamples = 0.0;
 };
