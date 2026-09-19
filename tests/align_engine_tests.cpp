@@ -332,6 +332,56 @@ int main()
         }
     }
 
+    std::cerr << "PHASE TEST: AUTO accepts monotonic nonlinear drift\n";
+
+    {
+        const double durationSamples =
+            static_cast<double>(master.size() - 1);
+
+        std::vector<float> source(master.size(), 0.0f);
+        for (std::size_t i = 3; i + 2 < source.size(); ++i) {
+            const double u =
+                static_cast<double>(i) /
+                std::max(1.0, durationSamples);
+
+            // Strongly nonlinear but monotonic project-time drift.
+            const double shaped =
+                0.05 * u + 0.95 * std::pow(u, 6.0);
+            const double delay =
+                35.0 + 260.0 * shaped;
+
+            const double sourcePos =
+                static_cast<double>(i) - delay;
+
+            source[i] = static_cast<float>(
+                lagrange4(master, sourcePos));
+        }
+
+        sap::Settings s;
+        s.sampleRate = sr;
+        s.mode = sap::Mode::Auto;
+        s.maxDelayMs = 12.0;
+        s.analysisWindowMs = 60.0;
+        s.hopMs = 250.0;
+        s.minConfidence = 0.68;
+
+        const auto r =
+            sap::AlignEngine::analyze(master, source, s);
+
+        if (r.modeUsed != sap::Mode::Dynamic ||
+            r.curve.size() < 2 ||
+            r.scoutDirectionConsistency < 0.67) {
+            std::cerr
+                << "AUTO nonlinear drift failed: mode="
+                << (r.modeUsed == sap::Mode::Dynamic ? "DYNAMIC" : "STATIC")
+                << " curve=" << r.curve.size()
+                << " direction=" << r.scoutDirectionConsistency
+                << " R2=" << r.scoutR2
+                << "\n";
+            return 12;
+        }
+    }
+
     std::cerr << "PHASE TEST: noisy source\n";
 
     {
