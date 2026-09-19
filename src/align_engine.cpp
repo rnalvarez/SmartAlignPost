@@ -277,6 +277,88 @@ double normalizedWindowCorrelation(
     return num / std::sqrt(daEnergy * dbEnergy);
 }
 
+struct LocalRefinement
+{
+    double delaySamples = 0.0;
+    double score = 0.0;
+};
+
+LocalRefinement refinePairedWaveformDelay(
+    const float* master,
+    const float* source,
+    size_t n,
+    size_t masterCenter,
+    double predictedDelaySamples,
+    double sampleRate,
+    double microWindowMs,
+    double searchMs)
+{
+    LocalRefinement result{predictedDelaySamples, 0.0};
+    if (n < 128 || sampleRate <= 0.0) return result;
+
+    const size_t windowSamples = std::max<size_t>(
+        96,
+        static_cast<size_t>(
+            sampleRate * microWindowMs / 1000.0));
+    const size_t halfWindow = windowSamples / 2;
+    if (halfWindow < 48) return result;
+
+    const int radius = std::max(
+        1,
+        static_cast<int>(
+            sampleRate * searchMs / 1000.0));
+    const int centerLag = static_cast<int>(
+        std::llround(predictedDelaySamples));
+
+    std::vector<double> scores(
+        static_cast<size_t>(2 * radius + 1),
+        0.0);
+
+    int validCount = 0;
+    for (int i = -radius; i <= radius; ++i) {
+        const int lag = centerLag + i;
+        const double raw = std::abs(
+            normalizedWindowCorrelation(
+                master, source, n, lag, masterCenter, halfWindow, false));
+        const double slope = std::abs(
+            normalizedWindowCorrelation(
+                master, source, n, lag, masterCenter, halfWindow, true));
+        const double score = 0.60 * raw + 0.40 * slope;
+        scores[static_cast<size_t>(i + radius)] = score;
+        if (score > 0.0) ++validCount;
+    }
+
+    if (validCount == 0) return result;
+
+    int best = radius;
+    for (int i = 1; i < static_cast<int>(scores.size()); ++i) {
+        if (scores[static_cast<size_t>(i)] >
+            scores[static_cast<size_t>(best)]) {
+            best = i;
+        }
+    }
+
+    const int bestLag = centerLag + (best - radius);
+    double refined = static_cast<double>(bestLag);
+
+    if (best > 0 && best + 1 < static_cast<int>(scores.size())) {
+        const double ym = scores[static_cast<size_t>(best - 1)];
+        const double y0 = scores[static_cast<size_t>(best)];
+        const double yp = scores[static_cast<size_t>(best + 1)];
+        const double denom = ym - 2.0 * y0 + yp;
+        if (std::abs(denom) > 1e-12) {
+            refined += std::clamp(
+                0.5 * (ym - yp) / denom,
+                -0.5,
+                0.5);
+        }
+    }
+
+    result.delaySamples = refined;
+    result.score = scores[static_cast<size_t>(best)];
+    return result;
+}
+
 double refineLocalWaveformDelay(
     const float* master,
     const float* source,
@@ -796,88 +878,140 @@ Result AlignEngine::analyze(const std::vector<float>& master,
         // windows (-10/0/+10 ms) make the estimate less sensitive to choosing
         // one exact frame boundary. These points become hard temporal anchors
         // for the REAPER warp instead of being averaged away by consolidation.
-        const auto events = detectDynamicEvents(master, settings.sampleRate, settings);
-        const size_t fineWin = std::max<size_t>(
-            256,
+        const auto masterEvents =
+            detectDynamicEvents(master, settings.sampleRate, settings);
+        const auto sourceEvents =
+            detectDynamicEvents(source, settings.sampleRate, settings);
+
+        // Explicit MASTER -> SOURCE landmark correspondence.  We first use
+        // the dense baseline delay estimate to predict where the same acoustic
+        // event should appear in SOURCE, then pair it to the nearest SOURCE
+        // event inside a physically plausible neighborhood.  This turns an
+        // event into a direct time-map constraint:
+        //
+        //     MASTER event time  ->  SOURCE event time
+        //
+        // instead of merely asking GCC for the delay of a window around the
+        // MASTER event.
+        const double eventMatchRadius =
+            settings.sampleRate *
+            settings.dynamicEventMatchWindowMs / 1000.0;
+
+        auto baselineDelayAt = [&](double timeSec) {
+            if (observations.empty()) return previous;
+
+            auto it = std::lower_bound(
+                observations.begin(),
+                observations.end(),
+                timeSec,
+                [](const DynamicObservation& obs, double t) {
+                    return obs.timeSec < t;
+                });
+
+            if (it == observations.begin())
+                return it->delaySamples;
+            if (it == observations.end())
+                return observations.back().delaySamples;
+
+            const auto& hi = *it;
+            const auto& lo = *(it - 1);
+            const double span = std::max(
+                1e-6, hi.timeSec - lo.timeSec);
+            const double u = std::clamp(
+                (timeSec - lo.timeSec) / span,
+                0.0,
+                1.0);
+            return lo.delaySamples +
+                   (hi.delaySamples - lo.delaySamples) * u;
+        };
+
+        size_t sourceEventCursor = 0;
+        const size_t masterSearchRadius =
             static_cast<size_t>(
-                settings.sampleRate * settings.dynamicFineWindowMs / 1000.0));
-        const int fineMaxLag = std::max(
-            1,
-            std::min<int>(requestedMaxLag,
-                          static_cast<int>(fineWin / 2) - 1));
-        const int localOffsetSamples = static_cast<int>(
-            settings.sampleRate * 0.010);
+                std::ceil(eventMatchRadius / std::max(1.0, settings.sampleRate) *
+                          settings.sampleRate));
 
-        for (const auto& event : events) {
-            const size_t center = static_cast<size_t>(
+        (void)masterSearchRadius;
+
+        for (const auto& event : masterEvents) {
+            const size_t masterCenter = static_cast<size_t>(
                 std::llround(event.timeSec * settings.sampleRate));
-            if (center >= n) continue;
+            if (masterCenter >= n) continue;
 
-            double weightedDelay = 0.0;
-            double weightSum = 0.0;
-            double confidenceSum = 0.0;
-            int successful = 0;
+            const double predictedDelay =
+                baselineDelayAt(event.timeSec);
+            const double predictedSourceTime =
+                event.timeSec +
+                predictedDelay / settings.sampleRate;
 
-            for (const int offset : {
-                -localOffsetSamples, 0, localOffsetSamples
-            }) {
-                long long startSigned =
-                    static_cast<long long>(center) +
-                    static_cast<long long>(offset) -
-                    static_cast<long long>(fineWin / 2);
-
-                if (startSigned < 0)
-                    startSigned = 0;
-
-                if (startSigned + static_cast<long long>(fineWin) >
-                    static_cast<long long>(n)) {
-                    startSigned =
-                        static_cast<long long>(n) -
-                        static_cast<long long>(fineWin);
-                }
-
-                if (startSigned < 0) continue;
-
-                const size_t start =
-                    static_cast<size_t>(startSigned);
-
-                double c = 0.0;
-                double peak = 0.0;
-                double d = gccPhatDelay(
-                    master.data() + start,
-                    source.data() + start,
-                    fineWin,
-                    fineMaxLag,
-                    settings.sampleRate,
-                    c,
-                    peak);
-
-                if (c < settings.minConfidence)
-                    continue;
-
-                d = microRefine(
-                    master.data() + start,
-                    source.data() + start,
-                    fineWin,
-                    d);
-
-                const double w = std::max(0.01, c * peak);
-                weightedDelay += d * w;
-                weightSum += w;
-                confidenceSum += c;
-                ++successful;
+            while (sourceEventCursor + 1 < sourceEvents.size() &&
+                   sourceEvents[sourceEventCursor + 1].timeSec <
+                       predictedSourceTime) {
+                ++sourceEventCursor;
             }
 
-            if (successful == 0 || weightSum <= 0.0)
-                continue;
+            size_t bestSourceIndex = sourceEvents.size();
+            double bestDistanceSamples = eventMatchRadius + 1.0;
 
-            const double refinedDelay = weightedDelay / weightSum;
-            const double refinedConfidence =
-                confidenceSum / static_cast<double>(successful);
+            const size_t begin =
+                sourceEventCursor > 0 ? sourceEventCursor - 1
+                                      : sourceEventCursor;
+            const size_t end =
+                std::min(
+                    sourceEvents.size(),
+                    sourceEventCursor + 2);
+
+            for (size_t j = begin; j < end; ++j) {
+                const double distanceSamples =
+                    std::abs(
+                        sourceEvents[j].timeSec -
+                        predictedSourceTime) *
+                    settings.sampleRate;
+                if (distanceSamples < bestDistanceSamples) {
+                    bestDistanceSamples = distanceSamples;
+                    bestSourceIndex = j;
+                }
+            }
+
+            if (bestSourceIndex >= sourceEvents.size() ||
+                bestDistanceSamples > eventMatchRadius) {
+                continue;
+            }
+
+            const size_t sourceCenter = static_cast<size_t>(
+                std::llround(
+                    sourceEvents[bestSourceIndex].timeSec *
+                    settings.sampleRate));
+            if (sourceCenter >= n) continue;
+
+            const double eventDelay =
+                static_cast<double>(
+                    static_cast<long long>(sourceCenter) -
+                    static_cast<long long>(masterCenter));
+
+            const LocalRefinement refined =
+                refinePairedWaveformDelay(
+                    master.data(),
+                    source.data(),
+                    n,
+                    masterCenter,
+                    eventDelay,
+                    settings.sampleRate,
+                    settings.dynamicMicroWindowMs,
+                    settings.dynamicMicroSearchMs);
+
+            const double refinedConfidence = std::clamp(
+                0.70 * refined.score +
+                0.30 * event.strength,
+                0.0,
+                1.0);
+
+            if (refinedConfidence < settings.minConfidence)
+                continue;
 
             observations.push_back({
                 event.timeSec,
-                refinedDelay,
+                refined.delaySamples,
                 refinedConfidence,
                 true
             });
