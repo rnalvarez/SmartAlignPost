@@ -226,7 +226,8 @@ int main()
         sap::Settings seededSettings = dynSettings;
         seededSettings.hasInitialDelaySamples = true;
         seededSettings.initialDelaySamples = 52.0;
-        const size_t chunkSamples = static_cast<size_t>(5.0 * sr);
+        const size_t chunkSamples = std::min(
+            static_cast<size_t>(5.0 * sr), dynMaster.size());
         std::vector<float> seededMaster(dynMaster.begin(),
                                         dynMaster.begin() + static_cast<std::ptrdiff_t>(chunkSamples));
         std::vector<float> seededSource(dynSource.begin(),
