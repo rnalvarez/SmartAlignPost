@@ -34,6 +34,10 @@ struct Settings {
 struct Point {
     double timeSec = 0.0;
     double delaySamples = 0.0;
+    // Direct MASTER->SOURCE correspondence in the local analysis buffer.
+    // Keeping this explicitly avoids reconstructing the source map from a
+    // separately smoothed delay later in the REAPER Lua layer.
+    double sourceTimeSec = 0.0;
     double confidence = 0.0;
     bool keyPoint = false;
 };
