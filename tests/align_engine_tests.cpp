@@ -170,6 +170,49 @@ int main()
         }
     }
 
+
+    std::cerr << "STAGE: waveform micro-refinement\n" << std::flush;
+
+    // The local waveform stage should recover a deliberately coarse GCC
+    // estimate and keep the result within a fraction of one sample.
+    {
+        constexpr double microDelay = 56.35;
+        auto microSource = fractionallyDelayed(master, microDelay);
+
+        sap::Settings micro;
+        micro.sampleRate = sr;
+        micro.maxDelayMs = 12.0;
+        micro.analysisWindowMs = 60.0;
+        micro.hopMs = 20.0;
+        micro.minConfidence = 0.80;
+        micro.smoothingMs = 35.0;
+        micro.maxSlewMsPerSecond = 120.0;
+        micro.dynamicMicroWindowMs = 16.0;
+        micro.dynamicMicroSearchMs = 3.0;
+        micro.mode = sap::Mode::Dynamic;
+
+        const auto mr = sap::AlignEngine::analyze(master, microSource, micro);
+        if (mr.curve.empty()) {
+            std::cerr << "Waveform micro-refinement: empty curve\n";
+            return 16;
+        }
+
+        double maxMicroError = 0.0;
+        for (const auto& p : mr.curve)
+            maxMicroError = std::max(
+                maxMicroError,
+                std::abs(p.delaySamples - microDelay));
+
+        if (maxMicroError > 0.45) {
+            std::cerr << "Waveform micro-refinement failed: max error "
+                      << maxMicroError << " samples\n";
+            return 17;
+        }
+
+        std::cout << "WAVEFORM_MICRO max_error="
+                  << maxMicroError << " samples\n";
+    }
+
     std::cerr << "STAGE: dynamic tracking\\n" << std::flush;
 
     // Dynamic tracking regression: the curve must follow a genuinely

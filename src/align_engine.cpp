@@ -192,6 +192,170 @@ struct DynamicObservation
     bool keyPoint = false;
 };
 
+
+double normalizedWindowCorrelation(
+    const float* a,
+    const float* b,
+    size_t n,
+    int lag,
+    size_t center,
+    size_t halfWindow,
+    bool derivative)
+{
+    if (n < 32) return 0.0;
+
+    long long aStart = static_cast<long long>(center) -
+                       static_cast<long long>(halfWindow);
+    long long bStart = aStart + static_cast<long long>(lag);
+    const long long length = static_cast<long long>(halfWindow * 2);
+
+    if (aStart < 0 || bStart < 0 ||
+        aStart + length > static_cast<long long>(n) ||
+        bStart + length > static_cast<long long>(n)) {
+        return 0.0;
+    }
+
+    const size_t count = derivative
+        ? static_cast<size_t>(length - 1)
+        : static_cast<size_t>(length);
+
+    if (count < 16) return 0.0;
+
+    double ma = 0.0;
+    double mb = 0.0;
+
+    if (!derivative) {
+        for (size_t i = 0; i < count; ++i) {
+            ma += a[static_cast<size_t>(aStart) + i];
+            mb += b[static_cast<size_t>(bStart) + i];
+        }
+    } else {
+        for (size_t i = 0; i < count; ++i) {
+            const double da =
+                static_cast<double>(a[static_cast<size_t>(aStart) + i + 1]) -
+                static_cast<double>(a[static_cast<size_t>(aStart) + i]);
+            const double db =
+                static_cast<double>(b[static_cast<size_t>(bStart) + i + 1]) -
+                static_cast<double>(b[static_cast<size_t>(bStart) + i]);
+            ma += da;
+            mb += db;
+        }
+    }
+
+    ma /= static_cast<double>(count);
+    mb /= static_cast<double>(count);
+
+    double num = 0.0;
+    double daEnergy = 0.0;
+    double dbEnergy = 0.0;
+
+    if (!derivative) {
+        for (size_t i = 0; i < count; ++i) {
+            const double xa =
+                static_cast<double>(a[static_cast<size_t>(aStart) + i]) - ma;
+            const double xb =
+                static_cast<double>(b[static_cast<size_t>(bStart) + i]) - mb;
+            num += xa * xb;
+            daEnergy += xa * xa;
+            dbEnergy += xb * xb;
+        }
+    } else {
+        for (size_t i = 0; i < count; ++i) {
+            const double xa =
+                (static_cast<double>(a[static_cast<size_t>(aStart) + i + 1]) -
+                 static_cast<double>(a[static_cast<size_t>(aStart) + i])) - ma;
+            const double xb =
+                (static_cast<double>(b[static_cast<size_t>(bStart) + i + 1]) -
+                 static_cast<double>(b[static_cast<size_t>(bStart) + i])) - mb;
+            num += xa * xb;
+            daEnergy += xa * xa;
+            dbEnergy += xb * xb;
+        }
+    }
+
+    if (daEnergy <= 1e-15 || dbEnergy <= 1e-15) return 0.0;
+    return num / std::sqrt(daEnergy * dbEnergy);
+}
+
+double refineLocalWaveformDelay(
+    const float* master,
+    const float* source,
+    size_t n,
+    double predictedDelaySamples,
+    double sampleRate,
+    double microWindowMs,
+    double searchMs)
+{
+    if (n < 128 || sampleRate <= 0.0) return predictedDelaySamples;
+
+    const size_t windowSamples = std::max<size_t>(
+        96,
+        static_cast<size_t>(
+            sampleRate * microWindowMs / 1000.0));
+    const size_t halfWindow = windowSamples / 2;
+    if (halfWindow < 48 || halfWindow * 2 + 2 >= n)
+        return predictedDelaySamples;
+
+    const size_t center = n / 2;
+    const int radius = std::max(
+        1,
+        static_cast<int>(
+            sampleRate * searchMs / 1000.0));
+    const int centerLag = static_cast<int>(
+        std::llround(predictedDelaySamples));
+
+    std::vector<double> scores(
+        static_cast<size_t>(2 * radius + 1),
+        -1.0);
+
+    for (int i = -radius; i <= radius; ++i) {
+        const int lag = centerLag + i;
+        const double raw = std::abs(
+            normalizedWindowCorrelation(
+                master, source, n, lag, center, halfWindow, false));
+        const double slope = std::abs(
+            normalizedWindowCorrelation(
+                master, source, n, lag, center, halfWindow, true));
+
+        // Direct waveform shape is authoritative, while the first-difference
+        // correlation emphasizes local peaks, valleys and transients without
+        // locking us to their exact sample polarity.
+        scores[static_cast<size_t>(i + radius)] =
+            0.60 * raw + 0.40 * slope;
+    }
+
+    int best = radius;
+    for (int i = 1; i < static_cast<int>(scores.size()); ++i) {
+        if (scores[static_cast<size_t>(i)] >
+            scores[static_cast<size_t>(best)]) {
+            best = i;
+        }
+    }
+
+    const int bestLag = centerLag + (best - radius);
+    double refined = static_cast<double>(bestLag);
+
+    if (best > 0 && best + 1 < static_cast<int>(scores.size())) {
+        const double ym = scores[static_cast<size_t>(best - 1)];
+        const double y0 = scores[static_cast<size_t>(best)];
+        const double yp = scores[static_cast<size_t>(best + 1)];
+        const double denom = ym - 2.0 * y0 + yp;
+        if (std::abs(denom) > 1e-12) {
+            const double offset = 0.5 * (ym - yp) / denom;
+            refined += std::clamp(offset, -0.5, 0.5);
+        }
+    }
+
+    // Keep this a local refinement around the spectral estimate. The micro
+    // stage must not jump to a completely different correlation basin.
+    const double maxCorrection =
+        sampleRate * searchMs / 1000.0;
+    if (std::abs(refined - predictedDelaySamples) > maxCorrection)
+        return predictedDelaySamples;
+
+    return refined;
+}
+
 double gccPhatDelay(const float* master,
                      const float* source,
                      size_t n,
@@ -566,6 +730,16 @@ Result AlignEngine::analyze(const std::vector<float>& master,
         std::vector<DynamicObservation> observations;
         observations.reserve((n / hop) + 64);
 
+        const auto microRefine = [&](const float* m,
+                                     const float* s,
+                                     size_t length,
+                                     double predicted) {
+            return refineLocalWaveformDelay(
+                m, s, length, predicted, settings.sampleRate,
+                settings.dynamicMicroWindowMs,
+                settings.dynamicMicroSearchMs);
+        };
+
         // Dense baseline tracking. The baseline is intentionally more
         // frequent than the old 40 ms hop because the final warp should not
         // be forced to infer a change from widely spaced measurements.
@@ -575,6 +749,14 @@ Result AlignEngine::analyze(const std::vector<float>& master,
             double d = gccPhatDelay(master.data() + pos,
                                     source.data() + pos,
                                     win, maxLag, settings.sampleRate, c, peak);
+
+            if (c >= settings.minConfidence) {
+                d = microRefine(
+                    master.data() + pos,
+                    source.data() + pos,
+                    win,
+                    d);
+            }
 
             if (c < settings.minConfidence) {
                 d = previous;
@@ -652,7 +834,7 @@ Result AlignEngine::analyze(const std::vector<float>& master,
 
                 double c = 0.0;
                 double peak = 0.0;
-                const double d = gccPhatDelay(
+                double d = gccPhatDelay(
                     master.data() + start,
                     source.data() + start,
                     fineWin,
@@ -663,6 +845,12 @@ Result AlignEngine::analyze(const std::vector<float>& master,
 
                 if (c < settings.minConfidence)
                     continue;
+
+                d = microRefine(
+                    master.data() + start,
+                    source.data() + start,
+                    fineWin,
+                    d);
 
                 const double w = std::max(0.01, c * peak);
                 weightedDelay += d * w;
