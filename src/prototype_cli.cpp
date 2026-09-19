@@ -313,9 +313,16 @@ int main(int argc, char** argv) {
             // it by a take's D_PLAYRATE (as the pre-fix DYNAMIC REAPER
             // scripts did) is a unit-conversion bug, not a valid seconds
             // conversion.
+            const double sourceAbsoluteSec =
+                sourceStart + p.sourceTimeSec;
+            // Field order:
+            // master-local-time, delayMs, delaySamples, confidence, keyPoint,
+            // source-absolute-time.  The last field is the actual paired
+            // SOURCE position and is preferred by the REAPER layer.
             std::cout << "POINT=" << p.timeSec << "," << delayMs << ","
                        << p.delaySamples << "," << p.confidence << ","
-                       << (p.keyPoint ? 1 : 0) << "\n";
+                       << (p.keyPoint ? 1 : 0) << ","
+                       << sourceAbsoluteSec << "\n";
         }
     }
 
