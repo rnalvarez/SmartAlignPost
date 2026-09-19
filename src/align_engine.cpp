@@ -210,8 +210,8 @@ double normalizedWindowCorrelation(
     const long long length = static_cast<long long>(halfWindow * 2);
 
     if (aStart < 0 || bStart < 0 ||
-        aStart + length >= static_cast<long long>(n) ||
-        bStart + length >= static_cast<long long>(n)) {
+        aStart + length > static_cast<long long>(n) ||
+        bStart + length > static_cast<long long>(n)) {
         return 0.0;
     }
 
