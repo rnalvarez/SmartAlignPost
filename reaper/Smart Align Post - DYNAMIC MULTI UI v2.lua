@@ -22,7 +22,7 @@ local CONSOLIDATE_MIN_DELTA_SAMPLES = 0.10
 -- time-warp. 1.0 = curva medida; valores mayores hacen que REAPER adapte
 -- temporalmente el SOURCE con más decisión. El offset inicial permanece igual.
 local DYNAMIC_WARP_GAIN = 1.0
-local LANDMARK_WARP_VERSION = "LANDMARK WARP"
+local LANDMARK_WARP_VERSION = "LANDMARK WARP v3 · RATE AWARE"
 local WIN_W, WIN_H = 920, 600
 
 local results = {}
@@ -315,10 +315,11 @@ local function apply_source(r)
     return true
   end
 
-  -- Boundary at the start: extend the first measured correction backwards
-  -- so the whole item participates in the same mapping.
+  -- Boundary at the start: the first measured landmark may be a few ms
+  -- inside the item. Reconstruct t=0 from its measured delay rather than
+  -- reusing the later absolute source position.
   local first = points[1]
-  if not add_marker(0.0, first.delayMs, first.sourceAbsoluteSec) then return 0,false end
+  if not add_marker(0.0, first.delayMs, nil) then return 0,false end
 
   -- Insert the complete measured curve. The curve is deliberately
   -- dense: moving the SOURCE changes the acoustic delay continuously, so
@@ -331,10 +332,10 @@ local function apply_source(r)
     end
   end
 
-  -- Boundary at the end: hold the last measured correction through the tail.
+  -- Boundary at the end: reconstruct the endpoint from its delay.
   local last = points[#points]
   if itemLen > 0.001 then
-    if not add_marker(itemLen, last.delayMs, last.sourceAbsoluteSec) then return inserted,false end
+    if not add_marker(itemLen, last.delayMs, nil) then return inserted,false end
   end
 
   reaper.UpdateItemInProject(r.item)
