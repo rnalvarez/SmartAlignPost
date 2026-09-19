@@ -274,6 +274,7 @@ int main(int argc, char** argv) {
         settings.dynamicFineWindowMs = 24.0;
         settings.dynamicEventFrameMs = 3.0;
         settings.dynamicEventMinSeparationMs = 20.0;
+        settings.dynamicEventMatchWindowMs = 15.0;
         settings.dynamicMicroWindowMs = 12.0;
         settings.dynamicMicroSearchMs = 3.0;
         settings.hasInitialDelaySamples = hasInitialDelay;
