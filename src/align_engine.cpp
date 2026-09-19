@@ -57,6 +57,141 @@ size_t nextPowerOfTwo(size_t n)
     return p;
 }
 
+
+struct DynamicEvent
+{
+    double timeSec = 0.0;
+    double strength = 0.0;
+};
+
+std::vector<DynamicEvent> detectDynamicEvents(
+    const std::vector<float>& signal,
+    double sampleRate,
+    const Settings& settings)
+{
+    std::vector<DynamicEvent> events;
+    if (signal.empty() || sampleRate <= 0.0) return events;
+
+    const size_t frame = std::max<size_t>(
+        32,
+        static_cast<size_t>(
+            sampleRate * settings.dynamicEventFrameMs / 1000.0));
+    const size_t hop = std::max<size_t>(16, frame);
+
+    if (signal.size() < frame * 3) return events;
+
+    const size_t frameCount = 1 + (signal.size() - frame) / hop;
+    std::vector<double> energy(frameCount, 0.0);
+
+    double averageEnergy = 0.0;
+    for (size_t i = 0; i < frameCount; ++i) {
+        const size_t start = i * hop;
+        double sum = 0.0;
+        for (size_t j = 0; j < frame; ++j) {
+            const double s = signal[start + j];
+            sum += s * s;
+        }
+        energy[i] = std::sqrt(sum / static_cast<double>(frame));
+        averageEnergy += energy[i];
+    }
+    averageEnergy /= static_cast<double>(frameCount);
+
+    // Light envelope smoothing. We deliberately do not look for individual
+    // sample peaks: those depend too strongly on waveform phase and mic
+    // polarity. We look for salient acoustic envelope transitions.
+    std::vector<double> env(frameCount, 0.0);
+    for (size_t i = 0; i < frameCount; ++i) {
+        double sum = energy[i];
+        int count = 1;
+        if (i > 0) { sum += energy[i - 1]; ++count; }
+        if (i + 1 < frameCount) { sum += energy[i + 1]; ++count; }
+        env[i] = sum / static_cast<double>(count);
+    }
+
+    const double minActivity =
+        std::max(1e-8, averageEnergy * 0.02);
+    const size_t minSeparation = std::max<size_t>(
+        1,
+        static_cast<size_t>(
+            settings.dynamicEventMinSeparationMs /
+            settings.dynamicEventFrameMs));
+
+    struct Candidate {
+        size_t index = 0;
+        double strength = 0.0;
+    };
+    std::vector<Candidate> candidates;
+
+    for (size_t i = 1; i + 1 < frameCount; ++i) {
+        const double left = env[i - 1];
+        const double center = env[i];
+        const double right = env[i + 1];
+
+        if (left + center + right < minActivity) continue;
+
+        // Normalized local slope change catches both onsets and offsets.
+        const double transition =
+            std::abs(right - left) /
+            std::max(left + right, 1e-8);
+
+        const bool localPeak = center >= left && center >= right;
+        const bool localValley = center <= left && center <= right;
+        const double neighbour = 0.5 * (left + right);
+        const double prominence =
+            std::abs(center - neighbour) /
+            std::max(neighbour, 1e-8);
+
+        double strength = transition;
+        if (localPeak || localValley)
+            strength = std::max(strength, 0.5 * prominence);
+
+        if (strength < settings.dynamicEventThreshold)
+            continue;
+
+        candidates.push_back({i, strength});
+    }
+
+    // Non-maximum suppression in time: keep the strongest event within the
+    // configured separation. This avoids generating a key marker for every
+    // tiny fluctuation in speech.
+    for (const auto& candidate : candidates) {
+        if (events.empty()) {
+            events.push_back({
+                static_cast<double>(candidate.index * hop) / sampleRate,
+                candidate.strength
+            });
+            continue;
+        }
+
+        const size_t previousIndex = static_cast<size_t>(
+            std::llround(events.back().timeSec * sampleRate / hop));
+
+        if (candidate.index >= previousIndex &&
+            candidate.index - previousIndex < minSeparation) {
+            if (candidate.strength > events.back().strength) {
+                events.back().timeSec =
+                    static_cast<double>(candidate.index * hop) / sampleRate;
+                events.back().strength = candidate.strength;
+            }
+        } else {
+            events.push_back({
+                static_cast<double>(candidate.index * hop) / sampleRate,
+                candidate.strength
+            });
+        }
+    }
+
+    return events;
+}
+
+struct DynamicObservation
+{
+    double timeSec = 0.0;
+    double delaySamples = 0.0;
+    double confidence = 0.0;
+    bool keyPoint = false;
+};
+
 double gccPhatDelay(const float* master,
                      const float* source,
                      size_t n,
@@ -390,9 +525,6 @@ Result AlignEngine::analyze(const std::vector<float>& master,
         double previous = 0.0;
 
         if (settings.hasInitialDelaySamples) {
-            // The REAPER bridge supplies the last delay measured in the
-            // previous chunk. This keeps DYNAMIC continuous across chunk
-            // boundaries instead of restarting the tracker every few seconds.
             previous = settings.initialDelaySamples;
         } else {
             // First chunk: seed from the strongest of the first few windows.
@@ -431,6 +563,12 @@ Result AlignEngine::analyze(const std::vector<float>& master,
             r.staticTotalWindows = warmupCount;
         }
 
+        std::vector<DynamicObservation> observations;
+        observations.reserve((n / hop) + 64);
+
+        // Dense baseline tracking. The baseline is intentionally more
+        // frequent than the old 40 ms hop because the final warp should not
+        // be forced to infer a change from widely spaced measurements.
         for (size_t pos = 0; pos + win <= n; pos += hop) {
             double c = 0.0;
             double peak = 0.0;
@@ -453,14 +591,180 @@ Result AlignEngine::analyze(const std::vector<float>& master,
             const double alpha = 1.0 - std::exp(-dt / tau);
             d = previous + alpha * (d - previous);
 
-            r.curve.push_back({static_cast<double>(pos) / settings.sampleRate, d, c});
+            observations.push_back({
+                static_cast<double>(pos) / settings.sampleRate,
+                d,
+                c,
+                false
+            });
             previous = d;
+        }
+
+        // Event refinement: for salient acoustic envelope transitions, measure
+        // the delay again with a shorter local window. Three overlapping local
+        // windows (-10/0/+10 ms) make the estimate less sensitive to choosing
+        // one exact frame boundary. These points become hard temporal anchors
+        // for the REAPER warp instead of being averaged away by consolidation.
+        const auto events = detectDynamicEvents(master, settings.sampleRate, settings);
+        const size_t fineWin = std::max<size_t>(
+            256,
+            static_cast<size_t>(
+                settings.sampleRate * settings.dynamicFineWindowMs / 1000.0));
+        const int fineMaxLag = std::max(
+            1,
+            std::min<int>(requestedMaxLag,
+                          static_cast<int>(fineWin / 2) - 1));
+        const int localOffsetSamples = static_cast<int>(
+            settings.sampleRate * 0.010);
+
+        for (const auto& event : events) {
+            const size_t center = static_cast<size_t>(
+                std::llround(event.timeSec * settings.sampleRate));
+            if (center >= n) continue;
+
+            double weightedDelay = 0.0;
+            double weightSum = 0.0;
+            double confidenceSum = 0.0;
+            int successful = 0;
+
+            for (const int offset : {
+                -localOffsetSamples, 0, localOffsetSamples
+            }) {
+                long long startSigned =
+                    static_cast<long long>(center) +
+                    static_cast<long long>(offset) -
+                    static_cast<long long>(fineWin / 2);
+
+                if (startSigned < 0)
+                    startSigned = 0;
+
+                if (startSigned + static_cast<long long>(fineWin) >
+                    static_cast<long long>(n)) {
+                    startSigned =
+                        static_cast<long long>(n) -
+                        static_cast<long long>(fineWin);
+                }
+
+                if (startSigned < 0) continue;
+
+                const size_t start =
+                    static_cast<size_t>(startSigned);
+
+                double c = 0.0;
+                double peak = 0.0;
+                const double d = gccPhatDelay(
+                    master.data() + start,
+                    source.data() + start,
+                    fineWin,
+                    fineMaxLag,
+                    settings.sampleRate,
+                    c,
+                    peak);
+
+                if (c < settings.minConfidence)
+                    continue;
+
+                const double w = std::max(0.01, c * peak);
+                weightedDelay += d * w;
+                weightSum += w;
+                confidenceSum += c;
+                ++successful;
+            }
+
+            if (successful == 0 || weightSum <= 0.0)
+                continue;
+
+            const double refinedDelay = weightedDelay / weightSum;
+            const double refinedConfidence =
+                confidenceSum / static_cast<double>(successful);
+
+            observations.push_back({
+                event.timeSec,
+                refinedDelay,
+                refinedConfidence,
+                true
+            });
+        }
+
+        if (observations.empty()) return r;
+
+        std::sort(
+            observations.begin(),
+            observations.end(),
+            [](const DynamicObservation& a, const DynamicObservation& b) {
+                if (a.timeSec != b.timeSec)
+                    return a.timeSec < b.timeSec;
+                return a.keyPoint > b.keyPoint;
+            });
+
+        // Final robust pass. Normal measurements remain gently smoothed;
+        // event anchors retain substantially more of the locally measured
+        // delay so the warp can react where the acoustic geometry actually
+        // changes.
+        r.curve.clear();
+        r.curve.reserve(observations.size());
+
+        double tracked = observations.front().delaySamples;
+        double trackedTime = observations.front().timeSec;
+        bool haveTracked = false;
+
+        for (const auto& obs : observations) {
+            if (obs.confidence < settings.minConfidence && haveTracked)
+                continue;
+
+            if (!haveTracked) {
+                tracked = obs.delaySamples;
+                trackedTime = obs.timeSec;
+                haveTracked = true;
+            } else {
+                const double dt = std::max(
+                    1e-4,
+                    obs.timeSec - trackedTime);
+                const double maxStep =
+                    settings.maxSlewMsPerSecond / 1000.0 *
+                    dt * settings.sampleRate;
+
+                const double target = std::clamp(
+                    obs.delaySamples,
+                    tracked - maxStep,
+                    tracked + maxStep);
+
+                if (obs.keyPoint) {
+                    // Key points are strong local observations. Keep most of
+                    // their measurement instead of the slower baseline
+                    // exponential smoothing.
+                    tracked = tracked + 0.80 * (target - tracked);
+                } else {
+                    const double tau =
+                        std::max(0.001, settings.smoothingMs / 1000.0);
+                    const double alpha =
+                        1.0 - std::exp(-dt / tau);
+                    tracked = tracked + alpha * (target - tracked);
+                }
+                trackedTime = obs.timeSec;
+            }
+
+            r.curve.push_back({
+                obs.timeSec,
+                tracked,
+                obs.confidence,
+                obs.keyPoint
+            });
         }
 
         if (!r.curve.empty()) {
             r.staticDelaySamples = r.curve.back().delaySamples;
             r.staticConfidence = r.curve.back().confidence;
         }
+
+        r.staticTotalWindows =
+            static_cast<int>(observations.size());
+        r.staticSupportWindows = 0;
+        for (const auto& p : r.curve) {
+            if (p.confidence >= settings.minConfidence)
+                ++r.staticSupportWindows;
+        }
+
         return r;
     }
 
