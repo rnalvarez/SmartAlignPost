@@ -863,17 +863,36 @@ Result AlignEngine::analyze(const std::vector<float>& master,
                 c,
                 peak);
 
-            double d = previous + residualDelay;
+            // Real production recordings can lose GCC-PHAT confidence when a
+            // SOURCE has been subjected to a very small non-destructive
+            // time-stretch, even though the local waveform shape is still
+            // strongly correlated.  Do not discard such a window solely
+            // because the spectral confidence fell below minConfidence.
+            //
+            // The local waveform stage searches only a few milliseconds around
+            // the predicted residual and is therefore a safe second estimator.
+            const LocalRefinement local = refinePairedWaveformDelay(
+                master.data() + masterPos,
+                source.data() + sourcePos,
+                win,
+                win / 2,
+                residualDelay,
+                settings.sampleRate,
+                settings.dynamicMicroWindowMs,
+                settings.dynamicMicroSearchMs);
 
-            if (c >= settings.minConfidence) {
-                d = previous + microRefine(
-                    master.data() + masterPos,
-                    source.data() + sourcePos,
-                    win,
-                    residualDelay);
+            const double localConfidence = std::clamp(local.score, 0.0, 1.0);
+            const double effectiveConfidence =
+                std::max(c, localConfidence);
+
+            double residualTracked = residualDelay;
+            if (localConfidence > 0.0) {
+                residualTracked = local.delaySamples;
             }
 
-            if (c < settings.minConfidence) {
+            double d = previous + residualTracked;
+
+            if (effectiveConfidence < settings.minConfidence) {
                 d = previous;
             } else {
                 const double maxStep =
@@ -899,7 +918,7 @@ Result AlignEngine::analyze(const std::vector<float>& master,
                 observationTime,
                 d,
                 observationTime + d / settings.sampleRate,
-                c,
+                effectiveConfidence,
                 false
             });
             previous = d;
