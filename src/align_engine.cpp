@@ -776,6 +776,46 @@ Result AlignEngine::analyze(const std::vector<float>& master,
     if (settings.mode == Mode::Dynamic) {
         double previous = 0.0;
 
+        // Prefix energy lets us cheaply locate the strongest acoustic
+        // sub-window inside each analysis window.  Dynamic alignment should
+        // be driven by these informative regions, not by silence/room tone.
+        std::vector<double> masterEnergyPrefix(n + 1, 0.0);
+        for (size_t i = 0; i < n; ++i) {
+            const double m = master[i];
+            masterEnergyPrefix[i + 1] =
+                masterEnergyPrefix[i] + m * m;
+        }
+
+        const double masterGlobalRms =
+            std::sqrt(masterEnergyPrefix[n] / static_cast<double>(n));
+        const double masterEnergyGate =
+            std::max(1e-10,
+                     masterGlobalRms * settings.dynamicEnergyGateRatio);
+        const size_t focusWindowSamples = std::max<size_t>(
+            32,
+            static_cast<size_t>(
+                std::llround(
+                    settings.sampleRate *
+                    settings.dynamicFocusWindowMs / 1000.0)));
+        const size_t focusHalf = focusWindowSamples / 2;
+        const size_t focusStepSamples = std::max<size_t>(
+            16,
+            static_cast<size_t>(
+                std::llround(
+                    settings.sampleRate *
+                    settings.dynamicFocusStepMs / 1000.0)));
+
+        const auto prefixRms = [](const std::vector<double>& prefix,
+                                  size_t start,
+                                  size_t length) {
+            if (length == 0 || start + length > prefix.size())
+                return 0.0;
+            return std::sqrt(
+                std::max(0.0,
+                    (prefix[start + length] - prefix[start]) /
+                    static_cast<double>(length)));
+        };
+
         if (settings.hasInitialDelaySamples) {
             previous = settings.initialDelaySamples;
         } else {
@@ -827,46 +867,6 @@ Result AlignEngine::analyze(const std::vector<float>& master,
 
         std::vector<DynamicObservation> observations;
         observations.reserve((n / hop) + 64);
-
-        // Prefix energy lets us cheaply locate the strongest acoustic
-        // sub-window inside each analysis window.  Dynamic alignment should
-        // be driven by these informative regions, not by silence/room tone.
-        std::vector<double> masterEnergyPrefix(n + 1, 0.0);
-        for (size_t i = 0; i < n; ++i) {
-            const double m = master[i];
-            masterEnergyPrefix[i + 1] =
-                masterEnergyPrefix[i] + m * m;
-        }
-
-        const double masterGlobalRms =
-            std::sqrt(masterEnergyPrefix[n] / static_cast<double>(n));
-        const double masterEnergyGate =
-            std::max(1e-10,
-                     masterGlobalRms * settings.dynamicEnergyGateRatio);
-        const size_t focusWindowSamples = std::max<size_t>(
-            32,
-            static_cast<size_t>(
-                std::llround(
-                    settings.sampleRate *
-                    settings.dynamicFocusWindowMs / 1000.0)));
-        const size_t focusHalf = focusWindowSamples / 2;
-        const size_t focusStepSamples = std::max<size_t>(
-            16,
-            static_cast<size_t>(
-                std::llround(
-                    settings.sampleRate *
-                    settings.dynamicFocusStepMs / 1000.0)));
-
-        const auto prefixRms = [](const std::vector<double>& prefix,
-                                  size_t start,
-                                  size_t length) {
-            if (length == 0 || start + length > prefix.size())
-                return 0.0;
-            return std::sqrt(
-                std::max(0.0,
-                    (prefix[start + length] - prefix[start]) /
-                    static_cast<double>(length)));
-        };
 
         const auto microRefine = [&](const float* m,
                                      const float* s,
