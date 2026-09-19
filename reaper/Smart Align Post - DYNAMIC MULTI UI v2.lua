@@ -20,8 +20,8 @@ local CURVE_SKIP_START_SEC = 0.05
 -- Keep the temporal control grid dense enough to follow real motion of the
 -- SOURCE microphone. The analyzer now measures at 10 ms, so collapsing to
 -- 40 ms was unnecessarily low-pass filtering the physical delay trajectory.
-local CONSOLIDATE_MAX_SEC = 0.08
-local CONSOLIDATE_MIN_DELTA_SAMPLES = 1.0
+local CONSOLIDATE_MAX_SEC = 0.12
+local CONSOLIDATE_MIN_DELTA_SAMPLES = 2.0
 -- Ganancia adicional aplicada SOLO a la variación de delay durante el
 -- time-warp. 1.0 = curva medida; valores mayores hacen que REAPER adapte
 -- temporalmente el SOURCE con más decisión. El offset inicial permanece igual.
