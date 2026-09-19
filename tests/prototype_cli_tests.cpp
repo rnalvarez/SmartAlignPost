@@ -306,10 +306,9 @@ int main(int argc, char** argv)
             const std::string firstLine =
                 rateOutput.substr(firstPoint, firstNl - firstPoint);
 
-            size_t pointPos = firstNl == std::string::npos
-                ? std::string::npos
-                : rateOutput.find("POINT=", firstNl + 1);
-            if (pointPos == std::string::npos)
+            const size_t pointPos =
+                rateOutput.rfind("POINT=");
+            if (pointPos == std::string::npos || pointPos == firstPoint)
                 throw std::runtime_error(
                     "Rate-aware test produced fewer than two POINTs");
 
