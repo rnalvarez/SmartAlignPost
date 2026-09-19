@@ -27,6 +27,11 @@ struct Settings {
     double dynamicEventMatchWindowMs = 15.0;
     double dynamicMicroWindowMs = 12.0;
     double dynamicMicroSearchMs = 3.0;
+    // Dynamic tracking can remain temporally locked even when the raw
+    // correlation confidence is below the static 0.80 presentation threshold.
+    // This lower bound is used only to decide whether a predicted local
+    // measurement is trustworthy enough to advance the trajectory.
+    double dynamicTrackingMinConfidence = 0.30;
     bool hasInitialDelaySamples = false;
     double initialDelaySamples = 0.0;
 };
