@@ -24,7 +24,7 @@ local MIN_SCENE_COVERAGE = 0.95
 local MAX_RESIDUAL_SAMPLES = 256.0
 
 local EXE_NAME = "SmartAlignPostPrototype.exe"
-local FX_NAME = "Smart Align Post"
+local FX_NAME = "Smart Align Post Residual"
 
 local status = "Seleccioná primero un item del MASTER y luego items de los SOURCE tracks."
 local statusKind = "info"
