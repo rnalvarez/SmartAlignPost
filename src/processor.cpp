@@ -1,5 +1,5 @@
 #include "processor.h"
-#include "public.sdk/source/vst/ivstparameterchanges.h"
+#include "pluginterfaces/vst/ivstparameterchanges.h"
 #include "base/source/fstreamer.h"
 #include <algorithm>
 #include <cmath>
@@ -77,7 +77,6 @@ tresult PLUGIN_API Processor::setBusArrangements(
 
 tresult PLUGIN_API Processor::setupProcessing(ProcessSetup& setup) {
     sampleRate = setup.sampleRate;
-    settings.sampleRate = sampleRate;
     ensureDelayLine();
     return AudioEffect::setupProcessing(setup);
 }
@@ -122,14 +121,6 @@ double Processor::normalizedToResidual(double value) {
     const auto clamped = std::clamp(value, 0.0, 1.0);
     return -kMaxResidualSamples +
            clamped * (2.0 * kMaxResidualSamples);
-}
-
-double Processor::residualToNormalized(double value) {
-    const auto clamped =
-        std::clamp(value, -kMaxResidualSamples, kMaxResidualSamples);
-
-    return (clamped + kMaxResidualSamples) /
-           (2.0 * kMaxResidualSamples);
 }
 
 void Processor::handleParameterChanges(ProcessData& data) {
