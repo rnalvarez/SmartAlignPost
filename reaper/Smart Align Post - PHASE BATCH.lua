@@ -769,18 +769,51 @@ local function applyDynamic(job)
     tostring(dynamicRenderSerial) ..
     ".wav"
 
+  local curvePath =
+    outDir ..
+    "\\SAP_Curve_" ..
+    tostring(os.time()) ..
+    "_" ..
+    tostring(dynamicRenderSerial) ..
+    ".csv"
+
+  local curveFile =
+    io.open(curvePath, "w")
+
+  if not curveFile then
+    return false,
+      "No se pudo crear el archivo de curva DYNAMIC"
+  end
+
+  -- The analysis curve is measured from commonStart. DYNAMIC_RENDER renders
+  -- from the SOURCE item start, so move the exact measured curve onto the
+  -- item-relative timeline before passing it to the renderer.
+  local curveOriginShift =
+    job.commonStart - itemPos
+
+  for _, point in ipairs(job.curve) do
+    curveFile:write(
+      string.format(
+        "%.12f,%.12f\n",
+        (point.time or 0.0) + curveOriginShift,
+        point.delay or 0.0))
+  end
+
+  curveFile:close()
+
   local cmd =
     quote(exe) .. " " ..
     quote(job.masterPath) .. " " ..
     quote(job.sourcePath) .. " " ..
     string.format(
-      "\"%.9f\" \"%.9f\" \"%.6f\" \"%.9f\" \"%.9f\" DYNAMIC_RENDER %s",
+      "\"%.9f\" \"%.9f\" \"%.6f\" \"%.9f\" \"%.9f\" DYNAMIC_RENDER %s %s",
       masterStart,
       sourceStart,
       itemLen,
       masterRate,
       sourceRate,
-      quote(outputPath))
+      quote(outputPath),
+      quote(curvePath))
 
   set_status(
     "Renderizando DYNAMIC sample-accurate · " ..
@@ -863,6 +896,27 @@ local function applyDynamic(job)
       "No se pudo reemplazar el SOURCE del take"
   end
 
+  -- The generated WAV has no REAPER peak cache yet. Build it now so the
+  -- corrected waveform is immediately visible at normal zoom levels.
+  if reaper.PCM_Source_BuildPeaks then
+    local remaining =
+      reaper.PCM_Source_BuildPeaks(
+        newSource, 0)
+
+    local guard = 0
+    while remaining and remaining > 0 and guard < 256 do
+      remaining =
+        reaper.PCM_Source_BuildPeaks(
+          newSource, 1)
+      guard = guard + 1
+    end
+
+    if remaining and remaining <= 0 then
+      reaper.PCM_Source_BuildPeaks(
+        newSource, 2)
+    end
+  end
+
   reaper.SetMediaItemTakeInfo_Value(
     take, "D_STARTOFFS", 0.0)
 
@@ -874,6 +928,8 @@ local function applyDynamic(job)
 
   reaper.UpdateItemInProject(
     job.sourceItem)
+
+  reaper.UpdateArrange()
 
   job.postValid = true
   job.postDelayMs =
