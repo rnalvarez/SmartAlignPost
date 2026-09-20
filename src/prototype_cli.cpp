@@ -992,6 +992,16 @@ int main(int argc, char** argv)
             << "\n";
 
         if (!postValid) {
+            for (const auto& p : shiftedCurve) {
+                std::cout
+                    << "RENDER_POINT="
+                    << p.timeSec
+                    << ","
+                    << p.delaySamples
+                    << ","
+                    << p.confidence
+                    << "\n";
+            }
             std::cout
                 << "POST_VALID=0\n";
             return 12;
