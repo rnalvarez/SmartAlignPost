@@ -651,6 +651,17 @@ Result AlignEngine::analyze(
                 (1.0 / settings.playbackRateRatio - 1.0) *
                 settings.sampleRate;
 
+            // A short analysis window is important here: with a large
+            // playback-rate mismatch, a 60 ms window already contains enough
+            // temporal drift to smear the correlation peak.
+            const std::size_t rateAnchorWindow =
+                std::clamp<std::size_t>(
+                    static_cast<std::size_t>(
+                        std::llround(
+                            16.0 * settings.sampleRate / 1000.0)),
+                    512,
+                    1024);
+
             std::vector<double> intercepts;
             std::vector<double> confidences;
             const std::size_t earlyCount =
@@ -666,7 +677,7 @@ Result AlignEngine::analyze(
                     master,
                     source,
                     a.center,
-                    window,
+                    rateAnchorWindow,
                     0.0,
                     -static_cast<double>(maxLag),
                     static_cast<double>(maxLag),
