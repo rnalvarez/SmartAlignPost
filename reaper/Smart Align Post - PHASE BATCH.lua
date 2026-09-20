@@ -547,8 +547,14 @@ local function applyDynamic(job)
       take, 0, oldMarkers)
   end
 
+  -- DYNAMIC is a phase-alignment operation, not a musical time-stretch.
+  -- REAPER stretch markers follow D_PLAYRATE pitch behavior: with preserve
+  -- pitch disabled they operate as varispeed. That keeps the waveform phase
+  -- relationship coherent with the MASTER; preserving pitch can use a
+  -- time-stretch algorithm that changes the waveform phase even when timing
+  -- is corrected.
   reaper.SetMediaItemTakeInfo_Value(
-    take, "B_PPITCH", 1)
+    take, "B_PPITCH", 0)
 
   local itemPos =
     reaper.GetMediaItemInfo_Value(
