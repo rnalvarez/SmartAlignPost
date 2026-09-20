@@ -12,6 +12,27 @@
 
 namespace {
 
+constexpr double kPi =
+    3.1415926535897932384626433832795;
+
+void writeU16(
+    std::ofstream& f,
+    uint16_t v)
+{
+    f.put(static_cast<char>(v & 0xff));
+    f.put(static_cast<char>((v >> 8) & 0xff));
+}
+
+void writeU32(
+    std::ofstream& f,
+    uint32_t v)
+{
+    f.put(static_cast<char>(v & 0xff));
+    f.put(static_cast<char>((v >> 8) & 0xff));
+    f.put(static_cast<char>((v >> 16) & 0xff));
+    f.put(static_cast<char>((v >> 24) & 0xff));
+}
+
 struct WavData {
     int sampleRate = 0;
     int channels = 0;
