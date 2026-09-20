@@ -551,10 +551,9 @@ int main(int argc, char** argv)
             constexpr double sourceRate = 1.0203;
 
             const auto rateDynamicSource =
-                varyingDelaySignal(
+                delaySignal(
                     master,
-                    72.0,
-                    228.0);
+                    120.0);
 
             const auto rateDynamicSourcePath =
                 base / "dynamic_rate_source.wav";
