@@ -185,6 +185,100 @@ double normalizedWaveformCorrelation(
         cov / std::sqrt(varA * varB));
 }
 
+double directNativeDelay(
+    const std::vector<float>& master,
+    const std::vector<float>& source,
+    std::size_t center,
+    std::size_t halfWindow,
+    int maxLag,
+    double& confidence)
+{
+    confidence = 0.0;
+
+    if (master.empty() ||
+        source.empty() ||
+        maxLag <= 0 ||
+        center < halfWindow ||
+        center + halfWindow >= master.size() ||
+        center + halfWindow >= source.size())
+        return 0.0;
+
+    const double step = 2.0;
+    double bestDelay = 0.0;
+    double bestCorrelation = -1.0;
+
+    for (int lag = -maxLag; lag <= maxLag; lag += 2) {
+        const double corr =
+            normalizedWaveformCorrelation(
+                master,
+                source,
+                center,
+                halfWindow,
+                static_cast<double>(lag));
+
+        if (corr > bestCorrelation) {
+            bestCorrelation = corr;
+            bestDelay = static_cast<double>(lag);
+        }
+    }
+
+    const int refineStart =
+        std::max(-maxLag,
+                 static_cast<int>(std::llround(bestDelay)) - 2);
+    const int refineEnd =
+        std::min(maxLag,
+                 static_cast<int>(std::llround(bestDelay)) + 2);
+
+    for (int lag = refineStart;
+         lag <= refineEnd;
+         ++lag) {
+        const double corr =
+            normalizedWaveformCorrelation(
+                master,
+                source,
+                center,
+                halfWindow,
+                static_cast<double>(lag));
+
+        if (corr > bestCorrelation) {
+            bestCorrelation = corr;
+            bestDelay = static_cast<double>(lag);
+        }
+    }
+
+    for (int stepIndex = -6;
+         stepIndex <= 6;
+         ++stepIndex) {
+        const double d =
+            bestDelay + static_cast<double>(stepIndex) * 0.125;
+
+        if (d < -static_cast<double>(maxLag) ||
+            d > static_cast<double>(maxLag))
+            continue;
+
+        const double corr =
+            normalizedWaveformCorrelation(
+                master,
+                source,
+                center,
+                halfWindow,
+                d);
+
+        if (corr > bestCorrelation) {
+            bestCorrelation = corr;
+            bestDelay = d;
+        }
+    }
+
+    confidence =
+        std::clamp(
+            std::max(0.0, bestCorrelation),
+            0.0,
+            1.0);
+
+    return bestDelay;
+}
+
 double median(std::vector<double> values)
 {
     if (values.empty())
@@ -628,7 +722,7 @@ Result AlignEngine::analyze(
     if (knownRateDrift && settings.mode != Mode::Static) {
         // D_PLAYRATE changes the project-time trajectory, not the acoustic
         // offset already contained in the native WAV recordings. Estimate the
-        // native acoustic delay from several energetic windows near the start,
+        // native acoustic delay directly from several energetic early windows,
         // then convert that fixed delay into project time and apply the known
         // rate slope.
         const auto timeline = selectTimelineAnchors(
@@ -670,30 +764,18 @@ Result AlignEngine::analyze(
 
             std::vector<RateAnchorCandidate> candidates;
 
-            const double searchSeconds =
-                std::min(
-                    1.0,
-                    static_cast<double>(
-                        std::min(master.size(), source.size())) /
-                    settings.sampleRate);
-
-            const std::size_t candidateCount =
-                std::max<std::size_t>(
-                    1,
-                    static_cast<std::size_t>(
-                        std::floor(searchSeconds / 0.10)));
-
-            for (std::size_t i = 0; i < candidateCount; ++i) {
-                const std::size_t center =
-                    half +
+            const std::size_t maxSearchFrames =
+                std::min<std::size_t>(
+                    std::min(master.size(), source.size()),
                     static_cast<std::size_t>(
                         std::llround(
-                            i * 0.10 * settings.sampleRate));
+                            settings.sampleRate)));
 
-                if (center + half >= master.size() ||
-                    center + half >= source.size())
-                    break;
-
+            for (std::size_t center = half;
+                 center + half < maxSearchFrames;
+                 center += static_cast<std::size_t>(
+                     std::llround(
+                         0.10 * settings.sampleRate))) {
                 candidates.push_back({
                     center,
                     rmsAround(master, center, half)
@@ -707,41 +789,46 @@ Result AlignEngine::analyze(
                     return a.energy > b.energy;
                 });
 
-            Measurement bestMeasurement;
-            bool haveBestMeasurement = false;
+            double nativeDelay = 0.0;
+            double anchorConfidence = 0.0;
+            bool haveNativeAnchor = false;
 
             const std::size_t candidateLimit =
-                std::min<std::size_t>(candidates.size(), 5);
+                std::min<std::size_t>(
+                    candidates.size(),
+                    5);
 
             for (std::size_t i = 0;
                  i < candidateLimit;
                  ++i) {
-                const auto& candidate = candidates[i];
+                double confidence = 0.0;
 
-                const Measurement m = measurePhase(
-                    master,
-                    source,
-                    candidate.center,
-                    nativeWindow,
-                    0.0,
-                    -static_cast<double>(maxLag),
-                    static_cast<double>(maxLag),
-                    settings.sampleRate);
+                const double delay =
+                    directNativeDelay(
+                        master,
+                        source,
+                        candidates[i].center,
+                        half,
+                        maxLag,
+                        confidence);
 
-                if (m.confidence <
-                    std::max(0.45, settings.minConfidence * 0.60))
+                if (confidence <
+                    std::max(
+                        0.45,
+                        settings.minConfidence * 0.60))
                     continue;
 
-                if (!haveBestMeasurement ||
-                    m.confidence > bestMeasurement.confidence) {
-                    bestMeasurement = m;
-                    haveBestMeasurement = true;
+                if (!haveNativeAnchor ||
+                    confidence > anchorConfidence) {
+                    nativeDelay = delay;
+                    anchorConfidence = confidence;
+                    haveNativeAnchor = true;
                 }
             }
 
-            if (haveBestMeasurement) {
+            if (haveNativeAnchor) {
                 const double anchorAtZero =
-                    bestMeasurement.finalDelay /
+                    nativeDelay /
                     std::max(
                         1.0e-12,
                         settings.playbackRateRatio);
@@ -749,9 +836,9 @@ Result AlignEngine::analyze(
                 result.staticDelaySamples =
                     anchorAtZero;
                 result.staticCorrelation =
-                    bestMeasurement.correlation;
+                    anchorConfidence;
                 result.staticConfidence =
-                    bestMeasurement.confidence;
+                    anchorConfidence;
 
                 result.curve.clear();
 
