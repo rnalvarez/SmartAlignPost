@@ -680,22 +680,91 @@ local function applyDynamic(job)
   -- continuous delay trajectory. Build a dense time-warp over the entire item
   -- from the measured curve, then let REAPER approximate that trajectory with
   -- short linear stretch-marker segments.
-  local function delayAtItemTime(itemTime)
-    return delayAtProjectTime(itemPos + itemTime)
+  -- Interpolate the measured delay trajectory with cubic Hermite segments.
+  -- This makes the instantaneous correction rate vary continuously instead of
+  -- resetting to a constant value at every measured anchor.
+  local function smoothDelayAtItemTime(itemTime)
+    local projectTime = itemPos + itemTime
+    local t = projectTime - job.commonStart
+    local points = job.curve
+
+    if #points < 2 then
+      return delayAtProjectTime(projectTime)
+    end
+
+    if t <= points[1].time or
+       t >= points[#points].time then
+      return delayAtProjectTime(projectTime)
+    end
+
+    local seg = 1
+    for i = 1, #points - 1 do
+      if t >= points[i].time and
+         t <= points[i + 1].time then
+        seg = i
+        break
+      end
+    end
+
+    local a = points[seg]
+    local b = points[seg + 1]
+    local dt = math.max(1e-9, b.time - a.time)
+    local u = math.max(0.0, math.min(1.0, (t - a.time) / dt))
+
+    local mA
+    if seg == 1 then
+      mA = (b.delayMs - a.delayMs) / dt
+    else
+      local prev = points[seg - 1]
+      mA = (b.delayMs - prev.delayMs) /
+           math.max(1e-9, b.time - prev.time)
+    end
+
+    local mB
+    if seg + 1 == #points then
+      mB = (b.delayMs - a.delayMs) / dt
+    else
+      local next = points[seg + 2]
+      mB = (next.delayMs - a.delayMs) /
+           math.max(1e-9, next.time - a.time)
+    end
+
+    local u2 = u * u
+    local u3 = u2 * u
+
+    local h00 =  2.0 * u3 - 3.0 * u2 + 1.0
+    local h10 =       u3 - 2.0 * u2 + u
+    local h01 = -2.0 * u3 + 3.0 * u2
+    local h11 =       u3 -       u2
+
+    local value =
+      h00 * a.delayMs +
+      h10 * dt * mA +
+      h01 * b.delayMs +
+      h11 * dt * mB
+
+    -- Prevent interpolation overshoot from creating a false phase excursion
+    -- beyond the measured anchors.
+    local lo = math.min(a.delayMs, b.delayMs)
+    local hi = math.max(a.delayMs, b.delayMs)
+
+    return math.max(lo, math.min(hi, value))
   end
 
+  -- A dense marker grid converts the smooth delay trajectory to a close
+  -- piecewise-linear approximation that REAPER can reproduce reliably.
   local denseStep =
     math.max(
-      0.020,
+      0.015,
       math.min(
-        0.080,
+        0.040,
         itemLen / 600.0))
 
   local t = 0.0
   while t < itemLen - 1e-6 do
     if not addMarker(
         t,
-        delayAtItemTime(t)) then
+        smoothDelayAtItemTime(t)) then
       return false, "falló marker de warp"
     end
 
