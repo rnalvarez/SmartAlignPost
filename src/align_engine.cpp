@@ -720,149 +720,134 @@ Result AlignEngine::analyze(
         std::abs(settings.playbackRateRatio - 1.0) > 1.0e-6;
 
     if (knownRateDrift && settings.mode != Mode::Static) {
-        // D_PLAYRATE changes the project-time trajectory, not the acoustic
-        // offset already contained in the native WAV recordings. Estimate the
-        // native acoustic delay directly from several energetic early windows,
-        // then convert that fixed delay into project time and apply the known
-        // rate slope.
-        const auto timeline = selectTimelineAnchors(
-            master,
-            source,
-            window,
-            std::max<std::size_t>(
-                1,
-                static_cast<std::size_t>(
-                    std::llround(
-                        std::max(250.0, settings.hopMs) *
-                        settings.sampleRate / 1000.0))),
-            std::max<std::size_t>(
-                2,
-                std::min<std::size_t>(
-                    settings.maxDynamicAnchors,
-                    32)));
+        // First undo the relative SOURCE/MASTER playback-rate ratio in the
+        // project-time SOURCE buffer. This restores the acoustic offset in the
+        // same timebase as MASTER, so the existing STATIC estimator can measure
+        // it without having to chase a moving delay peak.
+        const double ratio =
+            std::max(
+                1.0e-12,
+                settings.playbackRateRatio);
 
-        if (timeline.size() >= 2) {
-            const double slopePerSec =
-                (1.0 / settings.playbackRateRatio - 1.0) *
-                settings.sampleRate;
+        const std::size_t rateAlignedUsable =
+            std::min<std::size_t>(
+                master.size(),
+                source.empty()
+                    ? 0
+                    : std::min<std::size_t>(
+                        source.size(),
+                        static_cast<std::size_t>(
+                            std::floor(
+                                static_cast<double>(
+                                    source.size() - 1) *
+                                ratio)) +
+                            1));
 
-            const std::size_t nativeWindow =
-                std::clamp<std::size_t>(
-                    static_cast<std::size_t>(
-                        std::llround(
-                            60.0 * settings.sampleRate / 1000.0)),
-                    1024,
-                    4096);
-
-            const std::size_t half =
-                nativeWindow / 2;
-
-            struct RateAnchorCandidate {
-                std::size_t center = 0;
-                double energy = 0.0;
-            };
-
-            std::vector<RateAnchorCandidate> candidates;
-
-            const std::size_t maxSearchFrames =
-                std::min<std::size_t>(
-                    std::min(master.size(), source.size()),
-                    static_cast<std::size_t>(
-                        std::llround(
-                            settings.sampleRate)));
-
-            for (std::size_t center = half;
-                 center + half < maxSearchFrames;
-                 center += static_cast<std::size_t>(
-                     std::llround(
-                         0.10 * settings.sampleRate))) {
-                candidates.push_back({
-                    center,
-                    rmsAround(master, center, half)
-                });
-            }
-
-            std::sort(
-                candidates.begin(),
-                candidates.end(),
-                [](const auto& a, const auto& b) {
-                    return a.energy > b.energy;
-                });
-
-            double nativeDelay = 0.0;
-            double anchorConfidence = 0.0;
-            bool haveNativeAnchor = false;
-
-            const std::size_t candidateLimit =
-                std::min<std::size_t>(
-                    candidates.size(),
-                    5);
+        if (rateAlignedUsable >= 2048) {
+            std::vector<float> rateAlignedSource(
+                rateAlignedUsable);
 
             for (std::size_t i = 0;
-                 i < candidateLimit;
+                 i < rateAlignedUsable;
                  ++i) {
-                double confidence = 0.0;
+                const double sourcePos =
+                    static_cast<double>(i) / ratio;
 
-                const double delay =
-                    directNativeDelay(
-                        master,
-                        source,
-                        candidates[i].center,
-                        half,
-                        maxLag,
-                        confidence);
-
-                if (confidence <
-                    std::max(
-                        0.45,
-                        settings.minConfidence * 0.60))
-                    continue;
-
-                if (!haveNativeAnchor ||
-                    confidence > anchorConfidence) {
-                    nativeDelay = delay;
-                    anchorConfidence = confidence;
-                    haveNativeAnchor = true;
-                }
+                rateAlignedSource[i] =
+                    static_cast<float>(
+                        sampleLagrange4(
+                            source,
+                            sourcePos));
             }
 
-            if (haveNativeAnchor) {
-                const double anchorAtZero =
-                    nativeDelay /
+            Settings staticRateSettings = settings;
+            staticRateSettings.mode = Mode::Static;
+            staticRateSettings.playbackRateRatio = 1.0;
+            staticRateSettings.hasInitialDelaySamples = false;
+
+            const Result rateStatic =
+                AlignEngine::analyze(
+                    std::vector<float>(
+                        master.begin(),
+                        master.begin() + rateAlignedUsable),
+                    rateAlignedSource,
+                    staticRateSettings);
+
+            if (std::isfinite(rateStatic.staticDelaySamples) &&
+                rateStatic.staticConfidence >=
                     std::max(
-                        1.0e-12,
-                        settings.playbackRateRatio);
+                        0.45,
+                        settings.minConfidence * 0.60)) {
+
+                const double slopePerSec =
+                    (1.0 / ratio - 1.0) *
+                    settings.sampleRate;
+
+                const double anchorAtZero =
+                    rateStatic.staticDelaySamples /
+                    ratio;
 
                 result.staticDelaySamples =
                     anchorAtZero;
                 result.staticCorrelation =
-                    anchorConfidence;
+                    rateStatic.staticCorrelation;
                 result.staticConfidence =
-                    anchorConfidence;
+                    rateStatic.staticConfidence;
+                result.staticSupportWindows =
+                    rateStatic.staticSupportWindows;
+                result.staticTotalWindows =
+                    rateStatic.staticTotalWindows;
 
-                result.curve.clear();
+                const auto timeline =
+                    selectTimelineAnchors(
+                        master,
+                        source,
+                        window,
+                        std::max<std::size_t>(
+                            1,
+                            static_cast<std::size_t>(
+                                std::llround(
+                                    std::max(
+                                        250.0,
+                                        settings.hopMs) *
+                                    settings.sampleRate /
+                                    1000.0))),
+                        std::max<std::size_t>(
+                            2,
+                            std::min<std::size_t>(
+                                settings.maxDynamicAnchors,
+                                32)));
 
-                for (const auto& anchor : timeline) {
-                    const double t =
-                        static_cast<double>(anchor.center) /
-                        settings.sampleRate;
+                if (timeline.size() >= 2) {
+                    result.curve.clear();
 
-                    Point p;
-                    p.timeSec = t;
-                    p.delaySamples =
-                        anchorAtZero +
-                        t * slopePerSec;
-                    p.confidence =
-                        std::max(result.staticConfidence, 0.50);
-                    p.keyPoint = true;
-                    p.phatDelaySamples = p.delaySamples;
-                    p.waveformDelaySamples = p.delaySamples;
-                    p.phaseAgreement = 1.0;
-                    result.curve.push_back(p);
+                    for (const auto& anchor : timeline) {
+                        const double t =
+                            static_cast<double>(
+                                anchor.center) /
+                            settings.sampleRate;
+
+                        Point p;
+                        p.timeSec = t;
+                        p.delaySamples =
+                            anchorAtZero +
+                            t * slopePerSec;
+                        p.confidence =
+                            std::max(
+                                result.staticConfidence,
+                                0.50);
+                        p.keyPoint = true;
+                        p.phatDelaySamples =
+                            p.delaySamples;
+                        p.waveformDelaySamples =
+                            p.delaySamples;
+                        p.phaseAgreement = 1.0;
+                        result.curve.push_back(p);
+                    }
+
+                    result.modeUsed = Mode::Dynamic;
+                    return result;
                 }
-
-                result.modeUsed = Mode::Dynamic;
-                return result;
             }
         }
     }
