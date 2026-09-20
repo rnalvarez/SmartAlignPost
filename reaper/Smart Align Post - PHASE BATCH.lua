@@ -103,29 +103,110 @@ local function collect_source_tracks()
   return tracks
 end
 
-local function find_best_master_item(sourceItem)
-  if not masterTrack then return nil end
+local function item_guid(item)
+  if not item then return "" end
+  local _, guid =
+    reaper.GetSetMediaItemInfo_String(
+      item, "GUID", "", false)
+  return guid or ""
+end
 
-  local sPos = reaper.GetMediaItemInfo_Value(sourceItem, "D_POSITION")
-  local sEnd = sPos + reaper.GetMediaItemInfo_Value(sourceItem, "D_LENGTH")
-
-  local best = nil
-  local bestOverlap = 0.0
+local function master_scene_index(item)
+  if not item or not masterTrack then
+    return 0
+  end
 
   local count = reaper.CountTrackMediaItems(masterTrack)
   for i = 0, count - 1 do
-    local masterItem = reaper.GetTrackMediaItem(masterTrack, i)
-    local mPos = reaper.GetMediaItemInfo_Value(masterItem, "D_POSITION")
-    local mEnd = mPos + reaper.GetMediaItemInfo_Value(masterItem, "D_LENGTH")
-
-    local overlap = math.min(sEnd, mEnd) - math.max(sPos, mPos)
-    if overlap > bestOverlap then
-      bestOverlap = overlap
-      best = masterItem
+    if reaper.GetTrackMediaItem(masterTrack, i) == item then
+      return i + 1
     end
   end
 
-  return best
+  return 0
+end
+
+local function master_scene_label(item)
+  if not item then return "MASTER —" end
+  local index = master_scene_index(item)
+  local pos = reaper.GetMediaItemInfo_Value(item, "D_POSITION")
+  local len = reaper.GetMediaItemInfo_Value(item, "D_LENGTH")
+  return string.format(
+    "MASTER %02d · %.2f–%.2f s",
+    index, pos, pos + len)
+end
+
+local function find_master_match(sourceItem)
+  if not masterTrack then return nil end
+
+  local sPos =
+    reaper.GetMediaItemInfo_Value(
+      sourceItem, "D_POSITION")
+  local sLen =
+    reaper.GetMediaItemInfo_Value(
+      sourceItem, "D_LENGTH")
+  local sEnd = sPos + sLen
+
+  local candidates = {}
+
+  local count =
+    reaper.CountTrackMediaItems(masterTrack)
+
+  for i = 0, count - 1 do
+    local candidate =
+      reaper.GetTrackMediaItem(
+        masterTrack, i)
+
+    local mPos =
+      reaper.GetMediaItemInfo_Value(
+        candidate, "D_POSITION")
+    local mLen =
+      reaper.GetMediaItemInfo_Value(
+        candidate, "D_LENGTH")
+    local mEnd = mPos + mLen
+
+    local overlap =
+      math.min(sEnd, mEnd) -
+      math.max(sPos, mPos)
+
+    if overlap > 0 then
+      candidates[#candidates + 1] = {
+        item = candidate,
+        overlap = overlap
+      }
+    end
+  end
+
+  table.sort(
+    candidates,
+    function(a, b)
+      return a.overlap > b.overlap
+    end)
+
+  local best = candidates[1]
+  if not best or best.overlap < 0.5 then
+    return nil
+  end
+
+  local secondOverlap =
+    candidates[2] and
+    candidates[2].overlap or 0.0
+
+  local sourceCoverage =
+    sLen > 0 and
+    best.overlap / sLen or 0.0
+
+  local ambiguous =
+    secondOverlap >= 0.5 and
+    sourceCoverage < 0.95
+
+  return {
+    item = best.item,
+    overlap = best.overlap,
+    secondOverlap = secondOverlap,
+    sourceCoverage = sourceCoverage,
+    ambiguous = ambiguous
+  }
 end
 
 local function selected_source_items()
@@ -175,51 +256,114 @@ local function build_jobs(items)
   jobs = {}
 
   for _, sourceItem in ipairs(items) do
-    local masterItem = find_best_master_item(sourceItem)
-    if masterItem then
-      local sPos = reaper.GetMediaItemInfo_Value(sourceItem, "D_POSITION")
-      local sLen = reaper.GetMediaItemInfo_Value(sourceItem, "D_LENGTH")
-      local mPos = reaper.GetMediaItemInfo_Value(masterItem, "D_POSITION")
-      local mLen = reaper.GetMediaItemInfo_Value(masterItem, "D_LENGTH")
+    local match = find_master_match(sourceItem)
 
-      local commonStart = math.max(sPos, mPos)
-      local commonEnd = math.min(sPos + sLen, mPos + mLen)
+    if match then
+      local masterItem = match.item
+
+      local sPos =
+        reaper.GetMediaItemInfo_Value(
+          sourceItem, "D_POSITION")
+      local sLen =
+        reaper.GetMediaItemInfo_Value(
+          sourceItem, "D_LENGTH")
+      local mPos =
+        reaper.GetMediaItemInfo_Value(
+          masterItem, "D_POSITION")
+      local mLen =
+        reaper.GetMediaItemInfo_Value(
+          masterItem, "D_LENGTH")
+
+      local commonStart =
+        math.max(sPos, mPos)
+      local commonEnd =
+        math.min(
+          sPos + sLen,
+          mPos + mLen)
 
       if commonEnd - commonStart >= 0.5 then
-        local masterPath, masterTake, masterErr = take_source_path(masterItem)
-        local sourcePath, sourceTake, sourceErr = take_source_path(sourceItem)
+        local masterPath, masterTake, masterErr =
+          take_source_path(masterItem)
+        local sourcePath, sourceTake, sourceErr =
+          take_source_path(sourceItem)
 
-        if masterPath and sourcePath then
-          jobs[#jobs + 1] = {
-            sourceItem = sourceItem,
-            sourceTake = sourceTake,
-            sourcePath = sourcePath,
-            masterItem = masterItem,
-            masterTake = masterTake,
-            masterPath = masterPath,
-            commonStart = commonStart,
-            commonEnd = commonEnd,
-            status = "PENDING",
-            modeUsed = nil,
-            confidence = 0.0,
-            delayMs = 0.0,
-            curve = {},
-            error = nil,
-            sourceTrack = reaper.GetMediaItem_Track(sourceItem)
-          }
-        else
-          jobs[#jobs + 1] = {
-            sourceItem = sourceItem,
-            masterItem = masterItem,
-            commonStart = commonStart,
-            commonEnd = commonEnd,
-            status = "ERROR",
-            error = sourceErr or masterErr or "source inválido",
-            curve = {},
-            confidence = 0.0,
-            sourceTrack = reaper.GetMediaItem_Track(sourceItem)
-          }
+        local job = {
+          sourceItem = sourceItem,
+          sourceTake = sourceTake,
+          sourcePath = sourcePath,
+          masterItem = masterItem,
+          masterTake = masterTake,
+          masterPath = masterPath,
+          commonStart = commonStart,
+          commonEnd = commonEnd,
+          overlap = match.overlap,
+          sourceCoverage = match.sourceCoverage,
+          secondOverlap = match.secondOverlap,
+          ambiguous = match.ambiguous,
+          masterSceneIndex = master_scene_index(masterItem),
+          status = "PENDING",
+          modeUsed = nil,
+          confidence = 0.0,
+          delayMs = 0.0,
+          curve = {},
+          error = nil,
+          sourceTrack = reaper.GetMediaItem_Track(sourceItem)
+        }
+
+        job.masterGuid = item_guid(masterItem)
+        job.sourceGuid = item_guid(sourceItem)
+
+        reaper.GetSetMediaItemInfo_String(
+          sourceItem,
+          "P_EXT:SmartAlignPost.Scene.MasterGUID",
+          job.masterGuid,
+          true)
+
+        reaper.GetSetMediaItemInfo_String(
+          sourceItem,
+          "P_EXT:SmartAlignPost.Scene.MasterIndex",
+          tostring(job.masterSceneIndex),
+          true)
+
+        reaper.GetSetMediaItemInfo_String(
+          sourceItem,
+          "P_EXT:SmartAlignPost.Scene.SourceGUID",
+          job.sourceGuid,
+          true)
+
+        reaper.GetSetMediaItemInfo_String(
+          sourceItem,
+          "P_EXT:SmartAlignPost.Scene.CommonStart",
+          string.format("%.9f", commonStart),
+          true)
+
+        reaper.GetSetMediaItemInfo_String(
+          sourceItem,
+          "P_EXT:SmartAlignPost.Scene.CommonEnd",
+          string.format("%.9f", commonEnd),
+          true)
+
+        reaper.GetSetMediaItemInfo_String(
+          sourceItem,
+          "P_EXT:SmartAlignPost.Scene.Coverage",
+          string.format("%.6f", match.sourceCoverage),
+          true)
+
+        if match.ambiguous then
+          job.status = "SCENE REVIEW"
+          job.error = string.format(
+            "SOURCE cruza escenas · cobertura %.1f%% · segundo solapamiento %.2f s",
+            match.sourceCoverage * 100.0,
+            match.secondOverlap)
+        elseif not masterPath or not sourcePath then
+          job.status = "ERROR"
+          job.error =
+            sourceErr or
+            masterErr or
+            "source inválido"
         end
+
+        jobs[#jobs + 1] = job
       end
     end
   end
@@ -464,7 +608,8 @@ local function run_analysis(items)
       local diagnostics = {}
       for _, job in ipairs(jobs) do
         diagnostics[#diagnostics + 1] = string.format(
-          "%s: rate %.6f/%.6f ratio %.6f · scout %d %.2f→%.2f ms R² %.3f dir %.3f coh %s · %s→%s→%s",
+          "%s · %s: rate %.6f/%.6f ratio %.6f · scout %d %.2f→%.2f ms R² %.3f dir %.3f coh %s · %s→%s→%s",
+          master_scene_label(job.masterItem),
           track_label(job.sourceTrack),
           job.masterRate or 0.0,
           job.sourceRate or 0.0,
@@ -579,13 +724,18 @@ local function applyDynamic(job)
     return false, "parámetros de item/playrate inválidos"
   end
 
-  -- Direct sample-domain correction needs MASTER coverage for the complete
-  -- SOURCE item. We deliberately fail rather than applying an unvalidated
-  -- correction outside the measured overlap.
+  -- DYNAMIC_RENDER currently reconstructs the complete SOURCE item from
+  -- the corresponding MASTER scene. If the SOURCE extends outside that
+  -- MASTER scene, we refuse the render rather than extrapolate an
+  -- unvalidated correction across a scene boundary.
   if job.commonStart > itemPos + 1e-6 or
      job.commonEnd < itemPos + itemLen - 1e-6 then
-    return false,
-      "DYNAMIC directo requiere que MASTER cubra todo el SOURCE"
+    return false, string.format(
+      "DYNAMIC no aplicado · MASTER %02d cubre %.1f%% del SOURCE. " ..
+      "STATIC puede aplicarse; para DYNAMIC el item debe quedar dentro " ..
+      "del item MASTER de su escena.",
+      job.masterSceneIndex or 0,
+      job.sourceCoverage and job.sourceCoverage * 100.0 or 0.0)
   end
 
   local masterStart =
@@ -815,13 +965,19 @@ local function apply_all()
       skipped = skipped + 1
     else
       local ok = false
+      local applyError = nil
 
       if job.modeUsed == "DYNAMIC" then
-        ok = select(1, applyDynamic(job))
+        ok, applyError = applyDynamic(job)
         if ok then dynamicCount = dynamicCount + 1 end
       else
-        ok = select(1, applyStatic(job))
+        ok, applyError = applyStatic(job)
         if ok then staticCount = staticCount + 1 end
+      end
+
+      if not ok and applyError then
+        job.error = applyError
+        job.status = "APPLY ERROR"
       end
 
       if ok then
@@ -976,7 +1132,7 @@ draw_ui = function()
     45, 47, 53)
 
   text(28, y + 8, "SOURCE", 13, 190, 195, 205)
-  text(195, y + 8, "TRAMO", 13, 190, 195, 205)
+  text(195, y + 8, "MASTER", 13, 190, 195, 205)
   text(330, y + 8, "MODE", 13, 190, 195, 205)
   text(430, y + 8, "PUNTOS", 13, 190, 195, 205)
   text(520, y + 8, "CONF", 13, 190, 195, 205)
@@ -1012,8 +1168,8 @@ draw_ui = function()
 
     text(
       195, rowY + 9,
-      item_label(job.sourceItem),
-      12, 210, 215, 225)
+      master_scene_label(job.masterItem),
+      11, 210, 215, 225)
 
     text(
       330, rowY + 9,
