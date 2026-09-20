@@ -414,7 +414,7 @@ Measurement measurePhase(
             ? static_cast<std::size_t>(lag)
             : fftSize - static_cast<std::size_t>(-lag);
 
-        const double value = std::abs(cross[index].real());
+        const double value = cross[index].real();
         magnitudes.push_back(value);
 
         if (value > bestValue) {
@@ -432,7 +432,7 @@ Measurement measurePhase(
             const std::size_t index = lag >= 0
                 ? static_cast<std::size_t>(lag)
                 : fftSize - static_cast<std::size_t>(-lag);
-            return std::abs(cross[index].real());
+            return cross[index].real();
         };
 
         const double ym = valueAt(bestLag - 1);
