@@ -1142,8 +1142,14 @@ Result AlignEngine::analyze(
                     settings.sampleRate;
                 const double centerTime =
                     durationSec * 0.5;
+                // SOURCE playback-rate is expressed relative to MASTER.
+                // To compensate SOURCE in project time we need the inverse
+                // rate relationship: corrected(t) = SOURCE(t + D(t)) with
+                // D(t) = t * (1 / ratio - 1).
                 const double slopePerSec =
-                    (1.0 - settings.playbackRateRatio) *
+                    (1.0 / std::max(
+                        1.0e-12,
+                        settings.playbackRateRatio) - 1.0) *
                     settings.sampleRate;
 
                 for (const auto& anchor : timeline) {
