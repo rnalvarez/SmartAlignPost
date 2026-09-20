@@ -626,10 +626,11 @@ Result AlignEngine::analyze(
         std::abs(settings.playbackRateRatio - 1.0) > 1.0e-6;
 
     if (knownRateDrift && settings.mode != Mode::Static) {
-        // A non-unity playback-rate ratio creates a deterministic project-time
-        // delay drift. The absolute delay may leave the normal +/- maxDelayMs
-        // search range later in the take, so build the trajectory from several
-        // early acoustic anchors and solve the known-rate slope independently.
+        // D_PLAYRATE changes the project-time trajectory, not the acoustic
+        // offset already contained in the native WAV recordings. Estimate the
+        // native acoustic delay directly from short early windows, then convert
+        // that fixed native delay into project time and apply the deterministic
+        // rate slope.
         const auto timeline = selectTimelineAnchors(
             master,
             source,
@@ -651,33 +652,36 @@ Result AlignEngine::analyze(
                 (1.0 / settings.playbackRateRatio - 1.0) *
                 settings.sampleRate;
 
-            // A short analysis window is important here: with a large
-            // playback-rate mismatch, a 60 ms window already contains enough
-            // temporal drift to smear the correlation peak.
-            const std::size_t rateAnchorWindow =
+            const std::size_t nativeWindow =
                 std::clamp<std::size_t>(
                     static_cast<std::size_t>(
                         std::llround(
-                            16.0 * settings.sampleRate / 1000.0)),
-                    512,
-                    1024);
+                            32.0 * settings.sampleRate / 1000.0)),
+                    1024,
+                    2048);
 
-            std::vector<double> intercepts;
+            const std::size_t half =
+                nativeWindow / 2;
+
+            std::vector<double> nativeDelays;
             std::vector<double> confidences;
-            const std::size_t earlyCount =
-                std::min<std::size_t>(timeline.size(), 7);
 
-            intercepts.reserve(earlyCount);
-            confidences.reserve(earlyCount);
+            for (std::size_t i = 1; i <= 5; ++i) {
+                const std::size_t center =
+                    half +
+                    static_cast<std::size_t>(
+                        std::llround(
+                            i * 0.10 * settings.sampleRate));
 
-            for (std::size_t i = 0; i < earlyCount; ++i) {
-                const auto& a = timeline[i];
+                if (center + half >= master.size() ||
+                    center + half >= source.size())
+                    break;
 
                 const Measurement m = measurePhase(
                     master,
                     source,
-                    a.center,
-                    rateAnchorWindow,
+                    center,
+                    nativeWindow,
                     0.0,
                     -static_cast<double>(maxLag),
                     static_cast<double>(maxLag),
@@ -687,22 +691,19 @@ Result AlignEngine::analyze(
                     std::max(0.45, settings.minConfidence * 0.60))
                     continue;
 
-                const double t =
-                    static_cast<double>(a.center) /
-                    settings.sampleRate;
-
-                // Remove the deterministic temporal slope from each early
-                // measurement. The median is deliberately used here because
-                // a wrong PHAT peak at one anchor must not move the absolute
-                // trajectory.
-                intercepts.push_back(
-                    m.finalDelay - slopePerSec * t);
+                nativeDelays.push_back(m.finalDelay);
                 confidences.push_back(m.confidence);
             }
 
-            if (intercepts.size() >= 2) {
+            if (nativeDelays.size() >= 2) {
+                const double nativeDelay =
+                    median(nativeDelays);
+
                 const double anchorAtZero =
-                    median(intercepts);
+                    nativeDelay /
+                    std::max(
+                        1.0e-12,
+                        settings.playbackRateRatio);
 
                 result.staticDelaySamples =
                     anchorAtZero;
@@ -737,6 +738,7 @@ Result AlignEngine::analyze(
             }
         }
     }
+
     if (staticDelays.empty() && knownRateDrift &&
         settings.mode != Mode::Static) {
         // Recover a coarse absolute alignment even when the normal static
