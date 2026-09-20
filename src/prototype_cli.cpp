@@ -876,8 +876,11 @@ int main(int argc, char** argv)
                 sourceStart -
                 kRenderPadSeconds * sourceRate);
 
+        const double renderSourceStartNative =
+            sourceStart - renderStart;
+
         const double renderPreProjectSeconds =
-            (sourceStart - renderStart) /
+            renderSourceStartNative /
             std::max(1.0e-12, sourceRate);
 
         WavData sourceRender;
@@ -897,10 +900,9 @@ int main(int argc, char** argv)
             return 11;
         }
 
-        // Convert the source start time into the coordinate system of the
-        // padded render buffer. The correction is sample-based and uses the
-        // original SOURCE playback rate, so no REAPER stretch markers are
-        // involved in the DYNAMIC path.
+        // SOURCE is loaded from renderStart. Keep the item-start offset
+        // in native SOURCE time (not project time), because the renderer
+        // advances through native SOURCE frames using sourceRate.
         std::vector<sap::Point> shiftedCurve =
             result.curve;
 
@@ -914,7 +916,7 @@ int main(int argc, char** argv)
 
         if (!renderDynamicCorrection(
                 sourceRender,
-                renderPreProjectSeconds,
+                renderSourceStartNative,
                 sourceRate,
                 duration,
                 settings.sampleRate,
