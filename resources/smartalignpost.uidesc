@@ -34,7 +34,7 @@
         class="CTextLabel"
         origin="20, 18"
         size="400, 30"
-        title="SMART ALIGN POST"
+        title="SMART ALIGN POST · RESIDUAL"
         font="~ NormalFontVeryBig"
         font-color="Text"
         text-alignment="center"
