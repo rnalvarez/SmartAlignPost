@@ -1,44 +1,67 @@
 #include "align_engine.h"
 
 #include <algorithm>
+#include <cmath>
 #include <complex>
 #include <cstddef>
-#include <cmath>
+#include <limits>
+#include <numeric>
 #include <vector>
-#ifdef SAP_GCC_DIAGNOSTIC
-#include <iostream>
-#endif
 
 namespace sap {
-
 namespace {
 
 using Complex = std::complex<double>;
 constexpr double kPi = 3.1415926535897932384626433832795;
 
-void fft(std::vector<Complex>& x, bool inverse)
-{
-    const size_t n = x.size();
-    if (n < 2) return;
+struct Measurement {
+    double phatDelay = 0.0;
+    double waveformDelay = 0.0;
+    double finalDelay = 0.0;
+    double confidence = 0.0;
+    double correlation = 0.0;
+    double phaseAgreement = 0.0;
+};
 
-    for (size_t i = 1, j = 0; i < n; ++i) {
-        size_t bit = n >> 1;
-        for (; j & bit; bit >>= 1) j ^= bit;
+struct Anchor {
+    std::size_t center = 0;
+    double energy = 0.0;
+};
+
+std::size_t nextPow2(std::size_t n)
+{
+    std::size_t p = 1;
+    while (p < n)
+        p <<= 1;
+    return p;
+}
+
+void fft(std::vector<Complex>& a, bool inverse)
+{
+    const std::size_t n = a.size();
+
+    for (std::size_t i = 1, j = 0; i < n; ++i) {
+        std::size_t bit = n >> 1;
+        for (; j & bit; bit >>= 1)
+            j ^= bit;
         j ^= bit;
-        if (i < j) std::swap(x[i], x[j]);
+        if (i < j)
+            std::swap(a[i], a[j]);
     }
 
-    for (size_t len = 2; len <= n; len <<= 1) {
-        const double angle = (inverse ? 2.0 : -2.0) * kPi / static_cast<double>(len);
+    for (std::size_t len = 2; len <= n; len <<= 1) {
+        const double angle = (inverse ? 2.0 : -2.0) * kPi /
+                             static_cast<double>(len);
         const Complex wlen(std::cos(angle), std::sin(angle));
-        for (size_t i = 0; i < n; i += len) {
+
+        for (std::size_t i = 0; i < n; i += len) {
             Complex w(1.0, 0.0);
-            const size_t half = len >> 1;
-            for (size_t j = 0; j < half; ++j) {
-                const Complex u = x[i + j];
-                const Complex v = x[i + j + half] * w;
-                x[i + j] = u + v;
-                x[i + j + half] = u - v;
+            const std::size_t half = len >> 1;
+            for (std::size_t j = 0; j < half; ++j) {
+                const Complex u = a[i + j];
+                const Complex v = a[i + j + half] * w;
+                a[i + j] = u + v;
+                a[i + j + half] = u - v;
                 w *= wlen;
             }
         }
@@ -46,1394 +69,1149 @@ void fft(std::vector<Complex>& x, bool inverse)
 
     if (inverse) {
         const double invN = 1.0 / static_cast<double>(n);
-        for (auto& v : x) v *= invN;
+        for (auto& v : a)
+            v *= invN;
     }
 }
 
-size_t nextPowerOfTwo(size_t n)
+double hann(std::size_t i, std::size_t n)
 {
-    size_t p = 1;
-    while (p < n) p <<= 1;
-    return p;
+    if (n <= 1)
+        return 1.0;
+    return 0.5 - 0.5 * std::cos(
+        2.0 * kPi * static_cast<double>(i) /
+        static_cast<double>(n - 1));
 }
 
-
-struct DynamicEvent
+double sampleLinear(const std::vector<float>& x, double pos)
 {
-    double timeSec = 0.0;
-    double strength = 0.0;
-};
-
-std::vector<DynamicEvent> detectDynamicEvents(
-    const std::vector<float>& signal,
-    double sampleRate,
-    const Settings& settings)
-{
-    std::vector<DynamicEvent> events;
-    if (signal.empty() || sampleRate <= 0.0) return events;
-
-    const size_t frame = std::max<size_t>(
-        32,
-        static_cast<size_t>(
-            sampleRate * settings.dynamicEventFrameMs / 1000.0));
-    const size_t hop = std::max<size_t>(16, frame);
-
-    if (signal.size() < frame * 3) return events;
-
-    const size_t frameCount = 1 + (signal.size() - frame) / hop;
-    std::vector<double> energy(frameCount, 0.0);
-
-    double averageEnergy = 0.0;
-    for (size_t i = 0; i < frameCount; ++i) {
-        const size_t start = i * hop;
-        double sum = 0.0;
-        for (size_t j = 0; j < frame; ++j) {
-            const double s = signal[start + j];
-            sum += s * s;
-        }
-        energy[i] = std::sqrt(sum / static_cast<double>(frame));
-        averageEnergy += energy[i];
-    }
-    averageEnergy /= static_cast<double>(frameCount);
-
-    // Light envelope smoothing. We deliberately do not look for individual
-    // sample peaks: those depend too strongly on waveform phase and mic
-    // polarity. We look for salient acoustic envelope transitions.
-    std::vector<double> env(frameCount, 0.0);
-    for (size_t i = 0; i < frameCount; ++i) {
-        double sum = energy[i];
-        int count = 1;
-        if (i > 0) { sum += energy[i - 1]; ++count; }
-        if (i + 1 < frameCount) { sum += energy[i + 1]; ++count; }
-        env[i] = sum / static_cast<double>(count);
-    }
-
-    const double minActivity =
-        std::max(1e-8, averageEnergy * 0.02);
-    const double minEventEnergy =
-        std::max(1e-8,
-                 averageEnergy * settings.dynamicEnergyGateRatio);
-    const size_t minSeparation = std::max<size_t>(
-        1,
-        static_cast<size_t>(
-            settings.dynamicEventMinSeparationMs /
-            settings.dynamicEventFrameMs));
-
-    struct Candidate {
-        size_t index = 0;
-        double strength = 0.0;
-    };
-    std::vector<Candidate> candidates;
-
-    for (size_t i = 1; i + 1 < frameCount; ++i) {
-        const double left = env[i - 1];
-        const double center = env[i];
-        const double right = env[i + 1];
-
-        if (left + center + right < minActivity) continue;
-        // Low-energy envelope fluctuations are poor phase/time anchors.
-        if (center < minEventEnergy) continue;
-
-        // Normalized local slope change catches both onsets and offsets.
-        const double transition =
-            std::abs(right - left) /
-            std::max(left + right, 1e-8);
-
-        const bool localPeak = center >= left && center >= right;
-        const bool localValley = center <= left && center <= right;
-        const double neighbour = 0.5 * (left + right);
-        const double prominence =
-            std::abs(center - neighbour) /
-            std::max(neighbour, 1e-8);
-
-        double strength = transition;
-        if (localPeak || localValley)
-            strength = std::max(strength, 0.5 * prominence);
-
-        if (strength < settings.dynamicEventThreshold)
-            continue;
-
-        candidates.push_back({i, strength});
-    }
-
-    // Non-maximum suppression in time: keep the strongest event within the
-    // configured separation. This avoids generating a key marker for every
-    // tiny fluctuation in speech.
-    for (const auto& candidate : candidates) {
-        if (events.empty()) {
-            events.push_back({
-                static_cast<double>(candidate.index * hop) / sampleRate,
-                candidate.strength
-            });
-            continue;
-        }
-
-        const size_t previousIndex = static_cast<size_t>(
-            std::llround(events.back().timeSec * sampleRate / hop));
-
-        if (candidate.index >= previousIndex &&
-            candidate.index - previousIndex < minSeparation) {
-            if (candidate.strength > events.back().strength) {
-                events.back().timeSec =
-                    static_cast<double>(candidate.index * hop) / sampleRate;
-                events.back().strength = candidate.strength;
-            }
-        } else {
-            events.push_back({
-                static_cast<double>(candidate.index * hop) / sampleRate,
-                candidate.strength
-            });
-        }
-    }
-
-    return events;
-}
-
-struct DynamicObservation
-{
-    double timeSec = 0.0;
-    double delaySamples = 0.0;
-    double sourceTimeSec = 0.0;
-    double confidence = 0.0;
-    bool keyPoint = false;
-};
-
-
-double normalizedWindowCorrelation(
-    const float* a,
-    const float* b,
-    size_t n,
-    int lag,
-    size_t center,
-    size_t halfWindow,
-    bool derivative)
-{
-    if (n < 32) return 0.0;
-
-    long long aStart = static_cast<long long>(center) -
-                       static_cast<long long>(halfWindow);
-    long long bStart = aStart + static_cast<long long>(lag);
-    const long long length = static_cast<long long>(halfWindow * 2);
-
-    if (aStart < 0 || bStart < 0 ||
-        aStart + length > static_cast<long long>(n) ||
-        bStart + length > static_cast<long long>(n)) {
+    if (x.empty() || pos < 0.0 || pos >= static_cast<double>(x.size()))
         return 0.0;
-    }
 
-    const size_t count = derivative
-        ? static_cast<size_t>(length - 1)
-        : static_cast<size_t>(length);
-
-    if (count < 16) return 0.0;
-
-    double ma = 0.0;
-    double mb = 0.0;
-
-    if (!derivative) {
-        for (size_t i = 0; i < count; ++i) {
-            ma += a[static_cast<size_t>(aStart) + i];
-            mb += b[static_cast<size_t>(bStart) + i];
-        }
-    } else {
-        for (size_t i = 0; i < count; ++i) {
-            const double da =
-                static_cast<double>(a[static_cast<size_t>(aStart) + i + 1]) -
-                static_cast<double>(a[static_cast<size_t>(aStart) + i]);
-            const double db =
-                static_cast<double>(b[static_cast<size_t>(bStart) + i + 1]) -
-                static_cast<double>(b[static_cast<size_t>(bStart) + i]);
-            ma += da;
-            mb += db;
-        }
-    }
-
-    ma /= static_cast<double>(count);
-    mb /= static_cast<double>(count);
-
-    double num = 0.0;
-    double daEnergy = 0.0;
-    double dbEnergy = 0.0;
-
-    if (!derivative) {
-        for (size_t i = 0; i < count; ++i) {
-            const double xa =
-                static_cast<double>(a[static_cast<size_t>(aStart) + i]) - ma;
-            const double xb =
-                static_cast<double>(b[static_cast<size_t>(bStart) + i]) - mb;
-            num += xa * xb;
-            daEnergy += xa * xa;
-            dbEnergy += xb * xb;
-        }
-    } else {
-        for (size_t i = 0; i < count; ++i) {
-            const double xa =
-                (static_cast<double>(a[static_cast<size_t>(aStart) + i + 1]) -
-                 static_cast<double>(a[static_cast<size_t>(aStart) + i])) - ma;
-            const double xb =
-                (static_cast<double>(b[static_cast<size_t>(bStart) + i + 1]) -
-                 static_cast<double>(b[static_cast<size_t>(bStart) + i])) - mb;
-            num += xa * xb;
-            daEnergy += xa * xa;
-            dbEnergy += xb * xb;
-        }
-    }
-
-    if (daEnergy <= 1e-15 || dbEnergy <= 1e-15) return 0.0;
-    return num / std::sqrt(daEnergy * dbEnergy);
+    const std::size_t i0 = static_cast<std::size_t>(std::floor(pos));
+    const std::size_t i1 = std::min(i0 + 1, x.size() - 1);
+    const double frac = pos - static_cast<double>(i0);
+    return (1.0 - frac) * x[i0] + frac * x[i1];
 }
 
-struct LocalRefinement
+double sampleLagrange4(const std::vector<float>& x, double pos)
 {
-    double delaySamples = 0.0;
-    double score = 0.0;
-    double sharpness = 0.0;
-};
+    if (x.empty() || pos < 1.0 ||
+        pos >= static_cast<double>(x.size() - 2))
+        return sampleLinear(x, pos);
 
-LocalRefinement refinePairedWaveformDelay(
-    const float* master,
-    const float* source,
-    size_t n,
-    size_t masterCenter,
-    double predictedDelaySamples,
-    double sampleRate,
-    double microWindowMs,
-    double searchMs)
+    const std::size_t i = static_cast<std::size_t>(std::floor(pos));
+    const double f = pos - static_cast<double>(i);
+
+    const double c0 = -f * (f - 1.0) * (f - 2.0) / 6.0;
+    const double c1 =  (f + 1.0) * (f - 1.0) * (f - 2.0) / 2.0;
+    const double c2 = -(f + 1.0) * f * (f - 2.0) / 2.0;
+    const double c3 =  (f + 1.0) * f * (f - 1.0) / 6.0;
+
+    return c0 * x[i - 1] +
+           c1 * x[i] +
+           c2 * x[i + 1] +
+           c3 * x[i + 2];
+}
+
+double rmsAround(const std::vector<float>& x, std::size_t center, std::size_t radius)
 {
-    LocalRefinement result{predictedDelaySamples, 0.0};
-    if (n < 128 || sampleRate <= 0.0) return result;
+    if (x.empty())
+        return 0.0;
 
-    const size_t windowSamples = std::max<size_t>(
-        96,
-        static_cast<size_t>(
-            sampleRate * microWindowMs / 1000.0));
-    const size_t halfWindow = windowSamples / 2;
-    if (halfWindow < 48) return result;
+    const std::size_t first = center > radius ? center - radius : 0;
+    const std::size_t last = std::min(x.size(), center + radius + 1);
 
-    const int radius = std::max(
-        1,
-        static_cast<int>(
-            sampleRate * searchMs / 1000.0));
-    const int centerLag = static_cast<int>(
-        std::llround(predictedDelaySamples));
+    if (first >= last)
+        return 0.0;
 
-    std::vector<double> scores(
-        static_cast<size_t>(2 * radius + 1),
-        0.0);
+    long double sum = 0.0;
+    for (std::size_t i = first; i < last; ++i)
+        sum += static_cast<long double>(x[i]) * x[i];
 
-    int validCount = 0;
-    for (int i = -radius; i <= radius; ++i) {
-        const int lag = centerLag + i;
-        const double raw = std::abs(
-            normalizedWindowCorrelation(
-                master, source, n, lag, masterCenter, halfWindow, false));
-        const double slope = std::abs(
-            normalizedWindowCorrelation(
-                master, source, n, lag, masterCenter, halfWindow, true));
-        const double score = 0.60 * raw + 0.40 * slope;
-        scores[static_cast<size_t>(i + radius)] = score;
-        if (score > 0.0) ++validCount;
+    return std::sqrt(
+        static_cast<double>(sum / static_cast<long double>(last - first)));
+}
+
+double normalizedWaveformCorrelation(
+    const std::vector<float>& master,
+    const std::vector<float>& source,
+    std::size_t center,
+    std::size_t halfWindow,
+    double delaySamples)
+{
+    if (master.empty() || source.empty())
+        return 0.0;
+
+    const std::size_t first = center > halfWindow ? center - halfWindow : 0;
+    const std::size_t last = std::min(master.size(), center + halfWindow + 1);
+
+    long double sumA = 0.0;
+    long double sumB = 0.0;
+    long double sumAA = 0.0;
+    long double sumBB = 0.0;
+    long double sumAB = 0.0;
+    std::size_t count = 0;
+
+    for (std::size_t i = first; i < last; ++i) {
+        const double sourcePos = static_cast<double>(i) + delaySamples;
+        if (sourcePos < 1.0 ||
+            sourcePos >= static_cast<double>(source.size() - 2))
+            continue;
+
+        const double a = master[i];
+        const double b = sampleLagrange4(source, sourcePos);
+
+        sumA += a;
+        sumB += b;
+        sumAA += a * a;
+        sumBB += b * b;
+        sumAB += a * b;
+        ++count;
     }
 
-    if (validCount == 0) return result;
+    if (count < 32)
+        return 0.0;
 
-    int best = radius;
-    for (int i = 1; i < static_cast<int>(scores.size()); ++i) {
-        if (scores[static_cast<size_t>(i)] >
-            scores[static_cast<size_t>(best)]) {
-            best = i;
-        }
+    const long double inv = 1.0L / static_cast<long double>(count);
+    const long double cov = sumAB - sumA * sumB * inv;
+    const long double varA = sumAA - sumA * sumA * inv;
+    const long double varB = sumBB - sumB * sumB * inv;
+
+    if (varA <= 0.0 || varB <= 0.0)
+        return 0.0;
+
+    return static_cast<double>(
+        cov / std::sqrt(varA * varB));
+}
+
+double median(std::vector<double> values)
+{
+    if (values.empty())
+        return 0.0;
+
+    const std::size_t mid = values.size() / 2;
+    std::nth_element(values.begin(), values.begin() + mid, values.end());
+    double result = values[mid];
+
+    if (values.size() % 2 == 0) {
+        const auto maxLeft = *std::max_element(values.begin(), values.begin() + mid);
+        result = 0.5 * (result + maxLeft);
     }
 
-    const int bestLag = centerLag + (best - radius);
-    double refined = static_cast<double>(bestLag);
-
-    if (best > 0 && best + 1 < static_cast<int>(scores.size())) {
-        const double ym = scores[static_cast<size_t>(best - 1)];
-        const double y0 = scores[static_cast<size_t>(best)];
-        const double yp = scores[static_cast<size_t>(best + 1)];
-        const double denom = ym - 2.0 * y0 + yp;
-        if (std::abs(denom) > 1e-12) {
-            refined += std::clamp(
-                0.5 * (ym - yp) / denom,
-                -0.5,
-                0.5);
-        }
-    }
-
-    const double bestScore = scores[static_cast<size_t>(best)];
-    double secondBest = 0.0;
-    for (int i = 0; i < static_cast<int>(scores.size()); ++i) {
-        if (std::abs(i - best) <= 2) continue;
-        secondBest = std::max(
-            secondBest,
-            scores[static_cast<size_t>(i)]);
-    }
-
-    const double sharpness =
-        bestScore > 1e-9
-            ? std::clamp(
-                (bestScore - secondBest) / bestScore,
-                0.0,
-                1.0)
-            : 0.0;
-
-    result.delaySamples = refined;
-    result.sharpness = sharpness;
-    // Confidence is not just correlation magnitude. A broad/ambiguous peak
-    // can have a high correlation but still give an unstable time estimate.
-    result.score = bestScore * (0.50 + 0.50 * sharpness);
     return result;
 }
 
-double refineLocalWaveformDelay(
-    const float* master,
-    const float* source,
-    size_t n,
-    double predictedDelaySamples,
-    double sampleRate,
-    double microWindowMs,
-    double searchMs)
+std::vector<double> buildEnergyCurve(
+    const std::vector<float>& master,
+    const std::vector<float>& source,
+    std::size_t window,
+    std::size_t hop)
 {
-    if (n < 128 || sampleRate <= 0.0) return predictedDelaySamples;
+    const std::size_t half = window / 2;
+    const std::size_t usable = std::min(master.size(), source.size());
 
-    const size_t windowSamples = std::max<size_t>(
-        96,
-        static_cast<size_t>(
-            sampleRate * microWindowMs / 1000.0));
-    const size_t halfWindow = windowSamples / 2;
-    if (halfWindow < 48 || halfWindow * 2 + 2 >= n)
-        return predictedDelaySamples;
+    std::vector<double> energy;
+    if (usable < window)
+        return energy;
 
-    const size_t center = n / 2;
-    const int radius = std::max(
-        1,
-        static_cast<int>(
-            sampleRate * searchMs / 1000.0));
-    const int centerLag = static_cast<int>(
-        std::llround(predictedDelaySamples));
+    for (std::size_t center = half; center + half < usable; center += std::max<std::size_t>(1, hop))
+        energy.push_back(rmsAround(master, center, half));
 
-    std::vector<double> scores(
-        static_cast<size_t>(2 * radius + 1),
-        -1.0);
-
-    for (int i = -radius; i <= radius; ++i) {
-        const int lag = centerLag + i;
-        const double raw = std::abs(
-            normalizedWindowCorrelation(
-                master, source, n, lag, center, halfWindow, false));
-        const double slope = std::abs(
-            normalizedWindowCorrelation(
-                master, source, n, lag, center, halfWindow, true));
-
-        // Direct waveform shape is authoritative, while the first-difference
-        // correlation emphasizes local peaks, valleys and transients without
-        // locking us to their exact sample polarity.
-        scores[static_cast<size_t>(i + radius)] =
-            0.60 * raw + 0.40 * slope;
-    }
-
-    int best = radius;
-    for (int i = 1; i < static_cast<int>(scores.size()); ++i) {
-        if (scores[static_cast<size_t>(i)] >
-            scores[static_cast<size_t>(best)]) {
-            best = i;
-        }
-    }
-
-    const int bestLag = centerLag + (best - radius);
-    double refined = static_cast<double>(bestLag);
-
-    if (best > 0 && best + 1 < static_cast<int>(scores.size())) {
-        const double ym = scores[static_cast<size_t>(best - 1)];
-        const double y0 = scores[static_cast<size_t>(best)];
-        const double yp = scores[static_cast<size_t>(best + 1)];
-        const double denom = ym - 2.0 * y0 + yp;
-        if (std::abs(denom) > 1e-12) {
-            const double offset = 0.5 * (ym - yp) / denom;
-            refined += std::clamp(offset, -0.5, 0.5);
-        }
-    }
-
-    // Keep this a local refinement around the spectral estimate. The micro
-    // stage must not jump to a completely different correlation basin.
-    const double maxCorrection =
-        sampleRate * searchMs / 1000.0;
-    if (std::abs(refined - predictedDelaySamples) > maxCorrection)
-        return predictedDelaySamples;
-
-    return refined;
+    return energy;
 }
 
-double gccPhatDelay(const float* master,
-                     const float* source,
-                     size_t n,
-                     int maxLag,
-                     double sampleRate,
-                     double& confidence,
-                     double& peakCorrelation)
+std::vector<Anchor> selectAnchors(
+    const std::vector<float>& master,
+    const std::vector<float>& source,
+    std::size_t window,
+    std::size_t hop,
+    double gateRatio,
+    double separationSeconds,
+    double sampleRate,
+    std::size_t maxAnchors)
 {
-    confidence = 0.0;
-    peakCorrelation = 0.0;
-    if (n < 32 || sampleRate <= 0.0) return 0.0;
+    std::vector<Anchor> candidates;
+    const std::size_t usable = std::min(master.size(), source.size());
+    const std::size_t half = window / 2;
 
-#ifdef SAP_GCC_DIAGNOSTIC
-    std::cerr << "GCC 0: enter n=" << n << " maxLag=" << maxLag << std::endl;
-#endif
+    if (usable < window)
+        return candidates;
 
-    // The zero-padding (fftSize - n) must cover the full lag search range,
-    // or the circular correlation wraps around and contaminates results at
-    // lags near +-maxLag. This matters most for short buffers (analyze()'s
-    // n < win branch), where maxLag can be a large fraction of n.
-    const size_t lagMargin = static_cast<size_t>(std::max(0, maxLag));
-    const size_t fftSize = nextPowerOfTwo(n + lagMargin);
-    std::vector<Complex> A(fftSize, Complex(0.0, 0.0));
-    std::vector<Complex> B(fftSize, Complex(0.0, 0.0));
-#ifdef SAP_GCC_DIAGNOSTIC
-    std::cerr << "GCC 1: allocated fftSize=" << fftSize << std::endl;
-#endif
+    double maxEnergy = 0.0;
+    std::vector<std::pair<std::size_t, double>> all;
 
-    double meanA = 0.0;
-    double meanB = 0.0;
-    for (size_t i = 0; i < n; ++i) {
-        meanA += master[i];
-        meanB += source[i];
-    }
-    meanA /= static_cast<double>(n);
-    meanB /= static_cast<double>(n);
-
-    for (size_t i = 0; i < n; ++i) {
-        const double u = static_cast<double>(i) / static_cast<double>(n - 1);
-        const double window = 0.5 - 0.5 * std::cos(2.0 * kPi * u);
-        A[i] = Complex((static_cast<double>(master[i]) - meanA) * window, 0.0);
-        B[i] = Complex((static_cast<double>(source[i]) - meanB) * window, 0.0);
+    for (std::size_t center = half;
+         center + half < usable;
+         center += std::max<std::size_t>(1, hop)) {
+        const double e = rmsAround(master, center, half);
+        maxEnergy = std::max(maxEnergy, e);
+        all.emplace_back(center, e);
     }
 
-    fft(A, false);
-#ifdef SAP_GCC_DIAGNOSTIC
-    std::cerr << "GCC 2: after fft A" << std::endl;
-#endif
-    fft(B, false);
-#ifdef SAP_GCC_DIAGNOSTIC
-    std::cerr << "GCC 3: after fft B" << std::endl;
-#endif
+    if (all.empty() || maxEnergy <= 0.0)
+        return candidates;
 
-    // Keep the original cross-spectrum phase for robust fractional-delay
-    // refinement after the coarse GCC-PHAT peak is found.
-    std::vector<Complex> crossSpectrum(fftSize, Complex(0.0, 0.0));
-    double maxCrossMagnitude = 0.0;
-    for (size_t k = 0; k < fftSize; ++k) {
-        const Complex cross = A[k] * std::conj(B[k]);
-        crossSpectrum[k] = cross;
-        maxCrossMagnitude = std::max(maxCrossMagnitude, std::abs(cross));
+    double meanEnergy = 0.0;
+    for (const auto& p : all)
+        meanEnergy += p.second;
+    meanEnergy /= static_cast<double>(all.size());
+
+    const double gate = meanEnergy +
+        std::clamp(gateRatio, 0.0, 1.0) * (maxEnergy - meanEnergy);
+
+    std::sort(all.begin(), all.end(),
+              [](const auto& a, const auto& b) {
+                  return a.second > b.second;
+              });
+
+    const std::size_t minSeparation = static_cast<std::size_t>(
+        std::max(1.0, separationSeconds * sampleRate));
+
+    for (const auto& candidate : all) {
+        if (candidate.second < gate)
+            break;
+
+        bool separated = true;
+        for (const auto& selected : candidates) {
+            const std::size_t d = candidate.first > selected.center
+                ? candidate.first - selected.center
+                : selected.center - candidate.first;
+            if (d < minSeparation) {
+                separated = false;
+                break;
+            }
+        }
+
+        if (!separated)
+            continue;
+
+        candidates.push_back({candidate.first, candidate.second});
+        if (candidates.size() >= maxAnchors)
+            break;
     }
-#ifdef SAP_GCC_DIAGNOSTIC
-    std::cerr << "GCC 4: after cross max=" << maxCrossMagnitude << std::endl;
-#endif
 
-    for (size_t k = 0; k < fftSize; ++k) {
-        const Complex cross = crossSpectrum[k];
-        const double mag = std::abs(cross);
-        A[k] = mag > 1e-12 ? cross / mag : Complex(0.0, 0.0);
+    std::sort(candidates.begin(), candidates.end(),
+              [](const Anchor& a, const Anchor& b) {
+                  return a.center < b.center;
+              });
+    return candidates;
+}
+
+
+std::vector<Anchor> selectTimelineAnchors(
+    const std::vector<float>& master,
+    const std::vector<float>& source,
+    std::size_t window,
+    std::size_t hop,
+    std::size_t maxAnchors)
+{
+    std::vector<Anchor> anchors;
+    const std::size_t usable = std::min(master.size(), source.size());
+    const std::size_t half = window / 2;
+
+    if (usable < window || maxAnchors == 0)
+        return anchors;
+
+    std::size_t effectiveHop = std::max<std::size_t>(1, hop);
+    const std::size_t span = usable - window;
+
+    if (span > 0 && maxAnchors > 1) {
+        const std::size_t maxByCount =
+            (span + maxAnchors - 2) / (maxAnchors - 1);
+        effectiveHop = std::max(effectiveHop, maxByCount);
     }
 
-    fft(A, true);
-#ifdef SAP_GCC_DIAGNOSTIC
-    std::cerr << "GCC 5: after inverse fft" << std::endl;
-#endif
+    for (std::size_t center = half;
+         center + half < usable;
+         center += effectiveHop) {
+        anchors.push_back({
+            center,
+            rmsAround(master, center, half)
+        });
 
-    double best = -1.0;
-    double second = -1.0;
+        if (anchors.size() >= maxAnchors)
+            break;
+    }
+
+    const std::size_t lastCenter = usable - half - 1;
+    if (anchors.size() < maxAnchors &&
+        lastCenter > half &&
+        (anchors.empty() || anchors.back().center < lastCenter)) {
+        anchors.push_back({
+            lastCenter,
+            rmsAround(master, lastCenter, half)
+        });
+    }
+
+    return anchors;
+}
+
+Measurement measurePhase(
+    const std::vector<float>& master,
+    const std::vector<float>& source,
+    std::size_t center,
+    std::size_t window,
+    double predictedDelaySamples,
+    double searchMinSamples,
+    double searchMaxSamples,
+    double sampleRate)
+{
+    Measurement out;
+
+    const std::size_t half = window / 2;
+    if (master.size() < window || source.size() < window)
+        return out;
+
+    if (center < half || center + half >= master.size())
+        return out;
+
+    const std::size_t fftSize = nextPow2(window * 2);
+    std::vector<Complex> a(fftSize, Complex(0.0, 0.0));
+    std::vector<Complex> b(fftSize, Complex(0.0, 0.0));
+
+    const std::size_t first = center - half;
+
+    for (std::size_t i = 0; i < window; ++i) {
+        const std::size_t idx = first + i;
+        if (idx < master.size())
+            a[i] = static_cast<double>(master[idx]) * hann(i, window);
+        if (idx < source.size())
+            b[i] = static_cast<double>(source[idx]) * hann(i, window);
+    }
+
+    fft(a, false);
+    fft(b, false);
+
+    std::vector<Complex> cross(fftSize);
+    for (std::size_t k = 0; k < fftSize; ++k) {
+        const Complex c = b[k] * std::conj(a[k]);
+        const double mag = std::abs(c);
+        cross[k] = mag > 1.0e-14 ? c / mag : Complex(0.0, 0.0);
+    }
+
+    fft(cross, true);
+
+    const int maxLag = static_cast<int>(
+        std::min(
+            searchMaxSamples,
+            static_cast<double>(fftSize / 2 - 2)));
+    const int minLag = static_cast<int>(
+        std::max(
+            searchMinSamples,
+            -static_cast<double>(fftSize / 2 - 2)));
+
+    if (maxLag < minLag)
+        return out;
+
     int bestLag = 0;
-    const int span = std::min(maxLag, static_cast<int>(fftSize / 2) - 1);
+    double bestValue = -1.0;
+    std::vector<double> magnitudes;
+    magnitudes.reserve(static_cast<std::size_t>(maxLag - minLag + 1));
 
-#ifdef SAP_GCC_DIAGNOSTIC
-    std::cerr << "GCC 6: before lag scan span=" << span << std::endl;
-#endif
-    for (int lag = -span; lag <= span; ++lag) {
-        const size_t index = lag >= 0
-            ? static_cast<size_t>(lag)
-            : fftSize - static_cast<size_t>(-lag);
-        const double value = std::abs(A[index].real());
-        if (value > best) {
-            second = best;
-            best = value;
+    for (int lag = minLag; lag <= maxLag; ++lag) {
+        const std::size_t index = lag >= 0
+            ? static_cast<std::size_t>(lag)
+            : fftSize - static_cast<std::size_t>(-lag);
+
+        const double value = cross[index].real();
+        magnitudes.push_back(value);
+
+        if (value > bestValue) {
+            bestValue = value;
             bestLag = lag;
-        } else if (value > second) {
-            second = value;
         }
     }
 
-#ifdef SAP_GCC_DIAGNOSTIC
-    std::cerr << "GCC 7: bestLag=" << bestLag << " best=" << best << std::endl;
-#endif
-    double refinedLag = static_cast<double>(bestLag);
-    double phaseDelay = -refinedLag;
-    if (bestLag > -span && bestLag < span) {
-        const auto valueAt = [&](int lag) -> double {
-            const size_t index = lag >= 0
-                ? static_cast<size_t>(lag)
-                : fftSize - static_cast<size_t>(-lag);
-            return std::abs(A[index].real());
+    if (bestValue <= 0.0)
+        return out;
+
+    double fractionalOffset = 0.0;
+    if (bestLag > minLag && bestLag < maxLag) {
+        const auto valueAt = [&](int lag) {
+            const std::size_t index = lag >= 0
+                ? static_cast<std::size_t>(lag)
+                : fftSize - static_cast<std::size_t>(-lag);
+            return cross[index].real();
         };
+
         const double ym = valueAt(bestLag - 1);
         const double y0 = valueAt(bestLag);
         const double yp = valueAt(bestLag + 1);
         const double denom = ym - 2.0 * y0 + yp;
-        if (std::abs(denom) > 1e-12) {
-            const double offset = 0.5 * (ym - yp) / denom;
-            refinedLag += std::clamp(offset, -0.5, 0.5);
+
+        if (std::abs(denom) > 1.0e-12) {
+            fractionalOffset = 0.5 * (ym - yp) / denom;
+            fractionalOffset = std::clamp(fractionalOffset, -0.5, 0.5);
         }
     }
 
-#ifndef SAP_DISABLE_PHASE_REFINE
-    // Robust fractional-delay refinement:
-    // 1) start from the GCC-PHAT coarse/parabolic estimate;
-    // 2) remove that coarse delay from the cross-spectrum;
-    // 3) fit only the small residual phase slope.
-    //
-    // This avoids globally unwrapping the raw cross-spectrum phase. Global
-    // unwrap is fragile with sparse/low-energy bins and was the main reason
-    // the previous refinement could under-correct or jump between phase
-    // branches on real production material.
-    double phaseWeightSum = 0.0;
-    double phaseFreqSum = 0.0;
-    double phaseSum = 0.0;
-    double phaseFreq2Sum = 0.0;
-    double phaseFreqPhaseSum = 0.0;
-    int phaseBins = 0;
+    out.phatDelay = static_cast<double>(bestLag) + fractionalOffset;
 
-    const double nyquist = sampleRate * 0.5;
-    const double fMin = std::max(250.0, sampleRate * 0.006);
-    const double fMax = std::min(14000.0, nyquist * 0.88);
-    const double magnitudeFloor = maxCrossMagnitude * 1e-3;
-
-    auto fitResidualSlope = [&](bool rejectOutliers, double& slope, int& usedBins) -> bool {
-        double wSum = 0.0;
-        double fSum = 0.0;
-        double pSum = 0.0;
-        double f2Sum = 0.0;
-        double fpSum = 0.0;
-        usedBins = 0;
-
-        for (size_t k = 1; k < fftSize / 2; ++k) {
-            const double freq = static_cast<double>(k) * sampleRate /
-                                static_cast<double>(fftSize);
-            if (freq < fMin || freq > fMax) continue;
-
-            const Complex cross = crossSpectrum[k];
-            const double mag = std::abs(cross);
-            if (mag <= magnitudeFloor) continue;
-
-            const double coarseAngle =
-                2.0 * kPi * freq * phaseDelay / sampleRate;
-            const Complex derot(std::cos(coarseAngle), -std::sin(coarseAngle));
-            const double residualPhase = std::atan2(
-                (cross * derot).imag(), (cross * derot).real());
-
-            if (rejectOutliers && std::abs(residualPhase) > 0.80)
-                continue;
-
-            const double w = std::sqrt(mag);
-            wSum += w;
-            fSum += w * freq;
-            pSum += w * residualPhase;
-            f2Sum += w * freq * freq;
-            fpSum += w * freq * residualPhase;
-            ++usedBins;
-        }
-
-        if (usedBins < 32 || wSum <= 0.0) return false;
-
-        const double meanF = fSum / wSum;
-        const double meanP = pSum / wSum;
-        const double denom = f2Sum - wSum * meanF * meanF;
-        if (std::abs(denom) <= 1e-12) return false;
-
-        slope = (fpSum - wSum * meanF * meanP) / denom;
-        return std::isfinite(slope);
-    };
-
-    double slope = 0.0;
-    int phaseBinsFirst = 0;
-    if (n >= 1024 && fitResidualSlope(false, slope, phaseBinsFirst)) {
-        double candidateDelay =
-            phaseDelay + slope * sampleRate / (2.0 * kPi);
-
-        // Reject implausibly large fractional corrections. The coarse
-        // GCC-PHAT/parabolic peak is authoritative for the integer basin;
-        // phase refinement is only allowed to improve the local sub-sample
-        // position.
-        const double correction = candidateDelay - phaseDelay;
-        if (std::abs(correction) <= 1.5 &&
-            std::abs(candidateDelay) <= static_cast<double>(maxLag) &&
-            std::isfinite(candidateDelay)) {
-            phaseDelay = candidateDelay;
-
-            // One robust second fit after the coarse correction. Outlying
-            // bins from weak/reverberant spectral regions are removed.
-            double slopeRefined = 0.0;
-            int phaseBinsSecond = 0;
-            if (fitResidualSlope(true, slopeRefined, phaseBinsSecond)) {
-                const double secondCandidate =
-                    phaseDelay + slopeRefined * sampleRate / (2.0 * kPi);
-                const double secondCorrection =
-                    secondCandidate - phaseDelay;
-
-                if (std::abs(secondCorrection) <= 0.75 &&
-                    std::abs(secondCandidate) <= static_cast<double>(maxLag) &&
-                    std::isfinite(secondCandidate)) {
-                    phaseDelay = secondCandidate;
-                    phaseBins = phaseBinsSecond;
-                } else {
-                    phaseBins = phaseBinsFirst;
-                }
-            } else {
-                phaseBins = phaseBinsFirst;
-            }
-        }
-    }
-
-#ifdef SAP_GCC_DIAGNOSTIC
-    std::cerr << "GCC PHASE: bins=" << phaseBins
-              << " delay=" << phaseDelay << std::endl;
-#endif
-
-#endif
-
-
-    peakCorrelation = std::clamp(best, 0.0, 1.0);
-    const double prominence = std::max(0.0, best - std::max(0.0, second));
-    const double separation = best > 1e-12 ? prominence / best : 0.0;
-    confidence = std::clamp(
-        peakCorrelation * (0.65 + 0.35 * separation),
+    std::sort(magnitudes.begin(), magnitudes.end());
+    const double background = magnitudes[magnitudes.size() / 2];
+    const double phatSharpness = std::clamp(
+        (bestValue - background) /
+        std::max(bestValue, 1.0e-9),
         0.0, 1.0);
 
-    // Positive delay means SOURCE occurs later than MASTER. The
-    // A*conj(B) cross-spectrum produces the opposite lag convention,
-    // therefore invert the sign before returning the public delay.
-    return phaseDelay;
+    const double localSearch = 0.75;
+
+    double bestWaveDelay = out.phatDelay;
+    double bestCorrelation = -1.0;
+
+    for (int step = -6; step <= 6; ++step) {
+        const double d = out.phatDelay +
+            static_cast<double>(step) * 0.125;
+        if (d < searchMinSamples || d > searchMaxSamples)
+            continue;
+
+        const double corr = normalizedWaveformCorrelation(
+            master, source, center, half, d);
+
+        if (corr > bestCorrelation) {
+            bestCorrelation = corr;
+            bestWaveDelay = d;
+        }
+    }
+
+    const double c0 = normalizedWaveformCorrelation(
+        master, source, center, half, bestWaveDelay - 0.125);
+    const double c1 = bestCorrelation;
+    const double c2 = normalizedWaveformCorrelation(
+        master, source, center, half, bestWaveDelay + 0.125);
+
+    const double curvature = c0 - 2.0 * c1 + c2;
+    if (std::abs(curvature) > 1.0e-12) {
+        const double delta = 0.5 * (c0 - c2) / curvature;
+        bestWaveDelay += std::clamp(delta * 0.125, -0.125, 0.125);
+        bestCorrelation = normalizedWaveformCorrelation(
+            master, source, center, half, bestWaveDelay);
+    }
+
+    out.waveformDelay = bestWaveDelay;
+    out.correlation = std::max(0.0, bestCorrelation);
+
+    const double difference = std::abs(out.waveformDelay - out.phatDelay);
+    out.phaseAgreement = std::exp(
+        -difference / std::max(0.25, localSearch));
+
+    // GCC-PHAT is the primary measurement because it is a phase-only
+    // cross-correlation. Waveform correlation is the independent sanity
+    // check that prevents a narrow PHAT peak from being accepted when the
+    // actual broadband waveforms disagree.
+    out.finalDelay =
+        0.70 * out.phatDelay +
+        0.30 * out.waveformDelay;
+
+    out.confidence = std::clamp(
+        0.55 * phatSharpness +
+        0.25 * out.correlation +
+        0.20 * out.phaseAgreement,
+        0.0, 1.0);
+
+    return out;
+}
+
+double fallbackEstimate(
+    const std::vector<float>& master,
+    const std::vector<float>& source,
+    int maxLag,
+    double sampleRate,
+    double& confidence)
+{
+    const std::size_t n = std::min(master.size(), source.size());
+    if (n < 1024) {
+        confidence = 0.0;
+        return 0.0;
+    }
+
+    Settings s;
+    s.sampleRate = sampleRate;
+    s.maxDelayMs = 1000.0 * static_cast<double>(maxLag) / sampleRate;
+    s.analysisWindowMs = 80.0;
+    s.hopMs = 250.0;
+    s.mode = Mode::Static;
+
+    const Result r = AlignEngine::analyze(master, source, s);
+    confidence = r.staticConfidence;
+    return r.staticDelaySamples;
 }
 
 } // namespace
 
-double AlignEngine::normalizedCorrelation(const float* a, const float* b,
-                                          size_t n, int lag)
+Result AlignEngine::analyze(
+    const std::vector<float>& master,
+    const std::vector<float>& source,
+    const Settings& settings)
 {
-    if (n == 0 || std::abs(lag) >= static_cast<int>(n)) return 0.0;
-    size_t startA = 0, startB = 0, count = n;
-    if (lag > 0) { startB = static_cast<size_t>(lag); count = n - startB; }
-    else if (lag < 0) { startA = static_cast<size_t>(-lag); count = n - startA; }
+    Result result;
 
-    if (count < 16) return 0.0;
+    const std::size_t usable = std::min(master.size(), source.size());
+    if (usable < 2048 || settings.sampleRate <= 0.0)
+        return result;
 
-    double ma = 0.0, mb = 0.0;
-    for (size_t i = 0; i < count; ++i) {
-        ma += a[startA+i];
-        mb += b[startB+i];
-    }
-    ma /= count; mb /= count;
+    const std::size_t window = std::clamp<std::size_t>(
+        static_cast<std::size_t>(
+            std::llround(settings.analysisWindowMs * settings.sampleRate / 1000.0)),
+        1024,
+        8192);
 
-    double num=0.0, da=0.0, db=0.0;
-    for (size_t i=0; i<count; ++i) {
-        const double xa = a[startA+i]-ma;
-        const double xb = b[startB+i]-mb;
-        num += xa*xb;
-        da += xa*xa;
-        db += xb*xb;
-    }
-    if (da <= 1e-15 || db <= 1e-15) return 0.0;
-    return num/std::sqrt(da*db);
-}
+    const std::size_t hop = std::max<std::size_t>(
+        1,
+        static_cast<std::size_t>(
+            std::llround(settings.hopMs * settings.sampleRate / 1000.0)));
 
-double AlignEngine::estimateDelay(const float* master,
-                                   const float* source,
-                                   size_t n,
-                                   int maxLag,
-                                   double sampleRate,
-                                   double& confidence)
-{
-    double peak = 0.0;
-    return gccPhatDelay(master, source, n, maxLag, sampleRate, confidence, peak);
-}
+    const int maxLag = std::max(
+        1,
+        static_cast<int>(
+            std::llround(settings.maxDelayMs * settings.sampleRate / 1000.0)));
 
-Result AlignEngine::analyze(const std::vector<float>& master,
-                            const std::vector<float>& source,
-                            const Settings& settings)
-{
-    Result r;
-    if (master.empty() || source.empty()) return r;
+    const auto staticAnchors = selectAnchors(
+        master, source, window, hop,
+        settings.energyGateRatio,
+        settings.anchorSeparationMs / 1000.0,
+        settings.sampleRate,
+        std::max<std::size_t>(1, settings.staticAnchorCount));
 
-    const size_t n = std::min(master.size(), source.size());
-    const int requestedMaxLag = std::max(1, static_cast<int>(
-        settings.sampleRate * settings.maxDelayMs / 1000.0));
+    result.staticTotalWindows = static_cast<int>(staticAnchors.size());
+    result.staticAnalysisTimeSec =
+        staticAnchors.empty()
+            ? 0.0
+            : static_cast<double>(staticAnchors[staticAnchors.size() / 2].center) /
+              settings.sampleRate;
 
-    const size_t win = std::max<size_t>(256,
-        static_cast<size_t>(settings.sampleRate * settings.analysisWindowMs / 1000.0));
-    const size_t hop = std::max<size_t>(64,
-        static_cast<size_t>(settings.sampleRate * settings.hopMs / 1000.0));
+    std::vector<double> staticDelays;
+    std::vector<double> staticCorrelations;
+    std::vector<double> staticConfidences;
+    staticDelays.reserve(staticAnchors.size());
 
-    if (n < win) {
-        double c=0.0;
-        double peak=0.0;
-        const int maxLag = std::max(1, std::min<int>(requestedMaxLag, static_cast<int>(n / 2)));
-        r.staticDelaySamples = gccPhatDelay(master.data(), source.data(),
-                                             n, maxLag, settings.sampleRate, c, peak);
-        r.staticConfidence=c;
-        r.staticAnalysisTimeSec = 0.0;
-        r.staticCorrelation = peak;
-        r.staticSupportWindows = c >= settings.minConfidence ? 1 : 0;
-        r.staticTotalWindows = 1;
-        return r;
+    const double seededDelay = settings.hasInitialDelaySamples
+        ? settings.initialDelaySamples
+        : 0.0;
+
+    for (const auto& anchor : staticAnchors) {
+        const Measurement m = measurePhase(
+            master, source,
+            anchor.center,
+            window,
+            seededDelay,
+            -static_cast<double>(maxLag),
+            static_cast<double>(maxLag),
+            settings.sampleRate);
+
+        if (m.confidence < settings.minConfidence * 0.75)
+            continue;
+
+        staticDelays.push_back(m.finalDelay);
+        staticCorrelations.push_back(m.correlation);
+        staticConfidences.push_back(m.confidence);
     }
 
-    const int maxLag = std::max(1, std::min<int>(requestedMaxLag, static_cast<int>(win / 2) - 1));
+    result.staticSupportWindows = static_cast<int>(staticDelays.size());
 
-    // DYNAMIC must not execute the STATIC consensus pass below first.
-    // That would perform essentially the same GCC-PHAT windows twice and can
-    // make even a short 24 s source exceed REAPER's 120 s process timeout on
-    // slower Windows machines. DYNAMIC is a single tracking pass seeded from
-    // the strongest of the first few windows.
-    if (settings.mode == Mode::Dynamic) {
-        double previous = 0.0;
+    if (!staticDelays.empty()) {
+        result.staticDelaySamples = median(staticDelays);
+        result.staticCorrelation = median(staticCorrelations);
+        result.staticConfidence = median(staticConfidences);
+    }
 
-        // Prefix energy lets us cheaply locate the strongest acoustic
-        // sub-window inside each analysis window.  Dynamic alignment should
-        // be driven by these informative regions, not by silence/room tone.
-        std::vector<double> masterEnergyPrefix(n + 1, 0.0);
-        for (size_t i = 0; i < n; ++i) {
-            const double m = master[i];
-            masterEnergyPrefix[i + 1] =
-                masterEnergyPrefix[i] + m * m;
-        }
+    if (settings.mode == Mode::Static) {
+        result.modeUsed = Mode::Static;
+        return result;
+    }
 
-        const double masterGlobalRms =
-            std::sqrt(masterEnergyPrefix[n] / static_cast<double>(n));
-        const double masterEnergyGate =
-            std::max(1e-10,
-                     masterGlobalRms * settings.dynamicEnergyGateRatio);
-        const size_t focusWindowSamples = std::max<size_t>(
-            32,
-            static_cast<size_t>(
-                std::llround(
-                    settings.sampleRate *
-                    settings.dynamicFocusWindowMs / 1000.0)));
-        const size_t focusHalf = focusWindowSamples / 2;
-        const size_t focusStepSamples = std::max<size_t>(
-            16,
-            static_cast<size_t>(
-                std::llround(
-                    settings.sampleRate *
-                    settings.dynamicFocusStepMs / 1000.0)));
+    const bool knownRateDrift =
+        std::isfinite(settings.playbackRateRatio) &&
+        std::abs(settings.playbackRateRatio - 1.0) > 1.0e-6;
 
-        const auto prefixRms = [](const std::vector<double>& prefix,
-                                  size_t start,
-                                  size_t length) {
-            if (length == 0 || start + length > prefix.size())
-                return 0.0;
-            return std::sqrt(
-                std::max(0.0,
-                    (prefix[start + length] - prefix[start]) /
-                    static_cast<double>(length)));
-        };
+    if (knownRateDrift && settings.mode != Mode::Static) {
+        // First undo the relative SOURCE/MASTER playback-rate ratio in the
+        // project-time SOURCE buffer. This restores the acoustic offset in the
+        // same timebase as MASTER, so the existing STATIC estimator can measure
+        // it without having to chase a moving delay peak.
+        const double ratio =
+            std::max(
+                1.0e-12,
+                settings.playbackRateRatio);
 
-        if (settings.hasInitialDelaySamples) {
-            previous = settings.initialDelaySamples;
-        } else {
-            // First chunk: seed from the strongest of the first few windows.
-            constexpr int kWarmupWindows = 25;
-            double seedScore = -1.0;
-            double seedDelay = 0.0;
-            double seedCorrelation = 0.0;
-            double seedConfidence = 0.0;
-            size_t warmupPos = 0;
-            int warmupCount = 0;
+        const std::size_t rateAlignedUsable =
+            std::min<std::size_t>(
+                master.size(),
+                source.empty()
+                    ? 0
+                    : std::min<std::size_t>(
+                        source.size(),
+                        static_cast<std::size_t>(
+                            std::floor(
+                                static_cast<double>(
+                                    source.size() - 1) *
+                                ratio)) +
+                            1));
 
-            for (; warmupCount < kWarmupWindows && warmupPos + win <= n;
-                 ++warmupCount, warmupPos += hop) {
-                double c = 0.0;
-                double peak = 0.0;
-                const double d = gccPhatDelay(master.data() + warmupPos,
-                                              source.data() + warmupPos,
-                                              win, maxLag, settings.sampleRate, c, peak);
-                const double warmupEnergy =
-                    prefixRms(masterEnergyPrefix,
-                              warmupPos,
-                              win);
-                const double energyScore =
-                    std::clamp(
-                        warmupEnergy /
-                        std::max(masterEnergyGate, 1e-10),
-                        0.0,
-                        2.0);
-                const double score = c * peak * (0.5 + 0.5 * energyScore);
-                if (score > seedScore) {
-                    seedScore = score;
-                    seedDelay = d;
-                    seedCorrelation = peak;
-                    seedConfidence = c;
-                }
+        if (rateAlignedUsable >= 2048) {
+            std::vector<float> rateAlignedSource(
+                rateAlignedUsable);
+
+            for (std::size_t i = 0;
+                 i < rateAlignedUsable;
+                 ++i) {
+                const double sourcePos =
+                    static_cast<double>(i) / ratio;
+
+                rateAlignedSource[i] =
+                    static_cast<float>(
+                        sampleLagrange4(
+                            source,
+                            sourcePos));
             }
 
-            if (warmupCount == 0) return r;
+            Settings staticRateSettings = settings;
+            staticRateSettings.mode = Mode::Static;
+            staticRateSettings.playbackRateRatio = 1.0;
+            staticRateSettings.hasInitialDelaySamples = false;
 
-            previous = seedDelay;
-            r.staticDelaySamples = seedDelay;
-            r.staticCorrelation = seedCorrelation;
-            r.staticConfidence = seedConfidence;
-            r.staticAnalysisTimeSec = 0.0;
-            r.staticSupportWindows = warmupCount;
-            r.staticTotalWindows = warmupCount;
-        }
+            const Result rateStatic =
+                AlignEngine::analyze(
+                    std::vector<float>(
+                        master.begin(),
+                        master.begin() + rateAlignedUsable),
+                    rateAlignedSource,
+                    staticRateSettings);
 
-        std::vector<DynamicObservation> observations;
-        observations.reserve((n / hop) + 64);
+            if (std::isfinite(rateStatic.staticDelaySamples) &&
+                rateStatic.staticConfidence >=
+                    std::max(
+                        0.45,
+                        settings.minConfidence * 0.60)) {
 
-        const auto microRefine = [&](const float* m,
-                                     const float* s,
-                                     size_t length,
-                                     double predicted) {
-            return refineLocalWaveformDelay(
-                m, s, length, predicted, settings.sampleRate,
-                settings.dynamicMicroWindowMs,
-                settings.dynamicMicroSearchMs);
-        };
-
-        // Dense baseline tracking with PREDICTIVE ALIGNMENT. Instead of
-        // comparing MASTER[pos] with SOURCE[pos] and asking GCC to search the
-        // full absolute acoustic delay, the SOURCE window is first shifted by
-        // the delay measured in the previous step. GCC then only has to find
-        // the small residual error around that prediction.
-        //
-        // This is critical for real REAPER playrate drift: a small 0.999x
-        // SOURCE rate can accumulate tens of milliseconds over a long take.
-        // A fixed same-time window progressively loses overlap as the absolute
-        // delay grows, causing confidence to collapse and freezing the curve.
-        // Predictive alignment keeps the correlated audio overlapped and lets
-        // the curve follow the changing delay without requiring a huge FFT
-        // window.
-        // Dynamic tracking is primarily LOCAL.  The previous implementation
-        // ran GCC-PHAT over every 40 ms window, which was both expensive and
-        // vulnerable to unrelated energy/reverberation elsewhere in the window.
-        // We now lock onto the predicted delay with a focused waveform
-        // correlation. GCC-PHAT is used only periodically to re-center the
-        // search basin if necessary.
-        const size_t recaptureEvery = std::max<size_t>(
-            1,
-            static_cast<size_t>(
-                std::llround(
-                    settings.dynamicRecaptureIntervalMs /
-                    std::max(settings.hopMs, 1.0))));
-
-        size_t observationIndex = 0;
-
-        for (size_t pos = 0; pos + win <= n; pos += hop, ++observationIndex) {
-            size_t focusCenter = win / 2;
-            double bestFocusEnergy = 0.0;
-
-            if (win > 2 * focusHalf + 2) {
-                const size_t firstCenter = focusHalf + 1;
-                const size_t lastCenter =
-                    win - focusHalf - 1;
-
-                for (size_t center = firstCenter;
-                     center <= lastCenter;
-                     center += focusStepSamples) {
-                    const size_t focusStart =
-                        pos + center - focusHalf;
-                    const double e =
-                        prefixRms(masterEnergyPrefix,
-                                  focusStart,
-                                  focusWindowSamples);
-                    if (e > bestFocusEnergy) {
-                        bestFocusEnergy = e;
-                        focusCenter = center;
-                    }
-                }
-            }
-
-            const double masterFocusEnergy =
-                bestFocusEnergy > 0.0
-                    ? bestFocusEnergy
-                    : prefixRms(masterEnergyPrefix,
-                                pos,
-                                win);
-
-            if (masterFocusEnergy < masterEnergyGate)
-                continue;
-
-            const long long predictedLag =
-                static_cast<long long>(std::llround(previous));
-
-            size_t masterPos = pos;
-            size_t sourcePos = pos;
-
-            if (predictedLag >= 0) {
-                sourcePos += static_cast<size_t>(predictedLag);
-            } else {
-                masterPos += static_cast<size_t>(-predictedLag);
-            }
-
-            if (masterPos + win > n || sourcePos + win > n)
-                break;
-
-            // Primary estimator: local waveform shape around the strongest
-            // MASTER focus. This is the part that needs sample/sub-sample
-            // accuracy for phase alignment.
-            LocalRefinement local = refinePairedWaveformDelay(
-                master.data() + masterPos,
-                source.data() + sourcePos,
-                win,
-                focusCenter,
-                0.0,
-                settings.sampleRate,
-                settings.dynamicMicroWindowMs,
-                settings.dynamicMicroSearchMs);
-
-            // Periodic spectral recapture protects against a slow drift
-            // escaping the local +/-search basin. It is intentionally sparse
-            // to keep long-take analysis practical.
-            if (observationIndex % recaptureEvery == 0) {
-                double c = 0.0;
-                double peak = 0.0;
-                const double coarseResidual = gccPhatDelay(
-                    master.data() + masterPos,
-                    source.data() + sourcePos,
-                    win,
-                    maxLag,
-                    settings.sampleRate,
-                    c,
-                    peak);
-
-                const LocalRefinement recaptured =
-                    refinePairedWaveformDelay(
-                        master.data() + masterPos,
-                        source.data() + sourcePos,
-                        win,
-                        focusCenter,
-                        coarseResidual,
-                        settings.sampleRate,
-                        settings.dynamicMicroWindowMs,
-                        settings.dynamicMicroSearchMs);
-
-                // Prefer the recaptured result when its local peak is sharper
-                // than the predicted-basin result. This prevents GCC from
-                // dominating a good local phase estimate.
-                if (recaptured.score > local.score)
-                    local = recaptured;
-            }
-
-            const double effectiveConfidence =
-                local.score;
-
-            const double trackingMinConfidence =
-                std::min(settings.minConfidence,
-                         settings.dynamicTrackingMinConfidence);
-
-            if (effectiveConfidence < trackingMinConfidence)
-                continue;
-
-            const double maxStep =
-                settings.maxSlewMsPerSecond / 1000.0 *
-                (static_cast<double>(hop) / settings.sampleRate) *
-                settings.sampleRate;
-
-            double d = std::clamp(
-                previous + local.delaySamples,
-                previous - maxStep,
-                previous + maxStep);
-
-            const double tau =
-                std::max(0.001,
-                         settings.smoothingMs / 1000.0);
-            const double dt =
-                static_cast<double>(hop) / settings.sampleRate;
-            const double alpha =
-                1.0 - std::exp(-dt / tau);
-            d = previous + alpha * (d - previous);
-
-            const double observationTime =
-                (static_cast<double>(pos + focusCenter)) /
-                settings.sampleRate;
-
-            observations.push_back({
-                observationTime,
-                d,
-                observationTime + d / settings.sampleRate,
-                effectiveConfidence,
-                false
-            });
-            previous = d;
-        }
-
-        // Event refinement: for salient acoustic envelope transitions, measure
-        // the delay again with a shorter local window. Three overlapping local
-        // windows (-10/0/+10 ms) make the estimate less sensitive to choosing
-        // one exact frame boundary. These points become hard temporal anchors
-        // for the REAPER warp instead of being averaged away by consolidation.
-        const auto masterEvents =
-            detectDynamicEvents(master, settings.sampleRate, settings);
-        const auto sourceEvents =
-            detectDynamicEvents(source, settings.sampleRate, settings);
-
-        // Explicit MASTER -> SOURCE landmark correspondence.  We first use
-        // the dense baseline delay estimate to predict where the same acoustic
-        // event should appear in SOURCE, then pair it to the nearest SOURCE
-        // event inside a physically plausible neighborhood.  This turns an
-        // event into a direct time-map constraint:
-        //
-        //     MASTER event time  ->  SOURCE event time
-        //
-        // instead of merely asking GCC for the delay of a window around the
-        // MASTER event.
-        const double eventMatchRadius =
-            settings.sampleRate *
-            settings.dynamicEventMatchWindowMs / 1000.0;
-
-        auto baselineDelayAt = [&](double timeSec) {
-            if (observations.empty()) return previous;
-
-            auto it = std::lower_bound(
-                observations.begin(),
-                observations.end(),
-                timeSec,
-                [](const DynamicObservation& obs, double t) {
-                    return obs.timeSec < t;
-                });
-
-            if (it == observations.begin())
-                return it->delaySamples;
-            if (it == observations.end())
-                return observations.back().delaySamples;
-
-            const auto& hi = *it;
-            const auto& lo = *(it - 1);
-            const double span = std::max(
-                1e-6, hi.timeSec - lo.timeSec);
-            const double u = std::clamp(
-                (timeSec - lo.timeSec) / span,
-                0.0,
-                1.0);
-            return lo.delaySamples +
-                   (hi.delaySamples - lo.delaySamples) * u;
-        };
-
-        size_t sourceEventCursor = 0;
-
-        for (const auto& event : masterEvents) {
-            const size_t masterCenter = static_cast<size_t>(
-                std::llround(event.timeSec * settings.sampleRate));
-            if (masterCenter >= n) continue;
-
-            const double predictedDelay =
-                baselineDelayAt(event.timeSec);
-            const double predictedSourceTime =
-                event.timeSec +
-                predictedDelay / settings.sampleRate;
-
-            while (sourceEventCursor + 1 < sourceEvents.size() &&
-                   sourceEvents[sourceEventCursor + 1].timeSec <
-                       predictedSourceTime) {
-                ++sourceEventCursor;
-            }
-
-            size_t bestSourceIndex = sourceEvents.size();
-            double bestDistanceSamples = eventMatchRadius + 1.0;
-
-            const size_t begin =
-                sourceEventCursor > 0 ? sourceEventCursor - 1
-                                      : sourceEventCursor;
-            const size_t end =
-                std::min(
-                    sourceEvents.size(),
-                    sourceEventCursor + 2);
-
-            for (size_t j = begin; j < end; ++j) {
-                const double distanceSamples =
-                    std::abs(
-                        sourceEvents[j].timeSec -
-                        predictedSourceTime) *
+                const double slopePerSec =
+                    (1.0 / ratio - 1.0) *
                     settings.sampleRate;
-                if (distanceSamples < bestDistanceSamples) {
-                    bestDistanceSamples = distanceSamples;
-                    bestSourceIndex = j;
+
+                const double anchorAtZero =
+                    rateStatic.staticDelaySamples /
+                    ratio;
+
+                result.staticDelaySamples =
+                    anchorAtZero;
+                result.staticCorrelation =
+                    rateStatic.staticCorrelation;
+                result.staticConfidence =
+                    rateStatic.staticConfidence;
+                result.staticSupportWindows =
+                    rateStatic.staticSupportWindows;
+                result.staticTotalWindows =
+                    rateStatic.staticTotalWindows;
+
+                const auto timeline =
+                    selectTimelineAnchors(
+                        master,
+                        source,
+                        window,
+                        std::max<std::size_t>(
+                            1,
+                            static_cast<std::size_t>(
+                                std::llround(
+                                    std::max(
+                                        250.0,
+                                        settings.hopMs) *
+                                    settings.sampleRate /
+                                    1000.0))),
+                        std::max<std::size_t>(
+                            2,
+                            std::min<std::size_t>(
+                                settings.maxDynamicAnchors,
+                                32)));
+
+                if (timeline.size() >= 2) {
+                    result.curve.clear();
+
+                    for (const auto& anchor : timeline) {
+                        const double t =
+                            static_cast<double>(
+                                anchor.center) /
+                            settings.sampleRate;
+
+                        Point p;
+                        p.timeSec = t;
+                        p.delaySamples =
+                            anchorAtZero +
+                            t * slopePerSec;
+                        p.confidence =
+                            std::max(
+                                result.staticConfidence,
+                                0.50);
+                        p.keyPoint = true;
+                        p.phatDelaySamples =
+                            p.delaySamples;
+                        p.waveformDelaySamples =
+                            p.delaySamples;
+                        p.phaseAgreement = 1.0;
+                        result.curve.push_back(p);
+                    }
+
+                    result.modeUsed = Mode::Dynamic;
+                    return result;
                 }
             }
+        }
+    }
 
-            if (bestSourceIndex >= sourceEvents.size() ||
-                bestDistanceSamples > eventMatchRadius) {
-                continue;
-            }
+    if (staticDelays.empty() && knownRateDrift &&
+        settings.mode != Mode::Static) {
+        // Recover a coarse absolute alignment even when the normal static
+        // confidence gate rejects every high-energy anchor. The known
+        // playback-rate drift is enough to establish the trajectory; we only
+        // need one trustworthy absolute phase offset to anchor it.
+        const auto coarseAnchors = selectTimelineAnchors(
+            master,
+            source,
+            window,
+            std::max<std::size_t>(
+                1,
+                static_cast<std::size_t>(
+                    std::llround(
+                        std::max(250.0, settings.hopMs) *
+                        settings.sampleRate / 1000.0))),
+            7);
 
-            const size_t sourceCenter = static_cast<size_t>(
-                std::llround(
-                    sourceEvents[bestSourceIndex].timeSec *
-                    settings.sampleRate));
-            if (sourceCenter >= n) continue;
+        Measurement bestMeasurement;
+        bool haveBest = false;
 
-            const double eventDelay =
-                static_cast<double>(
-                    static_cast<long long>(sourceCenter) -
-                    static_cast<long long>(masterCenter));
-
-            const LocalRefinement refined =
-                refinePairedWaveformDelay(
-                    master.data(),
-                    source.data(),
-                    n,
-                    masterCenter,
-                    eventDelay,
-                    settings.sampleRate,
-                    settings.dynamicMicroWindowMs,
-                    settings.dynamicMicroSearchMs);
-
-            const double refinedConfidence = std::clamp(
-                0.70 * refined.score +
-                0.30 * event.strength,
+        for (const auto& anchor : coarseAnchors) {
+            const Measurement m = measurePhase(
+                master,
+                source,
+                anchor.center,
+                window,
                 0.0,
-                1.0);
+                -static_cast<double>(maxLag),
+                static_cast<double>(maxLag),
+                settings.sampleRate);
 
-            if (refinedConfidence < settings.minConfidence)
-                continue;
-
-            observations.push_back({
-                event.timeSec,
-                refined.delaySamples,
-                event.timeSec +
-                    refined.delaySamples / settings.sampleRate,
-                refinedConfidence,
-                true
-            });
+            if (!haveBest || m.confidence > bestMeasurement.confidence) {
+                bestMeasurement = m;
+                haveBest = true;
+            }
         }
 
-        if (observations.empty()) return r;
+        if (haveBest && bestMeasurement.confidence >= 0.40) {
+            result.staticDelaySamples = bestMeasurement.finalDelay;
+            result.staticCorrelation = bestMeasurement.correlation;
+            result.staticConfidence = bestMeasurement.confidence;
+            staticDelays.push_back(bestMeasurement.finalDelay);
+            staticCorrelations.push_back(bestMeasurement.correlation);
+            staticConfidences.push_back(bestMeasurement.confidence);
+            result.staticSupportWindows = 1;
+        }
+    }
 
-        std::sort(
-            observations.begin(),
-            observations.end(),
-            [](const DynamicObservation& a, const DynamicObservation& b) {
-                if (a.timeSec != b.timeSec)
-                    return a.timeSec < b.timeSec;
-                return a.keyPoint > b.keyPoint;
-            });
+    if (staticDelays.empty()) {
+        result.modeUsed = Mode::Static;
+        return result;
+    }
 
-        // Build a LANDMARK-LOCKED delay map.  The old implementation
-        // smoothed every point and then partially pulled event anchors toward
-        // that smoothed state.  That is appropriate for noise suppression but
-        // it also suppresses the very delay changes we need when the SOURCE
-        // microphone moves relative to a fixed MASTER.
-        //
-        // Here:
-        //   * normal windows get only light continuity limiting;
-        //   * keyPoint landmarks use their locally measured delay directly;
-        //   * no exponential smoothing is applied after the acoustic
-        //     measurement has been refined.
-        //
-        // The resulting points are actual temporal constraints for the
-        // REAPER stretch map, rather than samples of a heavily low-passed
-        // delay estimate.
-        r.curve.clear();
-        r.curve.reserve(observations.size());
+    // AUTO must not decide "STATIC" only from the handful of highest-energy
+    // anchors. A gentle time-stretch can produce a perfectly coherent drift
+    // while those high-energy anchors happen to cluster in one part of the
+    // take. First run a very cheap temporal scout across the whole overlap.
+    const double staticCenter = result.staticDelaySamples;
+    double staticSpread = 0.0;
+    for (double d : staticDelays)
+        staticSpread = std::max(staticSpread, std::abs(d - staticCenter));
 
-        double tracked = observations.front().delaySamples;
-        double trackedTime = observations.front().timeSec;
-        bool haveTracked = false;
-        const double curveTrackingMinConfidence =
-            std::min(settings.minConfidence,
-                     settings.dynamicTrackingMinConfidence);
+    const double dynamicThreshold =
+        std::max(0.75, 0.45 * settings.sampleRate / 1000.0);
 
-        for (const auto& obs : observations) {
-            if (obs.confidence < curveTrackingMinConfidence && haveTracked)
-                continue;
+    bool coherentTemporalDrift = false;
+    if (settings.mode != Mode::Static) {
+        const auto scoutAnchors = selectTimelineAnchors(
+            master,
+            source,
+            window,
+            std::max<std::size_t>(
+                1,
+                static_cast<std::size_t>(
+                    std::llround(
+                        std::max(250.0, settings.hopMs) *
+                        settings.sampleRate / 1000.0))),
+            7);
 
-            if (!haveTracked) {
-                tracked = obs.delaySamples;
-                trackedTime = obs.timeSec;
-                haveTracked = true;
-            } else {
-                const double dt = std::max(
-                    1e-4,
-                    obs.timeSec - trackedTime);
-                const double maxStep =
-                    settings.maxSlewMsPerSecond / 1000.0 *
-                    dt * settings.sampleRate;
+        std::vector<std::pair<double, double>> scout;
+        scout.reserve(scoutAnchors.size());
 
-                const double target = std::clamp(
-                    obs.delaySamples,
-                    tracked - maxStep,
-                    tracked + maxStep);
+        for (const auto& anchor : scoutAnchors) {
+            const Measurement m = measurePhase(
+                master,
+                source,
+                anchor.center,
+                window,
+                staticCenter,
+                -static_cast<double>(maxLag),
+                static_cast<double>(maxLag),
+                settings.sampleRate);
 
-                if (obs.keyPoint) {
-                    // A landmark is a measured MASTER<->SOURCE correspondence,
-                    // so do not blur it with neighbouring measurements.
-                    tracked = target;
-                } else {
-                    // Keep continuity protection, but retain almost all of
-                    // the local measurement. The CLI default is intentionally
-                    // short (10 ms), so a moving microphone is not forced into
-                    // a static-delay trajectory.
-                    const double tau =
-                        std::max(0.001, settings.smoothingMs / 1000.0);
-                    const double alpha =
-                        1.0 - std::exp(-dt / tau);
-                    tracked = tracked + alpha * (target - tracked);
+            if (m.confidence >= settings.minConfidence * 0.75) {
+                scout.emplace_back(
+                    static_cast<double>(anchor.center) /
+                        settings.sampleRate,
+                    m.finalDelay);
+            }
+        }
+
+        result.scoutPoints = static_cast<int>(scout.size());
+
+        if (scout.size() >= 1) {
+            result.scoutFirstDelaySamples = scout.front().second;
+            result.scoutLastDelaySamples = scout.back().second;
+        }
+
+        if (scout.size() >= 3) {
+            const double firstDelay = scout.front().second;
+            const double lastDelay = scout.back().second;
+            const double endToEnd = std::abs(lastDelay - firstDelay);
+
+            double meanT = 0.0;
+            double meanD = 0.0;
+            for (const auto& p : scout) {
+                meanT += p.first;
+                meanD += p.second;
+            }
+            meanT /= static_cast<double>(scout.size());
+            meanD /= static_cast<double>(scout.size());
+
+            double cov = 0.0;
+            double varT = 0.0;
+            double varD = 0.0;
+            for (const auto& p : scout) {
+                const double dt = p.first - meanT;
+                const double dd = p.second - meanD;
+                cov += dt * dd;
+                varT += dt * dt;
+                varD += dd * dd;
+            }
+
+            double rSquared = 0.0;
+            if (varT > 1.0e-12 && varD > 1.0e-12) {
+                const double corr =
+                    cov / std::sqrt(varT * varD);
+                rSquared = std::clamp(corr * corr, 0.0, 1.0);
+            }
+
+            result.scoutR2 = rSquared;
+
+            // A real microphone-distance drift does not have to be linear.
+            // R² alone can reject a genuine monotonic walk when movement
+            // accelerates, decelerates, or contains small local reversals.
+            const double directionDeadband =
+                std::max(1.0, dynamicThreshold * 0.25);
+
+            int positiveSteps = 0;
+            int negativeSteps = 0;
+            int meaningfulSteps = 0;
+
+            for (std::size_t i = 1; i < scout.size(); ++i) {
+                const double delta =
+                    scout[i].second - scout[i - 1].second;
+
+                if (std::abs(delta) < directionDeadband)
+                    continue;
+
+                ++meaningfulSteps;
+                if (delta > 0.0)
+                    ++positiveSteps;
+                else
+                    ++negativeSteps;
+            }
+
+            double directionConsistency = 0.0;
+            if (meaningfulSteps > 0) {
+                directionConsistency =
+                    static_cast<double>(
+                        std::max(positiveSteps, negativeSteps)) /
+                    static_cast<double>(meaningfulSteps);
+            }
+
+            result.scoutDirectionConsistency =
+                directionConsistency;
+
+            const bool linearEvidence = rSquared >= 0.45;
+            const bool monotonicEvidence =
+                meaningfulSteps >= 3 &&
+                directionConsistency >= 0.67;
+
+            // Robust early-vs-late evidence handles real movement that is
+            // neither linear nor strictly monotonic. Compare the median delay
+            // of the first half with the median delay of the last half.
+            const std::size_t split =
+                std::max<std::size_t>(1, scout.size() / 2);
+
+            std::vector<double> earlyDelays;
+            std::vector<double> lateDelays;
+            earlyDelays.reserve(split);
+            lateDelays.reserve(scout.size() - split);
+
+            for (std::size_t i = 0; i < scout.size(); ++i) {
+                if (i < split)
+                    earlyDelays.push_back(scout[i].second);
+                else
+                    lateDelays.push_back(scout[i].second);
+            }
+
+            const double earlyMedian = median(earlyDelays);
+            const double lateMedian = median(lateDelays);
+
+            const double robustShift =
+                std::abs(lateMedian - earlyMedian);
+
+            result.scoutRobustShiftSamples = robustShift;
+
+            const bool robustTemporalEvidence =
+                scout.size() >= 4 &&
+                robustShift > std::max(
+                    2.0 * dynamicThreshold,
+                    1.0 * settings.sampleRate / 1000.0);
+
+            coherentTemporalDrift =
+                endToEnd > dynamicThreshold &&
+                (linearEvidence ||
+                 monotonicEvidence ||
+                 robustTemporalEvidence);
+
+            result.scoutCoherent = coherentTemporalDrift;
+        }
+    }
+
+    const bool explicitDynamic = settings.mode == Mode::Dynamic;
+
+    const bool needsDynamic = explicitDynamic ||
+        knownRateDrift ||
+        staticSpread > dynamicThreshold ||
+        coherentTemporalDrift;
+
+    if (!needsDynamic) {
+        result.modeUsed = Mode::Static;
+        return result;
+    }
+
+    const std::size_t dynamicHop = std::max<std::size_t>(
+        1,
+        static_cast<std::size_t>(
+            std::llround(
+                std::max(120.0, settings.hopMs) *
+                settings.sampleRate / 1000.0)));
+
+    // Once AUTO has established a coherent temporal drift, the dynamic
+    // trajectory must also be sampled over the whole take. The old
+    // energy-only selector could concentrate all dynamic points inside one
+    // short high-energy region and miss a real phase walk outside it.
+    auto anchors = selectTimelineAnchors(
+        master,
+        source,
+        window,
+        dynamicHop,
+        std::max<std::size_t>(1, settings.maxDynamicAnchors));
+
+    if (anchors.empty()) {
+        result.modeUsed = Mode::Static;
+        return result;
+    }
+
+    double predictedDelay =
+        settings.hasInitialDelaySamples
+            ? settings.initialDelaySamples
+            : result.staticDelaySamples;
+
+    // DYNAMIC tracking can be materially less confident than the robust
+    // static median, especially on short overlaps. Once a temporal drift is
+    // explicitly justified (e.g. D_PLAYRATE != 1.0), do not force every
+    // individual anchor to meet the full static confidence gate. Use the
+    // quality of the static solution as the floor, with a conservative
+    // absolute minimum.
+    const bool scoutJustifiedDynamic =
+        coherentTemporalDrift ||
+        explicitDynamic ||
+        knownRateDrift;
+
+    const double dynamicPointMinConfidence =
+        scoutJustifiedDynamic
+            ? std::max(
+                0.50,
+                std::min(
+                    settings.minConfidence,
+                    result.staticConfidence * 0.95))
+            : settings.minConfidence;
+
+    std::size_t previousCenter = anchors.front().center;
+
+    for (const auto& anchor : anchors) {
+        const double dt = static_cast<double>(
+            anchor.center - previousCenter) / settings.sampleRate;
+
+        const double slewAllowance =
+            std::max(
+                2.0 * settings.sampleRate / 1000.0,
+                settings.maxSlewMsPerSecond *
+                dt * settings.sampleRate / 1000.0);
+
+        const double dynamicMin =
+            std::max(
+                -static_cast<double>(maxLag),
+                predictedDelay - slewAllowance);
+
+        const double dynamicMax =
+            std::min(
+                static_cast<double>(maxLag),
+                predictedDelay + slewAllowance);
+
+        const bool first = result.curve.empty();
+
+        const Measurement m = measurePhase(
+            master, source,
+            anchor.center,
+            window,
+            predictedDelay,
+            first ? -static_cast<double>(maxLag) : dynamicMin,
+            first ? static_cast<double>(maxLag) : dynamicMax,
+            settings.sampleRate);
+
+        if (m.confidence >= dynamicPointMinConfidence) {
+            double acceptedDelay = m.finalDelay;
+
+            if (!first) {
+                const double delta = std::abs(acceptedDelay - predictedDelay);
+                if (delta > slewAllowance * 1.25) {
+                    // A discontinuity larger than the physical tracking
+                    // allowance is more likely a false acoustic match than a
+                    // genuine microphone movement. Keep the previous solution
+                    // and do not create a false warp point.
+                    previousCenter = anchor.center;
+                    continue;
                 }
-                trackedTime = obs.timeSec;
             }
 
-            double mappedSourceTime =
-                obs.sourceTimeSec;
-            if (mappedSourceTime <= 0.0) {
-                mappedSourceTime =
-                    obs.timeSec + tracked / settings.sampleRate;
+            Point p;
+            p.timeSec = static_cast<double>(anchor.center) / settings.sampleRate;
+            p.delaySamples = acceptedDelay;
+            p.confidence = m.confidence;
+            p.keyPoint = true;
+            p.phatDelaySamples = m.phatDelay;
+            p.waveformDelaySamples = m.waveformDelay;
+            p.phaseAgreement = m.phaseAgreement;
+
+            result.curve.push_back(p);
+            predictedDelay = acceptedDelay;
+        }
+
+        previousCenter = anchor.center;
+    }
+
+    if (result.curve.size() < 2) {
+        // When the project already tells us that SOURCE is being played at a
+        // different rate, the temporal drift itself is known. Do not collapse
+        // that case back to STATIC just because the local acoustic confidence
+        // is weak on a short/quiet take. Anchor the deterministic slope to the
+        // robust static delay and let the waveform tracker validate it whenever
+        // it can.
+        if (knownRateDrift &&
+            settings.mode != Mode::Static &&
+            !staticDelays.empty()) {
+            result.curve.clear();
+
+            const auto timeline =
+                selectTimelineAnchors(
+                    master,
+                    source,
+                    window,
+                    std::max<std::size_t>(
+                        1,
+                        static_cast<std::size_t>(
+                            std::llround(
+                                std::max(250.0, settings.hopMs) *
+                                settings.sampleRate / 1000.0))),
+                    std::max<std::size_t>(
+                        2,
+                        std::min<std::size_t>(
+                            settings.maxDynamicAnchors,
+                            32)));
+
+            if (timeline.size() >= 2) {
+                const double durationSec =
+                    static_cast<double>(usable - 1) /
+                    settings.sampleRate;
+                const double centerTime =
+                    durationSec * 0.5;
+                const double slopePerSec =
+                    (1.0 - settings.playbackRateRatio) *
+                    settings.sampleRate;
+
+                for (const auto& anchor : timeline) {
+                    const double t =
+                        static_cast<double>(anchor.center) /
+                        settings.sampleRate;
+
+                    Point p;
+                    p.timeSec = t;
+                    p.delaySamples =
+                        result.staticDelaySamples +
+                        (t - centerTime) * slopePerSec;
+                    p.confidence =
+                        result.staticConfidence;
+                    p.keyPoint = true;
+                    p.phatDelaySamples =
+                        p.delaySamples;
+                    p.waveformDelaySamples =
+                        p.delaySamples;
+                    p.phaseAgreement = 1.0;
+
+                    result.curve.push_back(p);
+                }
             }
-
-            r.curve.push_back({
-                obs.timeSec,
-                tracked,
-                mappedSourceTime,
-                obs.confidence,
-                obs.keyPoint
-            });
         }
 
-        if (!r.curve.empty()) {
-            r.staticDelaySamples = r.curve.back().delaySamples;
-            // Keep the summary confidence representative of the global/DYNAMIC
-            // seed rather than letting one low-confidence local point make the
-            // entire analysis look invalid. Local confidence remains attached
-            // to every curve point for the REAPER layer.
-            double maxCurveConfidence = 0.0;
-            for (const auto& p : r.curve)
-                maxCurveConfidence = std::max(
-                    maxCurveConfidence, p.confidence);
-            r.staticConfidence = std::max(
-                r.staticConfidence, maxCurveConfidence);
-        }
-
-        r.staticTotalWindows =
-            static_cast<int>(observations.size());
-        r.staticSupportWindows = 0;
-        for (const auto& p : r.curve) {
-            if (p.confidence >= settings.minConfidence)
-                ++r.staticSupportWindows;
-        }
-
-        return r;
-    }
-
-    const int lagSpan = 2 * maxLag + 1;
-    std::vector<double> lagScore(static_cast<size_t>(lagSpan), 0.0);
-    std::vector<double> lagConfidence(static_cast<size_t>(lagSpan), 0.0);
-    std::vector<double> lagCorrelationSum(static_cast<size_t>(lagSpan), 0.0);
-    std::vector<int> lagCount(static_cast<size_t>(lagSpan), 0);
-    std::vector<double> lagBestTime(static_cast<size_t>(lagSpan), 0.0);
-    std::vector<double> lagBestCorrelation(static_cast<size_t>(lagSpan), -1.0);
-
-    double strongestConfidence = -1.0;
-    double strongestDelay = 0.0;
-    size_t strongestPos = 0;
-    double strongestCorrelation = 0.0;
-    int totalWindows = 0;
-
-    for (size_t pos = 0; pos + win <= n; pos += hop) {
-        double c = 0.0;
-        double peak = 0.0;
-        const double d = gccPhatDelay(master.data() + pos,
-                                       source.data() + pos,
-                                       win, maxLag, settings.sampleRate, c, peak);
-        const int lag = static_cast<int>(std::llround(d));
-        const int index = lag + maxLag;
-        if (index >= 0 && index < lagSpan) {
-            const double score = c * peak;
-            lagScore[static_cast<size_t>(index)] += score;
-            lagConfidence[static_cast<size_t>(index)] += c;
-            lagCorrelationSum[static_cast<size_t>(index)] += peak;
-            lagCount[static_cast<size_t>(index)] += 1;
-            if (peak > lagBestCorrelation[static_cast<size_t>(index)]) {
-                lagBestCorrelation[static_cast<size_t>(index)] = peak;
-                lagBestTime[static_cast<size_t>(index)] =
-                    static_cast<double>(pos) / settings.sampleRate;
-            }
-        }
-
-        if (c > strongestConfidence) {
-            strongestConfidence = c;
-            strongestDelay = d;
-            strongestPos = pos;
-            strongestCorrelation = peak;
-        }
-        ++totalWindows;
-    }
-
-    int bestIndex = maxLag;
-    double bestScore = -1.0;
-    for (int i = 0; i < lagSpan; ++i) {
-        if (lagScore[static_cast<size_t>(i)] > bestScore) {
-            bestScore = lagScore[static_cast<size_t>(i)];
-            bestIndex = i;
+        if (result.curve.size() < 2) {
+            result.curve.clear();
+            result.modeUsed = Mode::Static;
+            return result;
         }
     }
 
-    double weightedDelay = 0.0;
-    double totalWeight = 0.0;
-    int supportWindows = 0;
-    double supportConfidence = 0.0;
-    double supportCorrelation = 0.0;
-    int bestSupportIndex = bestIndex;
-    for (int i = std::max(0, bestIndex - 1); i <= std::min(lagSpan - 1, bestIndex + 1); ++i) {
-        const double w = lagScore[static_cast<size_t>(i)];
-        weightedDelay += static_cast<double>(i - maxLag) * w;
-        totalWeight += w;
-        supportWindows += lagCount[static_cast<size_t>(i)];
-        supportConfidence += lagConfidence[static_cast<size_t>(i)];
-        supportCorrelation += lagCorrelationSum[static_cast<size_t>(i)];
-        if (lagCount[static_cast<size_t>(i)] > lagCount[static_cast<size_t>(bestSupportIndex)])
-            bestSupportIndex = i;
+    // Preserve the static solution when the dynamic points are nearly
+    // constant. This avoids inserting unnecessary REAPER stretch markers.
+    double dynamicSpread = 0.0;
+    for (const auto& p : result.curve)
+        dynamicSpread = std::max(
+            dynamicSpread,
+            std::abs(p.delaySamples - result.staticDelaySamples));
+
+    if (!explicitDynamic &&
+        dynamicSpread <= std::max(0.75, 0.45 * settings.sampleRate / 1000.0)) {
+        result.curve.clear();
+        result.modeUsed = Mode::Static;
+        return result;
     }
 
-    const double consensusDelay = totalWeight > 0.0
-        ? weightedDelay / totalWeight
-        : strongestDelay;
-
-    r.staticDelaySamples = consensusDelay;
-    r.staticAnalysisTimeSec =
-        totalWeight > 0.0 ? lagBestTime[static_cast<size_t>(bestSupportIndex)]
-                          : static_cast<double>(strongestPos) / settings.sampleRate;
-    r.staticCorrelation =
-        totalWeight > 0.0 ? lagBestCorrelation[static_cast<size_t>(bestSupportIndex)]
-                          : strongestCorrelation;
-    r.staticSupportWindows = supportWindows;
-    r.staticTotalWindows = totalWindows;
-
-    const double supportRatio = totalWindows > 0
-        ? static_cast<double>(supportWindows) / static_cast<double>(totalWindows)
-        : 0.0;
-    const double averageSupportConfidence = supportWindows > 0
-        ? supportConfidence / static_cast<double>(supportWindows)
-        : 0.0;
-    const double averageSupportCorrelation = supportWindows > 0
-        ? supportCorrelation / static_cast<double>(supportWindows)
-        : 0.0;
-
-    const double supportStrength = std::clamp(supportRatio * 2.0, 0.0, 1.0);
-    const double peakStrength = std::clamp(averageSupportCorrelation, 0.0, 1.0);
-    const double confidenceStrength = std::clamp(averageSupportConfidence, 0.0, 1.0);
-    r.staticConfidence = std::clamp(
-        peakStrength * supportStrength * (0.70 + 0.30 * confidenceStrength),
-        0.0, 1.0);
-
-    if (supportWindows == 0 || bestScore <= 0.0) {
-        r.staticDelaySamples = strongestDelay;
-        r.staticAnalysisTimeSec = static_cast<double>(strongestPos) / settings.sampleRate;
-        r.staticCorrelation = strongestCorrelation;
-        r.staticConfidence = std::max(0.0, strongestConfidence);
-        r.staticSupportWindows = 1;
-    }
-
-    if (settings.mode == Mode::Static) return r;
-
-    return r;
+    result.modeUsed = Mode::Dynamic;
+    return result;
 }
 
+double AlignEngine::estimateDelay(
+    const float* master,
+    const float* source,
+    std::size_t n,
+    int maxLag,
+    double sampleRate,
+    double& confidence)
+{
+    if (!master || !source || n < 1024 || maxLag <= 0) {
+        confidence = 0.0;
+        return 0.0;
+    }
+
+    std::vector<float> m(master, master + n);
+    std::vector<float> s(source, source + n);
+    return fallbackEstimate(m, s, maxLag, sampleRate, confidence);
 }
+
+} // namespace sap
