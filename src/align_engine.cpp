@@ -627,10 +627,21 @@ Result AlignEngine::analyze(
 
     if (knownRateDrift && settings.mode != Mode::Static) {
         // D_PLAYRATE changes the project-time trajectory, not the acoustic
-        // offset already contained in the native WAV recordings. Estimate the
-        // native acoustic delay directly from short early windows, then convert
-        // that fixed native delay into project time and apply the deterministic
+        // offset already contained in the native WAV recordings. Run the same
+        // STATIC estimator once in native sample time, then convert that
+        // fixed acoustic delay into project time and apply the deterministic
         // rate slope.
+        Settings nativeSettings = settings;
+        nativeSettings.mode = Mode::Static;
+        nativeSettings.playbackRateRatio = 1.0;
+        nativeSettings.hasInitialDelaySamples = false;
+
+        const Result nativeResult =
+            AlignEngine::analyze(
+                master,
+                source,
+                nativeSettings);
+
         const auto timeline = selectTimelineAnchors(
             master,
             source,
@@ -647,95 +658,51 @@ Result AlignEngine::analyze(
                     settings.maxDynamicAnchors,
                     32)));
 
-        if (timeline.size() >= 2) {
+        if (timeline.size() >= 2 &&
+            std::isfinite(nativeResult.staticDelaySamples) &&
+            nativeResult.staticConfidence >=
+                std::max(0.45, settings.minConfidence * 0.60)) {
+
             const double slopePerSec =
                 (1.0 / settings.playbackRateRatio - 1.0) *
                 settings.sampleRate;
 
-            const std::size_t nativeWindow =
-                std::clamp<std::size_t>(
-                    static_cast<std::size_t>(
-                        std::llround(
-                            32.0 * settings.sampleRate / 1000.0)),
-                    1024,
-                    2048);
+            const double anchorAtZero =
+                nativeResult.staticDelaySamples /
+                std::max(
+                    1.0e-12,
+                    settings.playbackRateRatio);
 
-            const std::size_t half =
-                nativeWindow / 2;
+            result.staticDelaySamples =
+                anchorAtZero;
+            result.staticCorrelation =
+                nativeResult.staticCorrelation;
+            result.staticConfidence =
+                nativeResult.staticConfidence;
 
-            std::vector<double> nativeDelays;
-            std::vector<double> confidences;
+            result.curve.clear();
 
-            for (std::size_t i = 1; i <= 5; ++i) {
-                const std::size_t center =
-                    half +
-                    static_cast<std::size_t>(
-                        std::llround(
-                            i * 0.10 * settings.sampleRate));
+            for (const auto& anchor : timeline) {
+                const double t =
+                    static_cast<double>(anchor.center) /
+                    settings.sampleRate;
 
-                if (center + half >= master.size() ||
-                    center + half >= source.size())
-                    break;
-
-                const Measurement m = measurePhase(
-                    master,
-                    source,
-                    center,
-                    nativeWindow,
-                    0.0,
-                    -static_cast<double>(maxLag),
-                    static_cast<double>(maxLag),
-                    settings.sampleRate);
-
-                if (m.confidence <
-                    std::max(0.45, settings.minConfidence * 0.60))
-                    continue;
-
-                nativeDelays.push_back(m.finalDelay);
-                confidences.push_back(m.confidence);
+                Point p;
+                p.timeSec = t;
+                p.delaySamples =
+                    anchorAtZero +
+                    t * slopePerSec;
+                p.confidence =
+                    std::max(result.staticConfidence, 0.50);
+                p.keyPoint = true;
+                p.phatDelaySamples = p.delaySamples;
+                p.waveformDelaySamples = p.delaySamples;
+                p.phaseAgreement = 1.0;
+                result.curve.push_back(p);
             }
 
-            if (nativeDelays.size() >= 2) {
-                const double nativeDelay =
-                    median(nativeDelays);
-
-                const double anchorAtZero =
-                    nativeDelay /
-                    std::max(
-                        1.0e-12,
-                        settings.playbackRateRatio);
-
-                result.staticDelaySamples =
-                    anchorAtZero;
-
-                if (!confidences.empty())
-                    result.staticConfidence =
-                        median(confidences);
-
-                result.curve.clear();
-
-                for (const auto& anchor : timeline) {
-                    const double t =
-                        static_cast<double>(anchor.center) /
-                        settings.sampleRate;
-
-                    Point p;
-                    p.timeSec = t;
-                    p.delaySamples =
-                        anchorAtZero +
-                        t * slopePerSec;
-                    p.confidence =
-                        std::max(result.staticConfidence, 0.50);
-                    p.keyPoint = true;
-                    p.phatDelaySamples = p.delaySamples;
-                    p.waveformDelaySamples = p.delaySamples;
-                    p.phaseAgreement = 1.0;
-                    result.curve.push_back(p);
-                }
-
-                result.modeUsed = Mode::Dynamic;
-                return result;
-            }
+            result.modeUsed = Mode::Dynamic;
+            return result;
         }
     }
 
