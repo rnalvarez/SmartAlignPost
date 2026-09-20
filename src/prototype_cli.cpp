@@ -826,6 +826,14 @@ int main(int argc, char** argv)
     // energy acoustic anchors happen to cluster in one part of the take.
     const double rateRatio =
         sourceRate / std::max(1.0e-12, masterRate);
+
+    if (renderDynamic) {
+        std::cout
+            << "INPUT_MASTER_RATE=" << masterRate
+            << "\nINPUT_SOURCE_RATE=" << sourceRate
+            << "\nINPUT_RATE_RATIO=" << rateRatio
+            << "\n";
+    }
     const bool knownRateDrift =
         std::abs(rateRatio - 1.0) > 1.0e-6;
 
