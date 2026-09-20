@@ -362,12 +362,13 @@ int main()
             return 14;
         }
 
-        const double durationSec =
-            static_cast<double>(master.size() - 1) / sr;
+        const double curveDurationSec =
+            r.curve.back().timeSec -
+            r.curve.front().timeSec;
 
         const double expectedDrift =
             (1.0 / ratio - 1.0) *
-            durationSec *
+            curveDurationSec *
             sr;
 
         const double actualDrift =
@@ -380,7 +381,9 @@ int main()
                 << actualDrift
                 << " expected="
                 << expectedDrift
-                << "\n";
+                << " curveDuration="
+                << curveDurationSec
+                << " s\n";
             return 15;
         }
     }
