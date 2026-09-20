@@ -827,13 +827,6 @@ int main(int argc, char** argv)
     const double rateRatio =
         sourceRate / std::max(1.0e-12, masterRate);
 
-    if (renderDynamic) {
-        std::cout
-            << "INPUT_MASTER_RATE=" << masterRate
-            << "\nINPUT_SOURCE_RATE=" << sourceRate
-            << "\nINPUT_RATE_RATIO=" << rateRatio
-            << "\n";
-    }
     const bool knownRateDrift =
         std::abs(rateRatio - 1.0) > 1.0e-6;
 
@@ -1000,16 +993,6 @@ int main(int argc, char** argv)
             << "\n";
 
         if (!postValid) {
-            for (const auto& p : shiftedCurve) {
-                std::cout
-                    << "RENDER_POINT="
-                    << p.timeSec
-                    << ","
-                    << p.delaySamples
-                    << ","
-                    << p.confidence
-                    << "\n";
-            }
             std::cout
                 << "POST_VALID=0\n";
             return 12;
