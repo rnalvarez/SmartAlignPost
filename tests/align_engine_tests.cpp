@@ -332,6 +332,59 @@ int main()
         }
     }
 
+    std::cerr << "PHASE TEST: playback-rate drift above 1.0 uses inverse slope\n";
+
+    {
+        const double expected = 120.0;
+        const double ratio = 1.007463;
+
+        const auto source =
+            delaySignal(master, expected);
+
+        sap::Settings s;
+        s.sampleRate = sr;
+        s.mode = sap::Mode::Auto;
+        s.maxDelayMs = 12.0;
+        s.analysisWindowMs = 60.0;
+        s.hopMs = 250.0;
+        s.minConfidence = 0.72;
+        s.playbackRateRatio = ratio;
+
+        const auto r =
+            sap::AlignEngine::analyze(master, source, s);
+
+        if (r.modeUsed != sap::Mode::Dynamic ||
+            r.curve.size() < 2) {
+            std::cerr
+                << "above-1 playback-rate drift not dynamic: curve="
+                << r.curve.size()
+                << "\n";
+            return 14;
+        }
+
+        const double durationSec =
+            static_cast<double>(master.size() - 1) / sr;
+
+        const double expectedDrift =
+            (1.0 / ratio - 1.0) *
+            durationSec *
+            sr;
+
+        const double actualDrift =
+            r.curve.back().delaySamples -
+            r.curve.front().delaySamples;
+
+        if (std::abs(actualDrift - expectedDrift) > 8.0) {
+            std::cerr
+                << "above-1 playback-rate slope failed: actual="
+                << actualDrift
+                << " expected="
+                << expectedDrift
+                << "\n";
+            return 15;
+        }
+    }
+
     std::cerr << "PHASE TEST: AUTO accepts monotonic nonlinear drift\n";
 
     {
