@@ -522,6 +522,8 @@ int main(int argc, char** argv)
               << result.scoutR2 << "\n";
     std::cout << "SCOUT_DIRECTION="
               << result.scoutDirectionConsistency << "\n";
+    std::cout << "SCOUT_ROBUST_SHIFT_MS="
+              << result.scoutRobustShiftSamples * 1000.0 / sr << "\n";
     std::cout << "SCOUT_COHERENT="
               << (result.scoutCoherent ? 1 : 0) << "\n";
 
