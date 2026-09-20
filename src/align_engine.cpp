@@ -626,58 +626,13 @@ Result AlignEngine::analyze(
         std::abs(settings.playbackRateRatio - 1.0) > 1.0e-6;
 
     if (knownRateDrift && settings.mode != Mode::Static) {
-        // A non-unity playback-rate ratio is deterministic project-time
-        // information: it guarantees that SOURCE and MASTER cannot remain in
-        // phase with a single static offset. Use the best available acoustic
-        // offset as the anchor, then generate the temporal trajectory directly
-        // from the known rate ratio. Acoustic measurements remain useful for
-        // the absolute offset, but they are not allowed to veto DYNAMIC here.
-        double anchorDelay = result.staticDelaySamples;
-
-        if (staticDelays.empty()) {
-            const auto coarseAnchors = selectTimelineAnchors(
-                master,
-                source,
-                window,
-                std::max<std::size_t>(
-                    1,
-                    static_cast<std::size_t>(
-                        std::llround(
-                            std::max(250.0, settings.hopMs) *
-                            settings.sampleRate / 1000.0))),
-                7);
-
-            Measurement bestMeasurement;
-            bool haveBest = false;
-
-            for (const auto& anchor : coarseAnchors) {
-                const Measurement m = measurePhase(
-                    master,
-                    source,
-                    anchor.center,
-                    window,
-                    0.0,
-                    -static_cast<double>(maxLag),
-                    static_cast<double>(maxLag),
-                    settings.sampleRate);
-
-                if (!haveBest ||
-                    m.confidence > bestMeasurement.confidence) {
-                    bestMeasurement = m;
-                    haveBest = true;
-                }
-            }
-
-            if (haveBest) {
-                anchorDelay = bestMeasurement.finalDelay;
-                result.staticDelaySamples = anchorDelay;
-                result.staticCorrelation = bestMeasurement.correlation;
-                result.staticConfidence =
-                    std::max(result.staticConfidence,
-                             bestMeasurement.confidence);
-            }
-        }
-
+        // A non-unity playback-rate ratio creates a deterministic project-time
+        // delay drift. For large rate differences the absolute delay can move
+        // far outside the normal +/- maxDelayMs search range by the middle of
+        // the take, so a static median is not a safe anchor. Instead measure an
+        // acoustic reference near the beginning of the overlap, where the
+        // delay is still inside the normal search window, then extrapolate the
+        // complete trajectory from that reference using the exact rate ratio.
         const auto timeline = selectTimelineAnchors(
             master,
             source,
@@ -695,41 +650,94 @@ Result AlignEngine::analyze(
                     32)));
 
         if (timeline.size() >= 2) {
-            const double durationSec =
-                static_cast<double>(usable - 1) /
+            double anchorDelay = result.staticDelaySamples;
+            double anchorTime =
+                static_cast<double>(timeline.front().center) /
                 settings.sampleRate;
-            const double centerTime =
-                durationSec * 0.5;
-            const double slopePerSec =
-                (1.0 - settings.playbackRateRatio) *
-                settings.sampleRate;
+            double anchorConfidence =
+                result.staticConfidence;
 
-            result.curve.clear();
+            bool haveRateAnchor = false;
+            const std::size_t earlyCount =
+                std::min<std::size_t>(timeline.size(), 7);
 
-            for (const auto& anchor : timeline) {
-                const double t =
-                    static_cast<double>(anchor.center) /
-                    settings.sampleRate;
+            Measurement bestMeasurement;
+            double bestTime = anchorTime;
+            bool haveBestMeasurement = false;
 
-                Point p;
-                p.timeSec = t;
-                p.delaySamples =
-                    anchorDelay +
-                    (t - centerTime) * slopePerSec;
-                p.confidence =
-                    std::max(result.staticConfidence, 0.50);
-                p.keyPoint = true;
-                p.phatDelaySamples = p.delaySamples;
-                p.waveformDelaySamples = p.delaySamples;
-                p.phaseAgreement = 1.0;
-                result.curve.push_back(p);
+            for (std::size_t i = 0; i < earlyCount; ++i) {
+                const auto& a = timeline[i];
+
+                const Measurement m = measurePhase(
+                    master,
+                    source,
+                    a.center,
+                    window,
+                    0.0,
+                    -static_cast<double>(maxLag),
+                    static_cast<double>(maxLag),
+                    settings.sampleRate);
+
+                if (!haveBestMeasurement ||
+                    m.confidence > bestMeasurement.confidence) {
+                    bestMeasurement = m;
+                    bestTime =
+                        static_cast<double>(a.center) /
+                        settings.sampleRate;
+                    haveBestMeasurement = true;
+                }
             }
 
-            result.modeUsed = Mode::Dynamic;
-            return result;
+            if (haveBestMeasurement &&
+                bestMeasurement.confidence >=
+                    std::max(0.45, settings.minConfidence * 0.60)) {
+                anchorDelay = bestMeasurement.finalDelay;
+                anchorTime = bestTime;
+                anchorConfidence = bestMeasurement.confidence;
+                haveRateAnchor = true;
+
+                result.staticDelaySamples = anchorDelay;
+                result.staticCorrelation =
+                    bestMeasurement.correlation;
+                result.staticConfidence =
+                    std::max(
+                        result.staticConfidence,
+                        bestMeasurement.confidence);
+            }
+
+            if (haveRateAnchor) {
+                // playbackRateRatio = SOURCE / MASTER. Project-time delay is
+                // D(t) = D(anchor) + (t-anchor) * (MASTER/SOURCE - 1).
+                const double slopePerSec =
+                    (1.0 / settings.playbackRateRatio - 1.0) *
+                    settings.sampleRate;
+
+                result.curve.clear();
+
+                for (const auto& anchor : timeline) {
+                    const double t =
+                        static_cast<double>(anchor.center) /
+                        settings.sampleRate;
+
+                    Point p;
+                    p.timeSec = t;
+                    p.delaySamples =
+                        anchorDelay +
+                        (t - anchorTime) * slopePerSec;
+                    p.confidence =
+                        std::max(anchorConfidence, 0.50);
+                    p.keyPoint = true;
+                    p.phatDelaySamples = p.delaySamples;
+                    p.waveformDelaySamples = p.delaySamples;
+                    p.phaseAgreement = 1.0;
+                    result.curve.push_back(p);
+                }
+
+                result.modeUsed = Mode::Dynamic;
+                return result;
+            }
         }
     }
-
     if (staticDelays.empty() && knownRateDrift &&
         settings.mode != Mode::Static) {
         // Recover a coarse absolute alignment even when the normal static
