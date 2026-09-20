@@ -1126,6 +1126,14 @@ int main(int argc, char** argv)
             << "\n";
         std::cout
             << "POST_VALID=1\n";
+        std::cout
+            << "RENDER_CURVE_SOURCE="
+            << (curveFile.empty() ? "REANALYZED" : "ANALYZED_JOB")
+            << "\n";
+        std::cout
+            << "RENDER_CURVE_COUNT="
+            << shiftedCurve.size()
+            << "\n";
     }
 
     const double totalMs =
