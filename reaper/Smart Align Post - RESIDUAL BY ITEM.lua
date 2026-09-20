@@ -797,8 +797,7 @@ local function find_existing_fx(take)
 
     if ok and (
         name == FX_NAME or
-        name:find(FX_NAME, 1, true) or
-        name:find("Smart Align Post", 1, true)
+        name:find(FX_NAME, 1, true)
       ) then
       return i
     end
