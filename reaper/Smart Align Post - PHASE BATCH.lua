@@ -17,8 +17,8 @@
 --   5) STATIC / DYNAMIC / AUTO decision.
 --
 -- APPLY never moves D_POSITION. STATIC changes only D_STARTOFFS.
--- DYNAMIC converts the measured project-time delay curve to REAPER stretch
--- markers while preserving the SOURCE item's position.
+-- DYNAMIC renders the SOURCE item sample-domain and replaces its source
+-- with the verified corrected WAV while preserving the SOURCE item's position.
 
 local WIN_W, WIN_H = 1080, 650
 local MIN_CONFIDENCE = 0.72
