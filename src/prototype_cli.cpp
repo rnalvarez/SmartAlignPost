@@ -911,27 +911,6 @@ int main(int argc, char** argv)
                 point.timeSec;
         }
 
-        std::cout
-            << "RENDER_SOURCE_OFFSET_NATIVE="
-            << renderSourceStartNative
-            << "\n";
-        std::cout
-            << "RENDER_SOURCE_RATE="
-            << sourceRate
-            << "\n";
-        std::cout
-            << "RENDER_CURVE_FIRST="
-            << shiftedCurve.front().timeSec
-            << ","
-            << shiftedCurve.front().delaySamples
-            << "\n";
-        std::cout
-            << "RENDER_CURVE_LAST="
-            << shiftedCurve.back().timeSec
-            << ","
-            << shiftedCurve.back().delaySamples
-            << "\n";
-
         std::vector<float> correctedInterleaved;
         std::vector<float> correctedMono;
 
