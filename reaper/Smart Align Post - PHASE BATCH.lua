@@ -707,21 +707,44 @@ local function apply_all()
     return
   end
 
-  local low = 0
+  local lowStatic = 0
+  local lowDynamic = 0
+
   for _, job in ipairs(jobs) do
     if job.status == "READY" and
        job.confidence < MIN_CONFIDENCE then
-      low = low + 1
+      if job.modeUsed == "DYNAMIC" and #job.curve >= 2 then
+        lowDynamic = lowDynamic + 1
+      else
+        lowStatic = lowStatic + 1
+      end
     end
   end
 
-  if low > 0 then
+  if lowStatic > 0 or lowDynamic > 0 then
+    local parts = {}
+
+    if lowDynamic > 0 then
+      parts[#parts + 1] =
+        string.format(
+          "%d DYNAMIC con confidence < %.2f: se aplicarán porque la deriva temporal fue detectada y existe una curva válida.",
+          lowDynamic,
+          MIN_CONFIDENCE)
+    end
+
+    if lowStatic > 0 then
+      parts[#parts + 1] =
+        string.format(
+          "%d STATIC con confidence < %.2f: se omitirán.",
+          lowStatic,
+          MIN_CONFIDENCE)
+    end
+
+    parts[#parts + 1] = "¿Continuar con APPLY?"
+
     local answer =
       reaper.ShowMessageBox(
-        string.format(
-          "%d SOURCE(s) tienen confidence inferior a %.2f.\n\nAPPLY omitirá esos casos y aplicará únicamente los READY confiables.",
-          low,
-          MIN_CONFIDENCE),
+        table.concat(parts, "\n\n"),
         "Smart Align Post — confidence",
         1)
 
@@ -739,8 +762,16 @@ local function apply_all()
   local staticCount = 0
 
   for _, job in ipairs(jobs) do
-    if job.status ~= "READY" or
-       job.confidence < MIN_CONFIDENCE then
+    local dynamicReady =
+      job.status == "READY" and
+      job.modeUsed == "DYNAMIC" and
+      #job.curve >= 2
+
+    local confidenceAccept =
+      job.confidence >= MIN_CONFIDENCE or
+      dynamicReady
+
+    if job.status ~= "READY" or not confidenceAccept then
       skipped = skipped + 1
     else
       local ok = false
