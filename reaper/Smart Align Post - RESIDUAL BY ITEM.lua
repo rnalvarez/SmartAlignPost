@@ -115,6 +115,41 @@ local function scene_label(track, item)
   return item_label(item)
 end
 
+local function get_item_ext(item, key)
+  if not item then return "" end
+
+  local ok, value =
+    reaper.GetSetMediaItemInfo_String(
+      item, key, "", false)
+
+  if ok and value then
+    return value
+  end
+
+  return ""
+end
+
+local function find_master_item_by_guid(guid)
+  if not masterTrack or not guid or guid == "" then
+    return nil
+  end
+
+  local count =
+    reaper.CountTrackMediaItems(masterTrack)
+
+  for i = 0, count - 1 do
+    local item =
+      reaper.GetTrackMediaItem(
+        masterTrack, i)
+
+    if item_guid(item) == guid then
+      return item
+    end
+  end
+
+  return nil
+end
+
 local function take_source_path(item)
   local take =
     reaper.GetActiveTake(item)
@@ -237,6 +272,57 @@ local function find_scene_match(sourceItem)
     return nil
   end
 
+  -- Prefer the exact MASTER scene mapping written by PHASE BATCH.
+  -- This prevents the residual stage from re-guessing the reference.
+  local persistedGuid =
+    get_item_ext(
+      sourceItem,
+      "P_EXT:SmartAlignPost.Scene.MasterGUID")
+
+  local persistedMaster =
+    find_master_item_by_guid(
+      persistedGuid)
+
+  if persistedMaster then
+    local sPos =
+      reaper.GetMediaItemInfo_Value(
+        sourceItem, "D_POSITION")
+    local sLen =
+      reaper.GetMediaItemInfo_Value(
+        sourceItem, "D_LENGTH")
+    local mPos =
+      reaper.GetMediaItemInfo_Value(
+        persistedMaster, "D_POSITION")
+    local mLen =
+      reaper.GetMediaItemInfo_Value(
+        persistedMaster, "D_LENGTH")
+
+    local overlap =
+      math.min(
+        sPos + sLen,
+        mPos + mLen) -
+      math.max(
+        sPos,
+        mPos)
+
+    if overlap >= MIN_OVERLAP_SECONDS then
+      local coverage =
+        sLen > 0 and
+        overlap / sLen or
+        0.0
+
+      return {
+        item = persistedMaster,
+        overlap = overlap,
+        secondOverlap = 0.0,
+        coverage = coverage,
+        ambiguous = false,
+        source = "PERSISTED"
+      }
+    end
+  end
+
+  -- Fallback for projects/items that were not processed by PHASE BATCH.
   local sPos =
     reaper.GetMediaItemInfo_Value(
       sourceItem, "D_POSITION")
@@ -276,9 +362,7 @@ local function find_scene_match(sourceItem)
     if overlap > 0 then
       candidates[#candidates + 1] = {
         item = candidate,
-        overlap = overlap,
-        position = mPos,
-        length = mLen
+        overlap = overlap
       }
     end
   end
@@ -314,10 +398,10 @@ local function find_scene_match(sourceItem)
     overlap = best.overlap,
     secondOverlap = secondOverlap,
     coverage = coverage,
-    ambiguous = ambiguous
+    ambiguous = ambiguous,
+    source = "OVERLAP_FALLBACK"
   }
 end
-
 local function build_jobs(items)
   jobs = {}
 
@@ -356,6 +440,7 @@ local function build_jobs(items)
         secondOverlap = match.secondOverlap,
         coverage = match.coverage,
         ambiguous = match.ambiguous,
+        mappingSource = match.source or "OVERLAP_FALLBACK",
 
         status = "PENDING",
         residualSamples = 0.0,
@@ -537,7 +622,9 @@ local function analyze_job(job)
       track_label(job.sourceTrack),
       scene_label(
         masterTrack,
-        job.masterItem)),
+        job.masterItem) ..
+      " · mapping " ..
+      (job.mappingSource or "?")),
     "info")
 
   draw_ui()
@@ -624,6 +711,12 @@ local function analyze_job(job)
 
   job.sourceGuid =
     item_guid(job.sourceItem)
+
+  reaper.GetSetMediaItemInfo_String(
+    job.sourceItem,
+    "P_EXT:SmartAlignPost.Residual.MappingSource",
+    job.mappingSource or "",
+    true)
 
   if job.modeUsed == "DYNAMIC" then
     job.status = "REVIEW DYNAMIC"
