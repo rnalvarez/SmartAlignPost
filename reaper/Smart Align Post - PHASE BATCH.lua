@@ -674,29 +674,36 @@ local function applyDynamic(job)
     return true
   end
 
-  local firstDelay = delayAtProjectTime(itemPos)
-  if not addMarker(
-      0.0, firstDelay) then
-    return false, "falló marker inicial"
+  -- The measured curve contains sparse phase estimates. Applying those points
+  -- directly creates a piecewise-constant playback rate between markers.
+  -- For phase alignment this is unnecessarily coarse: a moving mic produces a
+  -- continuous delay trajectory. Build a dense time-warp over the entire item
+  -- from the measured curve, then let REAPER approximate that trajectory with
+  -- short linear stretch-marker segments.
+  local function delayAtItemTime(itemTime)
+    return delayAtProjectTime(itemPos + itemTime)
   end
 
-  for _, point in ipairs(job.curve) do
-    local projectTime =
-      job.commonStart + point.time
-    local relative =
-      projectTime - itemPos
+  local denseStep =
+    math.max(
+      0.020,
+      math.min(
+        0.080,
+        itemLen / 600.0))
 
-    if relative > 0.001 and
-       relative < itemLen - 0.001 then
-      if not addMarker(
-          relative, point.delayMs) then
-        return false, "falló marker intermedio"
-      end
+  local t = 0.0
+  while t < itemLen - 1e-6 do
+    if not addMarker(
+        t,
+        delayAtItemTime(t)) then
+      return false, "falló marker de warp"
     end
+
+    t = t + denseStep
   end
 
   local lastDelay =
-    delayAtProjectTime(itemPos + itemLen)
+    delayAtItemTime(itemLen)
   if not addMarker(
       itemLen, lastDelay) then
     return false, "falló marker final"
@@ -956,8 +963,13 @@ draw_ui = function()
       34,
       39)
 
+    -- DYNAMIC with a validated temporal curve is actionable even when
+    -- its acoustic confidence is below the static threshold. The number shown
+    -- is still the acoustic confidence; the green state means the dynamic
+    -- trajectory itself has been validated.
     local confGood =
-      job.confidence >= MIN_CONFIDENCE
+      job.confidence >= MIN_CONFIDENCE or
+      (job.modeUsed == "DYNAMIC" and #job.curve >= 2)
 
     text(
       28, rowY + 9,
