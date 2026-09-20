@@ -236,6 +236,7 @@ local function parse_output(output)
     scoutLastMs = tonumber(output:match("SCOUT_LAST_MS=([%+%-]?[%d%.eE]+)")) or 0.0,
     scoutR2 = tonumber(output:match("SCOUT_R2=([%+%-]?[%d%.eE]+)")) or 0.0,
     scoutDirection = tonumber(output:match("SCOUT_DIRECTION=([%+%-]?[%d%.eE]+)")) or 0.0,
+    scoutRobustShiftMs = tonumber(output:match("SCOUT_ROBUST_SHIFT_MS=([%+%-]?[%d%.eE]+)")) or 0.0,
     scoutCoherent = output:match("SCOUT_COHERENT=([01])") == "1",
     delaySamples = tonumber(output:match("DELAY_SAMPLES=([%+%-]?[%d%.]+)")) or 0.0,
     delayMs = tonumber(output:match("DELAY_MS=([%+%-]?[%d%.]+)")) or 0.0,
@@ -385,6 +386,7 @@ local function analyze_job(job)
   job.scoutLastMs = result.scoutLastMs
   job.scoutR2 = result.scoutR2
   job.scoutDirection = result.scoutDirection
+  job.scoutRobustShiftMs = result.scoutRobustShiftMs
   job.scoutCoherent = result.scoutCoherent
   job.confidence = result.confidence
   job.delayMs = result.delayMs
@@ -471,6 +473,7 @@ local function run_analysis(items)
           job.scoutLastMs or 0.0,
           job.scoutR2 or 0.0,
           job.scoutDirection or 0.0,
+          job.scoutRobustShiftMs or 0.0,
           job.scoutCoherent and "YES" or "NO",
           job.modeRequested or "?",
           job.modeEffective or "?",
