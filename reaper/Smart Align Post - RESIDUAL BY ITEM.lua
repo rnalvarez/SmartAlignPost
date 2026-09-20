@@ -1188,6 +1188,8 @@ draw_ui = function()
 
     if job.status == "ELIGIBLE" then
       rr, gg, bb = 125, 220, 155
+    elseif job.status == "FX INSERTED" then
+      rr, gg, bb = 105, 235, 180
     elseif job.status == "ALIGNED" then
       rr, gg, bb = 145, 205, 180
     elseif job.status == "LOW CONF" or
