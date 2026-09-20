@@ -913,9 +913,43 @@ Result AlignEngine::analyze(
                 meaningfulSteps >= 3 &&
                 directionConsistency >= 0.67;
 
+            // Robust early-vs-late evidence handles real movement that is
+            // neither linear nor strictly monotonic. Compare the median delay
+            // of the first half with the median delay of the last half.
+            const std::size_t split =
+                std::max<std::size_t>(1, scout.size() / 2);
+
+            std::vector<double> earlyDelays;
+            std::vector<double> lateDelays;
+            earlyDelays.reserve(split);
+            lateDelays.reserve(scout.size() - split);
+
+            for (std::size_t i = 0; i < scout.size(); ++i) {
+                if (i < split)
+                    earlyDelays.push_back(scout[i].second);
+                else
+                    lateDelays.push_back(scout[i].second);
+            }
+
+            const double earlyMedian = median(earlyDelays);
+            const double lateMedian = median(lateDelays);
+
+            const double robustShift =
+                std::abs(lateMedian - earlyMedian);
+
+            result.scoutRobustShiftSamples = robustShift;
+
+            const bool robustTemporalEvidence =
+                scout.size() >= 4 &&
+                robustShift > std::max(
+                    2.0 * dynamicThreshold,
+                    1.0 * settings.sampleRate / 1000.0);
+
             coherentTemporalDrift =
                 endToEnd > dynamicThreshold &&
-                (linearEvidence || monotonicEvidence);
+                (linearEvidence ||
+                 monotonicEvidence ||
+                 robustTemporalEvidence);
 
             result.scoutCoherent = coherentTemporalDrift;
         }
