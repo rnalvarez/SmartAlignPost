@@ -889,6 +889,24 @@ local function inject_residual_fx(job)
       "El VST3 fue insertado, pero no se pudieron cargar sus parámetros residuales."
   end
 
+  -- REAPER may automatically open the FX UI when an FX is inserted through
+  -- the quick-add path. Residual processing is batch-driven, so the windows
+  -- must remain closed; the FX stays instantiated and active on the Take.
+  if reaper.TakeFX_SetOpen then
+    reaper.TakeFX_SetOpen(
+      take,
+      fxIndex,
+      false)
+  end
+
+  if reaper.TakeFX_Show then
+    -- showFlag=2 hides a floating Take FX window without removing the FX.
+    reaper.TakeFX_Show(
+      take,
+      fxIndex,
+      2)
+  end
+
   reaper.GetSetMediaItemInfo_String(
     job.sourceItem,
     "P_EXT:SmartAlignPost.Residual.FX",
