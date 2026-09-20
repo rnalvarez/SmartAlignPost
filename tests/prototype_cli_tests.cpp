@@ -120,6 +120,34 @@ std::vector<float> delaySignal(
     return y;
 }
 
+std::vector<float> varyingDelaySignal(
+    const std::vector<float>& x,
+    double startDelay,
+    double endDelay)
+{
+    std::vector<float> y(x.size(), 0.0f);
+
+    const double denom =
+        static_cast<double>(
+            std::max<std::size_t>(1, x.size() - 1));
+
+    for (std::size_t i = 3; i + 2 < x.size(); ++i) {
+        const double u =
+            static_cast<double>(i) / denom;
+
+        const double delay =
+            startDelay +
+            (endDelay - startDelay) * u;
+
+        y[i] = static_cast<float>(
+            lagrange4(
+                x,
+                static_cast<double>(i) - delay));
+    }
+
+    return y;
+}
+
 std::string shellQuote(const std::string& s)
 {
 #ifdef _WIN32
@@ -437,6 +465,81 @@ int main(int argc, char** argv)
                 << " drift="
                 << (last - first)
                 << " samples\n";
+        }
+
+
+        // DYNAMIC_RENDER must correct a known time-varying phase trajectory
+        // and validate the result by re-analyzing the rendered WAV.
+        {
+            const auto dynamicSource =
+                varyingDelaySignal(
+                    master,
+                    72.0,
+                    228.0);
+
+            const auto dynamicSourcePath =
+                base / "dynamic_source.wav";
+            const auto correctedPath =
+                base / "dynamic_corrected.wav";
+
+            writeFloatWav(
+                dynamicSourcePath,
+                dynamicSource,
+                sr);
+
+            std::string output;
+            int status = 1;
+
+            const std::string args =
+                shellQuote(masterPath.string()) + " " +
+                shellQuote(dynamicSourcePath.string()) +
+                " 0 0 12 1 1 DYNAMIC_RENDER " +
+                shellQuote(correctedPath.string());
+
+            if (!runCommand(
+                    argv[1],
+                    args,
+                    output,
+                    status)) {
+                throw std::runtime_error(
+                    "could not launch dynamic renderer");
+            }
+
+            if (status != 0) {
+                std::cerr << output;
+                return 9;
+            }
+
+            if (output.find("MODE_USED=DYNAMIC") ==
+                    std::string::npos ||
+                output.find("POST_VALID=1") ==
+                    std::string::npos) {
+                std::cerr
+                    << "dynamic render was not validated\n"
+                    << output;
+                return 10;
+            }
+
+            const double residual =
+                field(
+                    output,
+                    "POST_DELAY_SAMPLES");
+
+            if (!std::isfinite(residual) ||
+                std::abs(residual) > 2.0) {
+                std::cerr
+                    << "dynamic render residual too large: "
+                    << residual << " samples\n"
+                    << output;
+                return 11;
+            }
+
+            if (!std::filesystem::exists(
+                    correctedPath)) {
+                std::cerr
+                    << "dynamic renderer did not create output WAV\n";
+                return 12;
+            }
         }
 
         std::filesystem::remove_all(base, ec);
