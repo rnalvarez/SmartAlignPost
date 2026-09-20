@@ -18,6 +18,9 @@ struct WavData {
     int bitsPerSample = 0;
     uint16_t format = 0;
     std::vector<float> mono;
+    // Interleaved samples are retained for the DYNAMIC_RENDER path so the
+    // correction can preserve the source channel count.
+    std::vector<float> interleaved;
 };
 
 uint32_t readU32(std::ifstream& f)
@@ -214,17 +217,26 @@ bool loadWav(
     }
 
     out.mono.resize(actualFrames);
+    out.interleaved.resize(
+        actualFrames * static_cast<std::size_t>(out.channels));
 
     for (std::size_t i = 0; i < actualFrames; ++i) {
         const uint8_t* frame =
             raw.data() + i * frameBytes;
 
         double sum = 0.0;
-        for (int c = 0; c < out.channels; ++c)
-            sum += pcmSample(
-                frame + c * bytesPerSample,
+        for (int channel = 0; channel < out.channels; ++channel) {
+            const float sample = pcmSample(
+                frame + channel * bytesPerSample,
                 out.bitsPerSample,
                 out.format);
+
+            out.interleaved[
+                i * static_cast<std::size_t>(out.channels) +
+                static_cast<std::size_t>(channel)] = sample;
+
+            sum += sample;
+        }
 
         out.mono[i] =
             static_cast<float>(sum / out.channels);
@@ -288,6 +300,333 @@ std::vector<float> resampleToProjectTime(
     return out;
 }
 
+
+double delayAtCurveCubic(
+    const std::vector<sap::Point>& curve,
+    double timeSec)
+{
+    if (curve.empty())
+        return 0.0;
+
+    if (curve.size() == 1)
+        return curve.front().delaySamples;
+
+    if (timeSec <= curve.front().timeSec)
+        return curve.front().delaySamples;
+
+    if (timeSec >= curve.back().timeSec)
+        return curve.back().delaySamples;
+
+    std::size_t segment = 0;
+    for (std::size_t i = 0; i + 1 < curve.size(); ++i) {
+        if (timeSec >= curve[i].timeSec &&
+            timeSec <= curve[i + 1].timeSec) {
+            segment = i;
+            break;
+        }
+    }
+
+    const auto& a = curve[segment];
+    const auto& b = curve[segment + 1];
+    const double dt =
+        std::max(1.0e-9, b.timeSec - a.timeSec);
+    const double u =
+        std::clamp(
+            (timeSec - a.timeSec) / dt,
+            0.0,
+            1.0);
+
+    double mA = 0.0;
+    if (segment == 0) {
+        mA = (b.delaySamples - a.delaySamples) / dt;
+    } else {
+        const auto& p = curve[segment - 1];
+        mA = (b.delaySamples - p.delaySamples) /
+             std::max(
+                 1.0e-9,
+                 b.timeSec - p.timeSec);
+    }
+
+    double mB = 0.0;
+    if (segment + 1 == curve.size() - 1) {
+        mB = (b.delaySamples - a.delaySamples) / dt;
+    } else {
+        const auto& n = curve[segment + 2];
+        mB = (n.delaySamples - a.delaySamples) /
+             std::max(
+                 1.0e-9,
+                 n.timeSec - a.timeSec);
+    }
+
+    const double u2 = u * u;
+    const double u3 = u2 * u;
+
+    const double h00 =  2.0 * u3 - 3.0 * u2 + 1.0;
+    const double h10 =       u3 - 2.0 * u2 + u;
+    const double h01 = -2.0 * u3 + 3.0 * u2;
+    const double h11 =       u3 -       u2;
+
+    const double value =
+        h00 * a.delaySamples +
+        h10 * dt * mA +
+        h01 * b.delaySamples +
+        h11 * dt * mB;
+
+    const double lo =
+        std::min(a.delaySamples, b.delaySamples);
+    const double hi =
+        std::max(a.delaySamples, b.delaySamples);
+
+    return std::clamp(value, lo, hi);
+}
+
+double sinc(double x)
+{
+    if (std::abs(x) < 1.0e-12)
+        return 1.0;
+
+    const double px = kPi * x;
+    return std::sin(px) / px;
+}
+
+float sampleSincInterleaved(
+    const std::vector<float>& data,
+    std::size_t channels,
+    double framePos,
+    std::size_t channel)
+{
+    if (data.empty() ||
+        channels == 0 ||
+        channel >= channels ||
+        framePos < 0.0)
+        return 0.0f;
+
+    const double cutoff = 0.96;
+    constexpr int radius = 16;
+
+    const long long center =
+        static_cast<long long>(std::floor(framePos));
+
+    double sum = 0.0;
+    double weightSum = 0.0;
+
+    for (int k = -radius + 1; k <= radius; ++k) {
+        const long long index =
+            center + static_cast<long long>(k);
+
+        const std::size_t frameCount =
+            data.size() / channels;
+
+        if (index < 0 ||
+            static_cast<std::size_t>(index) >= frameCount)
+            continue;
+
+        const double distance =
+            static_cast<double>(index) - framePos;
+
+        const double windowArg =
+            std::abs(distance) /
+            static_cast<double>(radius);
+
+        if (windowArg >= 1.0)
+            continue;
+
+        // Hann-windowed low-pass kernel. The source and destination sample
+        // rates are normally identical; the small 0.96 cutoff provides a
+        // little headroom around Nyquist while keeping transients intact.
+        const double window =
+            0.5 + 0.5 *
+            std::cos(kPi * windowArg);
+
+        const double w =
+            cutoff *
+            sinc(cutoff * distance) *
+            window;
+
+        sum +=
+            static_cast<double>(
+                data[
+                    static_cast<std::size_t>(index) *
+                    channels +
+                    channel]) * w;
+
+        weightSum += w;
+    }
+
+    if (std::abs(weightSum) < 1.0e-12)
+        return 0.0f;
+
+    const double value = sum / weightSum;
+    return static_cast<float>(
+        std::clamp(value, -1.0, 1.0));
+}
+
+bool writeFloatWav(
+    const std::string& path,
+    const std::vector<float>& interleaved,
+    int sampleRate,
+    int channels,
+    std::string& error)
+{
+    if (sampleRate <= 0 ||
+        channels <= 0 ||
+        interleaved.empty() ||
+        interleaved.size() %
+            static_cast<std::size_t>(channels) != 0) {
+        error = "Datos inválidos para WAV de salida.";
+        return false;
+    }
+
+    const uint64_t dataBytes64 =
+        static_cast<uint64_t>(
+            interleaved.size()) *
+        sizeof(float);
+
+    if (dataBytes64 > 0xffffffffULL - 36ULL) {
+        error = "WAV de salida demasiado grande.";
+        return false;
+    }
+
+    const uint32_t dataBytes =
+        static_cast<uint32_t>(dataBytes64);
+
+    std::ofstream f(path, std::ios::binary);
+    if (!f) {
+        error = "No se pudo crear WAV de salida: " + path;
+        return false;
+    }
+
+    f.write("RIFF", 4);
+    writeU32(f, 36u + dataBytes);
+    f.write("WAVE", 4);
+
+    f.write("fmt ", 4);
+    writeU32(f, 16u);
+    writeU16(f, 3u); // IEEE float
+    writeU16(
+        f,
+        static_cast<uint16_t>(channels));
+
+    writeU32(
+        f,
+        static_cast<uint32_t>(sampleRate));
+
+    writeU32(
+        f,
+        static_cast<uint32_t>(
+            sampleRate *
+            channels *
+            static_cast<int>(sizeof(float))));
+
+    writeU16(
+        f,
+        static_cast<uint16_t>(
+            channels * static_cast<int>(sizeof(float))));
+
+    writeU16(f, 32u);
+
+    f.write("data", 4);
+    writeU32(f, dataBytes);
+    f.write(
+        reinterpret_cast<const char*>(
+            interleaved.data()),
+        static_cast<std::streamsize>(dataBytes));
+
+    if (!f) {
+        error = "Error escribiendo WAV de salida: " + path;
+        return false;
+    }
+
+    return true;
+}
+
+bool renderDynamicCorrection(
+    const WavData& source,
+    double sourceStart,
+    double sourceRate,
+    double duration,
+    double sampleRate,
+    const std::vector<sap::Point>& curve,
+    std::vector<float>& correctedInterleaved,
+    std::vector<float>& correctedMono,
+    std::string& error)
+{
+    if (curve.size() < 2) {
+        error = "Curva DYNAMIC insuficiente para renderizar.";
+        return false;
+    }
+
+    if (source.sampleRate !=
+        static_cast<int>(std::llround(sampleRate))) {
+        error = "Sample rate SOURCE/PROJECT incompatible.";
+        return false;
+    }
+
+    const std::size_t channels =
+        static_cast<std::size_t>(
+            std::max(1, source.channels));
+
+    const std::size_t outputFrames =
+        static_cast<std::size_t>(
+            std::floor(duration * sampleRate));
+
+    if (outputFrames < 2048) {
+        error = "Tramo demasiado corto para DYNAMIC_RENDER.";
+        return false;
+    }
+
+    correctedInterleaved.resize(
+        outputFrames * channels);
+
+    correctedMono.resize(outputFrames);
+
+    for (std::size_t i = 0; i < outputFrames; ++i) {
+        const double t =
+            static_cast<double>(i) / sampleRate;
+
+        const double delaySamples =
+            delayAtCurveCubic(curve, t);
+
+        // SOURCE is sampled directly at project time + measured delay.
+        // This is the inverse of the delay that was measured by GCC-PHAT:
+        // if SOURCE(t + D) = MASTER(t), corrected(t) = SOURCE(t + D).
+        const double sourceTime =
+            t +
+            delaySamples / sampleRate;
+
+        const double nativeFramePos =
+            (sourceStart +
+             sourceTime * sourceRate) *
+            static_cast<double>(source.sampleRate);
+
+        double mono = 0.0;
+
+        for (std::size_t channel = 0;
+             channel < channels;
+             ++channel) {
+            const float value =
+                sampleSincInterleaved(
+                    source.interleaved,
+                    channels,
+                    nativeFramePos,
+                    channel);
+
+            correctedInterleaved[
+                i * channels + channel] =
+                value;
+
+            mono += value;
+        }
+
+        correctedMono[i] =
+            static_cast<float>(
+                mono /
+                static_cast<double>(channels));
+    }
+
+    return true;
+}
+
 const char* modeName(sap::Mode mode)
 {
     switch (mode) {
@@ -301,10 +640,10 @@ const char* modeName(sap::Mode mode)
 
 int main(int argc, char** argv)
 {
-    if (argc != 3 && argc != 9) {
+    if (argc != 3 && argc != 9 && argc != 10) {
         std::cout
             << "ERROR=Uso: SmartAlignPostPrototype.exe MASTER.wav SOURCE.wav "
-               "[MASTER_START SOURCE_START DURATION MASTER_RATE SOURCE_RATE MODE]\n";
+               "[MASTER_START SOURCE_START DURATION MASTER_RATE SOURCE_RATE MODE [OUTPUT_WAV]]\n";
         return 2;
     }
 
@@ -315,6 +654,8 @@ int main(int argc, char** argv)
     double masterRate = 1.0;
     double sourceRate = 1.0;
     sap::Mode requestedMode = sap::Mode::Auto;
+    bool renderDynamic = false;
+    std::string outputWav;
 
     if (argc == 9) {
         if (!parseDouble(argv[3], "MASTER_START_SEC", masterStart, error) ||
@@ -340,6 +681,17 @@ int main(int argc, char** argv)
             requestedMode = sap::Mode::Dynamic;
         else if (mode == "AUTO")
             requestedMode = sap::Mode::Auto;
+        else if (mode == "DYNAMIC_RENDER")
+        {
+            if (argc != 10) {
+                std::cout
+                    << "ERROR=DYNAMIC_RENDER requiere OUTPUT_WAV.\n";
+                return 6;
+            }
+            requestedMode = sap::Mode::Dynamic;
+            renderDynamic = true;
+            outputWav = argv[9];
+        }
         else {
             std::cout << "ERROR=MODE debe ser STATIC, DYNAMIC o AUTO.\n";
             return 6;
@@ -476,11 +828,165 @@ int main(int argc, char** argv)
         std::chrono::duration<double, std::milli>(
             analyzeEnd - analyzeStart).count();
 
+
+    if (renderDynamic) {
+        if (result.modeUsed != sap::Mode::Dynamic ||
+            result.curve.size() < 2) {
+            std::cout
+                << "ERROR=DYNAMIC_RENDER no obtuvo una curva DYNAMIC válida.\\n";
+            return 11;
+        }
+
+        constexpr double kRenderPadSeconds = 0.080;
+
+        const double renderStart =
+            std::max(
+                0.0,
+                sourceStart -
+                kRenderPadSeconds * sourceRate);
+
+        const double renderPreProjectSeconds =
+            (sourceStart - renderStart) /
+            std::max(1.0e-12, sourceRate);
+
+        WavData sourceRender;
+
+        const double renderDurationNative =
+            renderPreProjectSeconds +
+            duration +
+            kRenderPadSeconds;
+
+        if (!loadWav(
+                argv[2],
+                sourceRender,
+                error,
+                renderStart,
+                renderDurationNative * sourceRate)) {
+            std::cout << "ERROR=" << error << "\n";
+            return 11;
+        }
+
+        // Convert the source start time into the coordinate system of the
+        // padded render buffer. The correction is sample-based and uses the
+        // original SOURCE playback rate, so no REAPER stretch markers are
+        // involved in the DYNAMIC path.
+        std::vector<sap::Point> shiftedCurve =
+            result.curve;
+
+        for (auto& point : shiftedCurve) {
+            point.timeSec =
+                point.timeSec;
+        }
+
+        std::vector<float> correctedInterleaved;
+        std::vector<float> correctedMono;
+
+        if (!renderDynamicCorrection(
+                sourceRender,
+                renderPreProjectSeconds,
+                sourceRate,
+                duration,
+                settings.sampleRate,
+                shiftedCurve,
+                correctedInterleaved,
+                correctedMono,
+                error)) {
+            std::cout << "ERROR=" << error << "\n";
+            return 11;
+        }
+
+        WavData correctedForValidation;
+        correctedForValidation.sampleRate =
+            static_cast<int>(std::llround(settings.sampleRate));
+        correctedForValidation.channels =
+            sourceRender.channels;
+        correctedForValidation.interleaved =
+            correctedInterleaved;
+        correctedForValidation.mono =
+            correctedMono;
+
+        sap::Settings postSettings = settings;
+        postSettings.mode = sap::Mode::Auto;
+        postSettings.playbackRateRatio = 1.0;
+        postSettings.hasInitialDelaySamples = false;
+
+        const auto post =
+            sap::AlignEngine::analyze(
+                masterProject,
+                correctedMono,
+                postSettings);
+
+        const sap::Settings postStaticSettings =
+            [&]() {
+                sap::Settings s = postSettings;
+                s.mode = sap::Mode::Static;
+                return s;
+            }();
+
+        const auto postStatic =
+            sap::AlignEngine::analyze(
+                masterProject,
+                correctedMono,
+                postStaticSettings);
+
+        const double residualSamples =
+            postStatic.staticDelaySamples;
+
+        const bool postValid =
+            std::isfinite(residualSamples) &&
+            std::abs(residualSamples) <= 2.0 &&
+            post.modeUsed != sap::Mode::Dynamic;
+
+        std::cout
+            << "POST_MODE_USED="
+            << modeName(post.modeUsed)
+            << "\n";
+        std::cout
+            << "POST_CURVE_COUNT="
+            << post.curve.size()
+            << "\n";
+        std::cout
+            << "POST_DELAY_SAMPLES="
+            << residualSamples
+            << "\n";
+        std::cout
+            << "POST_DELAY_MS="
+            << residualSamples * 1000.0 / settings.sampleRate
+            << "\n";
+        std::cout
+            << "POST_CONFIDENCE="
+            << postStatic.staticConfidence
+            << "\n";
+
+        if (!postValid) {
+            std::cout
+                << "POST_VALID=0\n";
+            return 12;
+        }
+
+        if (!writeFloatWav(
+                outputWav,
+                correctedInterleaved,
+                sourceRender.sampleRate,
+                sourceRender.channels,
+                error)) {
+            std::cout << "ERROR=" << error << "\n";
+            return 11;
+        }
+
+        std::cout
+            << "OUTPUT_WAV="
+            << outputWav
+            << "\n";
+        std::cout
+            << "POST_VALID=1\n";
+    }
+
     const double totalMs =
         std::chrono::duration<double, std::milli>(
             analyzeEnd - totalStart).count();
 
-    constexpr const char* kEngineVersion = "20260920-rate-drift-1";
+    constexpr const char* kEngineVersion = "20260920-dynamic-render-1";
 
     std::cout << "ENGINE_VERSION="
               << kEngineVersion << "\n";
