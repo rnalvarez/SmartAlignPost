@@ -820,17 +820,33 @@ local function inject_residual_fx(job)
     find_existing_fx(take)
 
   if fxIndex < 0 then
-    fxIndex =
-      reaper.TakeFX_AddByName(
-        take,
-        FX_NAME,
-        1)
+    -- ReaScript's TakeFX_AddByName search is name based. Use the explicit
+    -- VST3 form first, then the plain factory name as a compatibility
+    -- fallback across REAPER installations.
+    local candidates = {
+      "VST3: " .. FX_NAME,
+      FX_NAME
+    }
+
+    for _, candidate in ipairs(candidates) do
+      local candidateIndex =
+        reaper.TakeFX_AddByName(
+          take,
+          candidate,
+          1)
+
+      if candidateIndex and candidateIndex >= 0 then
+        fxIndex = candidateIndex
+        break
+      end
+    end
   end
 
   if not fxIndex or fxIndex < 0 then
     return false,
       "No se pudo insertar " ..
-      FX_NAME
+      FX_NAME ..
+      " como Take FX. Verificá que el VST3 esté instalado y visible para REAPER."
   end
 
   local normalized =
@@ -847,17 +863,31 @@ local function inject_residual_fx(job)
 
   -- Parameter 0 = Residual Samples.
   -- Parameter 1 = Apply Residual.
-  reaper.TakeFX_SetParam(
-    take,
-    fxIndex,
-    0,
-    normalized)
+  local okResidual =
+    reaper.TakeFX_SetParam(
+      take,
+      fxIndex,
+      0,
+      normalized)
 
-  reaper.TakeFX_SetParam(
-    take,
-    fxIndex,
-    1,
-    1.0)
+  local okApply =
+    reaper.TakeFX_SetParam(
+      take,
+      fxIndex,
+      1,
+      1.0)
+
+  if reaper.TakeFX_SetEnabled then
+    reaper.TakeFX_SetEnabled(
+      take,
+      fxIndex,
+      true)
+  end
+
+  if not okResidual or not okApply then
+    return false,
+      "El VST3 fue insertado, pero no se pudieron cargar sus parámetros residuales."
+  end
 
   reaper.GetSetMediaItemInfo_String(
     job.sourceItem,
@@ -934,6 +964,8 @@ local function run_analysis(items)
           if ok then
             counts.injected =
               counts.injected + 1
+            job.status = "FX INSERTED"
+            write_metadata(job)
           else
             job.status = "FX ERROR"
             write_metadata(job)
