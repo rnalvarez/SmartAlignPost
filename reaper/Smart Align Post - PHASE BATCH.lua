@@ -724,19 +724,24 @@ local function applyDynamic(job)
     return false, "parámetros de item/playrate inválidos"
   end
 
-  -- DYNAMIC_RENDER currently reconstructs the complete SOURCE item from
-  -- the corresponding MASTER scene. If the SOURCE extends outside that
-  -- MASTER scene, we refuse the render rather than extrapolate an
-  -- unvalidated correction across a scene boundary.
-  if job.commonStart > itemPos + 1e-6 or
-     job.commonEnd < itemPos + itemLen - 1e-6 then
+  -- DYNAMIC_RENDER can safely cover small SOURCE edges that fall
+  -- outside the corresponding MASTER item: the measured curve is defined
+  -- over the common scene interval, and the renderer holds the first/last
+  -- measured delay outside that interval instead of inventing a new scene.
+  --
+  -- Cross-scene SOURCE items are still rejected earlier by scene matching
+  -- (job.ambiguous), so this only removes the unnecessary requirement that
+  -- MASTER and SOURCE items have identical editorial boundaries.
+  if job.ambiguous then
     return false, string.format(
-      "DYNAMIC no aplicado · MASTER %02d cubre %.1f%% del SOURCE. " ..
-      "STATIC puede aplicarse; para DYNAMIC el item debe quedar dentro " ..
-      "del item MASTER de su escena.",
+      "DYNAMIC no aplicado · SOURCE cruza escenas (MASTER %02d, cobertura %.1f%%).",
       job.masterSceneIndex or 0,
       job.sourceCoverage and job.sourceCoverage * 100.0 or 0.0)
   end
+
+  local extrapolatedEdges =
+    (job.commonStart > itemPos + 1e-6) or
+    (job.commonEnd < itemPos + itemLen - 1e-6)
 
   local masterStart =
     masterOffs +
@@ -817,7 +822,8 @@ local function applyDynamic(job)
 
   set_status(
     "Renderizando DYNAMIC sample-accurate · " ..
-    track_label(job.sourceTrack),
+    track_label(job.sourceTrack) ..
+    (extrapolatedEdges and " · bordes extrapolados" or ""),
     "info")
 
   draw_ui()
