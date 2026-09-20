@@ -382,6 +382,57 @@ int main()
         }
     }
 
+    std::cerr << "PHASE TEST: AUTO detects robust early-late shift\n";
+
+    {
+        // Deliberately non-linear and not strictly monotonic: the first half
+        // and last half are still separated enough to represent a real
+        // microphone-distance change.
+        std::vector<float> source(master.size(), 0.0f);
+
+        for (std::size_t i = 3; i + 2 < source.size(); ++i) {
+            const double u =
+                static_cast<double>(i) /
+                static_cast<double>(master.size() - 1);
+
+            double delay = 35.0;
+            if (u < 0.50) {
+                delay += 20.0 * std::sin(u * 30.0);
+            } else {
+                delay += 420.0 +
+                         20.0 * std::sin(u * 30.0);
+            }
+
+            const double sourcePos =
+                static_cast<double>(i) - delay;
+
+            source[i] = static_cast<float>(
+                lagrange4(master, sourcePos));
+        }
+
+        sap::Settings s;
+        s.sampleRate = sr;
+        s.mode = sap::Mode::Auto;
+        s.maxDelayMs = 12.0;
+        s.analysisWindowMs = 60.0;
+        s.hopMs = 250.0;
+        s.minConfidence = 0.68;
+
+        const auto r =
+            sap::AlignEngine::analyze(master, source, s);
+
+        if (r.modeUsed != sap::Mode::Dynamic ||
+            r.scoutRobustShiftSamples < 300.0) {
+            std::cerr
+                << "AUTO robust shift failed: mode="
+                << (r.modeUsed == sap::Mode::Dynamic ? "DYNAMIC" : "STATIC")
+                << " robust="
+                << r.scoutRobustShiftSamples
+                << "\n";
+            return 13;
+        }
+    }
+
     std::cerr << "PHASE TEST: noisy source\n";
 
     {
