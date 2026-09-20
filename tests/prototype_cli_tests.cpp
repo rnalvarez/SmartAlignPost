@@ -542,6 +542,87 @@ int main(int argc, char** argv)
             }
         }
 
+        // DYNAMIC_RENDER regression with a non-1.0 SOURCE playrate.
+        // The renderer must keep the padded-buffer offset in native SOURCE
+        // seconds while advancing through the source using the project-time
+        // playback rate.
+        {
+            constexpr double renderDuration = 10.0;
+            constexpr double sourceRate = 1.0203;
+
+            const auto rateDynamicSource =
+                varyingDelaySignal(
+                    master,
+                    72.0,
+                    228.0);
+
+            const auto rateDynamicSourcePath =
+                base / "dynamic_rate_source.wav";
+            const auto rateCorrectedPath =
+                base / "dynamic_rate_corrected.wav";
+
+            writeFloatWav(
+                rateDynamicSourcePath,
+                rateDynamicSource,
+                sr);
+
+            std::string output;
+            int status = 1;
+
+            const std::string args =
+                shellQuote(masterPath.string()) + " " +
+                shellQuote(rateDynamicSourcePath.string()) +
+                " 0 0 10 1 " +
+                std::to_string(sourceRate) +
+                " DYNAMIC_RENDER " +
+                shellQuote(rateCorrectedPath.string());
+
+            if (!runCommand(
+                    argv[1],
+                    args,
+                    output,
+                    status)) {
+                throw std::runtime_error(
+                    "could not launch rate-aware dynamic renderer");
+            }
+
+            if (status != 0) {
+                std::cerr << output;
+                return 13;
+            }
+
+            if (output.find("MODE_USED=DYNAMIC") ==
+                    std::string::npos ||
+                output.find("POST_VALID=1") ==
+                    std::string::npos) {
+                std::cerr
+                    << "rate-aware dynamic render was not validated\n"
+                    << output;
+                return 14;
+            }
+
+            const double residual =
+                field(
+                    output,
+                    "POST_DELAY_SAMPLES");
+
+            if (!std::isfinite(residual) ||
+                std::abs(residual) > 2.0) {
+                std::cerr
+                    << "rate-aware dynamic residual too large: "
+                    << residual << " samples\n"
+                    << output;
+                return 15;
+            }
+
+            if (!std::filesystem::exists(
+                    rateCorrectedPath)) {
+                std::cerr
+                    << "rate-aware dynamic renderer did not create output WAV\n";
+                return 16;
+            }
+        }
+
         std::filesystem::remove_all(base, ec);
         return 0;
 
