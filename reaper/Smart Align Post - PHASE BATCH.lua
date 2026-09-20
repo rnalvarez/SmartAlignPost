@@ -1012,6 +1012,7 @@ local function apply_all()
   local failures = 0
   local dynamicCount = 0
   local staticCount = 0
+  local applyErrors = {}
 
   for _, job in ipairs(jobs) do
     local dynamicReady =
@@ -1040,6 +1041,12 @@ local function apply_all()
       if not ok and applyError then
         job.error = applyError
         job.status = "APPLY ERROR"
+        applyErrors[#applyErrors + 1] =
+          string.format(
+            "%s / %s: %s",
+            master_scene_label(job.masterItem),
+            track_label(job.sourceTrack),
+            applyError)
       end
 
       if ok then
@@ -1066,10 +1073,14 @@ local function apply_all()
   applied = true
 
   if failures > 0 then
+    local detail =
+      #applyErrors > 0 and
+      (" · " .. table.concat(applyErrors, " | ")) or
+      ""
     set_status(
       string.format(
-        "APPLY parcial · %d aplicados · %d omitidos · %d errores. Undo disponible.",
-        appliedCount, skipped, failures),
+        "APPLY parcial · %d aplicados · %d omitidos · %d errores%s. Undo disponible.",
+        appliedCount, skipped, failures, detail),
       "error")
   else
     set_status(
