@@ -795,7 +795,11 @@ local function find_existing_fx(take)
       reaper.TakeFX_GetFXName(
         take, i, "")
 
-    if ok and name == FX_NAME then
+    if ok and (
+        name == FX_NAME or
+        name:find(FX_NAME, 1, true) or
+        name:find("Smart Align Post", 1, true)
+      ) then
       return i
     end
   end
@@ -1023,6 +1027,8 @@ local function run_analysis(items)
             write_metadata(job)
           else
             job.status = "FX ERROR"
+            job.error =
+              "No se pudo cargar el Take FX residual."
             write_metadata(job)
             counts.errors =
               counts.errors + 1
@@ -1049,14 +1055,23 @@ local function run_analysis(items)
         "Smart Align Post — Residual Scan / Item FX",
         -1)
 
+      local firstError = ""
+      for _, job in ipairs(jobs) do
+        if job.status == "FX ERROR" and job.error then
+          firstError = " · " .. job.error
+          break
+        end
+      end
+
       set_status(
         string.format(
-          "RESIDUAL COMPLETO · %d alineados · %d FX insertados · %d baja conf · %d revisión · %d errores",
+          "RESIDUAL COMPLETO · %d alineados · %d FX insertados · %d baja conf · %d revisión · %d errores%s",
           counts.aligned,
           counts.injected,
           counts.low,
           counts.review,
-          counts.errors),
+          counts.errors,
+          firstError),
         counts.errors > 0 and
         "warn" or
         "ok")
