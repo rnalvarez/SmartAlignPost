@@ -33,6 +33,7 @@ local analyzing = false
 local analyzingIndex = 0
 local applied = false
 local mouseDown = false
+local dynamicRenderSerial = 0
 local draw_ui
 
 local function script_dir()
@@ -539,23 +540,6 @@ local function applyDynamic(job)
     return false, "curva insuficiente"
   end
 
-  local oldMarkers =
-    reaper.GetTakeNumStretchMarkers(take)
-
-  if oldMarkers and oldMarkers > 0 then
-    reaper.DeleteTakeStretchMarkers(
-      take, 0, oldMarkers)
-  end
-
-  -- DYNAMIC is a phase-alignment operation, not a musical time-stretch.
-  -- REAPER stretch markers follow D_PLAYRATE pitch behavior: with preserve
-  -- pitch disabled they operate as varispeed. That keeps the waveform phase
-  -- relationship coherent with the MASTER; preserving pitch can use a
-  -- time-stretch algorithm that changes the waveform phase even when timing
-  -- is corrected.
-  reaper.SetMediaItemTakeInfo_Value(
-    take, "B_PPITCH", 0)
-
   local itemPos =
     reaper.GetMediaItemInfo_Value(
       job.sourceItem, "D_POSITION")
@@ -564,223 +548,197 @@ local function applyDynamic(job)
     reaper.GetMediaItemInfo_Value(
       job.sourceItem, "D_LENGTH")
 
-  local rate =
-    reaper.GetMediaItemTakeInfo_Value(
-      take, "D_PLAYRATE")
+  local masterPos =
+    reaper.GetMediaItemInfo_Value(
+      job.masterItem, "D_POSITION")
 
-  local offs =
-    reaper.GetMediaItemTakeInfo_Value(
-      take, "D_STARTOFFS")
+  local sourcePos =
+    reaper.GetMediaItemInfo_Value(
+      job.sourceItem, "D_POSITION")
 
-  if rate <= 0 or itemLen <= 0 then
-    return false, "item inválido"
+  local masterTake = job.masterTake
+  local sourceTake = job.sourceTake
+
+  local masterOffs =
+    reaper.GetMediaItemTakeInfo_Value(
+      masterTake, "D_STARTOFFS")
+
+  local sourceOffs =
+    reaper.GetMediaItemTakeInfo_Value(
+      sourceTake, "D_STARTOFFS")
+
+  local masterRate =
+    reaper.GetMediaItemTakeInfo_Value(
+      masterTake, "D_PLAYRATE")
+
+  local sourceRate =
+    reaper.GetMediaItemTakeInfo_Value(
+      sourceTake, "D_PLAYRATE")
+
+  if masterRate <= 0 or sourceRate <= 0 or itemLen <= 0 then
+    return false, "parámetros de item/playrate inválidos"
   end
+
+  -- Direct sample-domain correction needs MASTER coverage for the complete
+  -- SOURCE item. We deliberately fail rather than applying an unvalidated
+  -- correction outside the measured overlap.
+  if job.commonStart > itemPos + 1e-6 or
+     job.commonEnd < itemPos + itemLen - 1e-6 then
+    return false,
+      "DYNAMIC directo requiere que MASTER cubra todo el SOURCE"
+  end
+
+  local masterStart =
+    masterOffs +
+    (itemPos - masterPos) * masterRate
+
+  local sourceStart =
+    sourceOffs +
+    (itemPos - sourcePos) * sourceRate
+
+  local exe = script_dir() .. "\\" .. EXE_NAME
+  if reaper.file_exists and not reaper.file_exists(exe) then
+    return false, "No se encontró " .. EXE_NAME
+  end
+
+  local outDir =
+    reaper.GetResourcePath() ..
+    "\\SmartAlignPost_Dynamic"
+
+  if reaper.RecursiveCreateDirectory then
+    reaper.RecursiveCreateDirectory(outDir, 0)
+  end
+
+  dynamicRenderSerial = dynamicRenderSerial + 1
+
+  local outputPath =
+    outDir ..
+    "\\SAP_Dynamic_" ..
+    tostring(os.time()) ..
+    "_" ..
+    tostring(dynamicRenderSerial) ..
+    ".wav"
+
+  local cmd =
+    quote(exe) .. " " ..
+    quote(job.masterPath) .. " " ..
+    quote(job.sourcePath) .. " " ..
+    string.format(
+      "\"%.9f\" \"%.9f\" \"%.6f\" \"%.9f\" \"%.9f\" DYNAMIC_RENDER %s",
+      masterStart,
+      sourceStart,
+      itemLen,
+      masterRate,
+      sourceRate,
+      quote(outputPath))
+
+  set_status(
+    "Renderizando DYNAMIC sample-accurate · " ..
+    track_label(job.sourceTrack),
+    "info")
+
+  draw_ui()
+  gfx.update()
+
+  local processResult =
+    reaper.ExecProcess(cmd, 120000)
+
+  if not processResult then
+    return false, "ExecProcess falló en DYNAMIC_RENDER"
+  end
+
+  processResult =
+    processResult:gsub("\r\n", "\n"):gsub("\r", "\n")
+
+  local firstNl =
+    processResult:find("\n", 1, true)
+
+  local code = nil
+  local output = processResult
+
+  if firstNl then
+    code = tonumber(
+      processResult:sub(1, firstNl - 1))
+
+    if code ~= nil then
+      output =
+        processResult:sub(firstNl + 1)
+    end
+  end
+
+  if output:sub(1, 6) == "ERROR=" then
+    return false,
+      output:match("^ERROR=(.*)") or output
+  end
+
+  if code ~= nil and code ~= 0 then
+    local validation =
+      output:match("POST_DELAY_MS=([%+%-]?[%d%.eE]+)")
+        or "n/a"
+
+    return false,
+      "DYNAMIC no validado · residual " ..
+      validation .. " ms"
+  end
+
+  local postValid =
+    output:match("POST_VALID=([01])")
+
+  local outputWav =
+    output:match("OUTPUT_WAV=(.-)\n")
+
+  if not outputWav or postValid ~= "1" then
+    local residual =
+      output:match("POST_DELAY_MS=([%+%-]?[%d%.eE]+)")
+        or "n/a"
+
+    return false,
+      "DYNAMIC no validado · residual " ..
+      residual .. " ms"
+  end
+
+  local newSource =
+    reaper.PCM_Source_CreateFromFile(
+      outputWav)
+
+  if not newSource then
+    return false,
+      "REAPER no pudo abrir el WAV corregido"
+  end
+
+  if not reaper.SetMediaItemTake_Source(
+      take,
+      newSource) then
+    return false,
+      "No se pudo reemplazar el SOURCE del take"
+  end
+
+  reaper.SetMediaItemTakeInfo_Value(
+    take, "D_STARTOFFS", 0.0)
 
   reaper.SetMediaItemTakeInfo_Value(
     take, "D_PLAYRATE", 1.0)
 
-  local lastItemPos = -1e30
-  local lastSourcePos = -1e30
-  local inserted = 0
+  reaper.SetMediaItemTakeInfo_Value(
+    take, "B_PPITCH", 0)
 
-  local function sourcePosFor(itemTime, delayMs)
-    return offs + rate * (
-      itemTime + delayMs / 1000.0)
-  end
+  reaper.UpdateItemInProject(
+    job.sourceItem)
 
-  -- The first/last measured anchors normally sit inside the common overlap.
-  -- Extrapolate only a short distance to the item boundaries; do not hold a
-  -- potentially stale interior delay over a long unmeasured region.
-  local function delayAtProjectTime(projectTime)
-    local t = projectTime - job.commonStart
-    local points = job.curve
-    if #points == 0 then
-      return job.delayMs or 0.0
-    end
-    if #points == 1 then
-      return points[1].delayMs
-    end
+  job.postValid = true
+  job.postDelayMs =
+    tonumber(
+      output:match(
+        "POST_DELAY_MS=([%+%-]?[%d%.eE]+)")) or 0.0
 
-    local first = points[1]
-    local second = points[2]
-    local penult = points[#points - 1]
-    local last = points[#points]
+  job.postConfidence =
+    tonumber(
+      output:match(
+        "POST_CONFIDENCE=([%+%-]?[%d%.eE]+)")) or 0.0
 
-    local edgeHorizon = 0.75
-    if t <= first.time then
-      if first.time - t <= edgeHorizon and
-         second.time > first.time + 1e-9 then
-        local u = (t - first.time) /
-                  (second.time - first.time)
-        return first.delayMs +
-               (second.delayMs - first.delayMs) * u
-      end
-      return first.delayMs
-    end
+  job.outputWav = outputWav
 
-    if t >= last.time then
-      if t - last.time <= edgeHorizon and
-         last.time > penult.time + 1e-9 then
-        local u = (t - last.time) /
-                  (last.time - penult.time)
-        return last.delayMs +
-               (last.delayMs - penult.delayMs) * u
-      end
-      return last.delayMs
-    end
-
-    for i = 1, #points - 1 do
-      local a = points[i]
-      local b = points[i + 1]
-      if t >= a.time and t <= b.time then
-        local u = (t - a.time) /
-                  math.max(1e-9, b.time - a.time)
-        return a.delayMs +
-               (b.delayMs - a.delayMs) * u
-      end
-    end
-
-    return last.delayMs
-  end
-
-  local function addMarker(itemTime, delayMs)
-    itemTime =
-      math.max(0.0,
-        math.min(itemLen, itemTime))
-
-    local src =
-      sourcePosFor(itemTime, delayMs)
-
-    if itemTime <= lastItemPos + 1e-7 then
-      return true
-    end
-
-    if src <= lastSourcePos + 1e-7 then
-      src = lastSourcePos + 1e-7
-    end
-
-    local idx =
-      reaper.SetTakeStretchMarker(
-        take, -1, itemTime, src)
-
-    if idx < 0 then
-      return false
-    end
-
-    lastItemPos = itemTime
-    lastSourcePos = src
-    inserted = inserted + 1
-
-    return true
-  end
-
-  -- The measured curve contains sparse phase estimates. Applying those points
-  -- directly creates a piecewise-constant playback rate between markers.
-  -- For phase alignment this is unnecessarily coarse: a moving mic produces a
-  -- continuous delay trajectory. Build a dense time-warp over the entire item
-  -- from the measured curve, then let REAPER approximate that trajectory with
-  -- short linear stretch-marker segments.
-  -- Interpolate the measured delay trajectory with cubic Hermite segments.
-  -- This makes the instantaneous correction rate vary continuously instead of
-  -- resetting to a constant value at every measured anchor.
-  local function smoothDelayAtItemTime(itemTime)
-    local projectTime = itemPos + itemTime
-    local t = projectTime - job.commonStart
-    local points = job.curve
-
-    if #points < 2 then
-      return delayAtProjectTime(projectTime)
-    end
-
-    if t <= points[1].time or
-       t >= points[#points].time then
-      return delayAtProjectTime(projectTime)
-    end
-
-    local seg = 1
-    for i = 1, #points - 1 do
-      if t >= points[i].time and
-         t <= points[i + 1].time then
-        seg = i
-        break
-      end
-    end
-
-    local a = points[seg]
-    local b = points[seg + 1]
-    local dt = math.max(1e-9, b.time - a.time)
-    local u = math.max(0.0, math.min(1.0, (t - a.time) / dt))
-
-    local mA
-    if seg == 1 then
-      mA = (b.delayMs - a.delayMs) / dt
-    else
-      local prev = points[seg - 1]
-      mA = (b.delayMs - prev.delayMs) /
-           math.max(1e-9, b.time - prev.time)
-    end
-
-    local mB
-    if seg + 1 == #points then
-      mB = (b.delayMs - a.delayMs) / dt
-    else
-      local next = points[seg + 2]
-      mB = (next.delayMs - a.delayMs) /
-           math.max(1e-9, next.time - a.time)
-    end
-
-    local u2 = u * u
-    local u3 = u2 * u
-
-    local h00 =  2.0 * u3 - 3.0 * u2 + 1.0
-    local h10 =       u3 - 2.0 * u2 + u
-    local h01 = -2.0 * u3 + 3.0 * u2
-    local h11 =       u3 -       u2
-
-    local value =
-      h00 * a.delayMs +
-      h10 * dt * mA +
-      h01 * b.delayMs +
-      h11 * dt * mB
-
-    -- Prevent interpolation overshoot from creating a false phase excursion
-    -- beyond the measured anchors.
-    local lo = math.min(a.delayMs, b.delayMs)
-    local hi = math.max(a.delayMs, b.delayMs)
-
-    return math.max(lo, math.min(hi, value))
-  end
-
-  -- A dense marker grid converts the smooth delay trajectory to a close
-  -- piecewise-linear approximation that REAPER can reproduce reliably.
-  local denseStep =
-    math.max(
-      0.015,
-      math.min(
-        0.040,
-        itemLen / 600.0))
-
-  local t = 0.0
-  while t < itemLen - 1e-6 do
-    if not addMarker(
-        t,
-        smoothDelayAtItemTime(t)) then
-      return false, "falló marker de warp"
-    end
-
-    t = t + denseStep
-  end
-
-  local lastDelay =
-    delayAtItemTime(itemLen)
-  if not addMarker(
-      itemLen, lastDelay) then
-    return false, "falló marker final"
-  end
-
-  reaper.UpdateItemInProject(job.sourceItem)
-
-  return inserted >= 2
+  return true
 end
 
 local function apply_all()
@@ -868,7 +826,14 @@ local function apply_all()
 
       if ok then
         appliedCount = appliedCount + 1
-        job.status = "APPLIED"
+        if job.modeUsed == "DYNAMIC" and job.postValid then
+          job.status =
+            string.format(
+              "APPLIED · residual %.3f ms",
+              job.postDelayMs or 0.0)
+        else
+          job.status = "APPLIED"
+        end
       else
         failures = failures + 1
       end
