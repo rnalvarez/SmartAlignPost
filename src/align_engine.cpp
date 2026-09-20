@@ -627,21 +627,10 @@ Result AlignEngine::analyze(
 
     if (knownRateDrift && settings.mode != Mode::Static) {
         // D_PLAYRATE changes the project-time trajectory, not the acoustic
-        // offset already contained in the native WAV recordings. Run the same
-        // STATIC estimator once in native sample time, then convert that
-        // fixed acoustic delay into project time and apply the deterministic
+        // offset already contained in the native WAV recordings. Estimate the
+        // native acoustic delay from several energetic windows near the start,
+        // then convert that fixed delay into project time and apply the known
         // rate slope.
-        Settings nativeSettings = settings;
-        nativeSettings.mode = Mode::Static;
-        nativeSettings.playbackRateRatio = 1.0;
-        nativeSettings.hasInitialDelaySamples = false;
-
-        const Result nativeResult =
-            AlignEngine::analyze(
-                master,
-                source,
-                nativeSettings);
-
         const auto timeline = selectTimelineAnchors(
             master,
             source,
@@ -658,51 +647,136 @@ Result AlignEngine::analyze(
                     settings.maxDynamicAnchors,
                     32)));
 
-        if (timeline.size() >= 2 &&
-            std::isfinite(nativeResult.staticDelaySamples) &&
-            nativeResult.staticConfidence >=
-                std::max(0.45, settings.minConfidence * 0.60)) {
-
+        if (timeline.size() >= 2) {
             const double slopePerSec =
                 (1.0 / settings.playbackRateRatio - 1.0) *
                 settings.sampleRate;
 
-            const double anchorAtZero =
-                nativeResult.staticDelaySamples /
-                std::max(
-                    1.0e-12,
-                    settings.playbackRateRatio);
+            const std::size_t nativeWindow =
+                std::clamp<std::size_t>(
+                    static_cast<std::size_t>(
+                        std::llround(
+                            60.0 * settings.sampleRate / 1000.0)),
+                    1024,
+                    4096);
 
-            result.staticDelaySamples =
-                anchorAtZero;
-            result.staticCorrelation =
-                nativeResult.staticCorrelation;
-            result.staticConfidence =
-                nativeResult.staticConfidence;
+            const std::size_t half =
+                nativeWindow / 2;
 
-            result.curve.clear();
+            struct RateAnchorCandidate {
+                std::size_t center = 0;
+                double energy = 0.0;
+            };
 
-            for (const auto& anchor : timeline) {
-                const double t =
-                    static_cast<double>(anchor.center) /
-                    settings.sampleRate;
+            std::vector<RateAnchorCandidate> candidates;
 
-                Point p;
-                p.timeSec = t;
-                p.delaySamples =
-                    anchorAtZero +
-                    t * slopePerSec;
-                p.confidence =
-                    std::max(result.staticConfidence, 0.50);
-                p.keyPoint = true;
-                p.phatDelaySamples = p.delaySamples;
-                p.waveformDelaySamples = p.delaySamples;
-                p.phaseAgreement = 1.0;
-                result.curve.push_back(p);
+            const double searchSeconds =
+                std::min(
+                    1.0,
+                    static_cast<double>(
+                        std::min(master.size(), source.size())) /
+                    settings.sampleRate);
+
+            const std::size_t candidateCount =
+                std::max<std::size_t>(
+                    1,
+                    static_cast<std::size_t>(
+                        std::floor(searchSeconds / 0.10)));
+
+            for (std::size_t i = 0; i < candidateCount; ++i) {
+                const std::size_t center =
+                    half +
+                    static_cast<std::size_t>(
+                        std::llround(
+                            i * 0.10 * settings.sampleRate));
+
+                if (center + half >= master.size() ||
+                    center + half >= source.size())
+                    break;
+
+                candidates.push_back({
+                    center,
+                    rmsAround(master, center, half)
+                });
             }
 
-            result.modeUsed = Mode::Dynamic;
-            return result;
+            std::sort(
+                candidates.begin(),
+                candidates.end(),
+                [](const auto& a, const auto& b) {
+                    return a.energy > b.energy;
+                });
+
+            Measurement bestMeasurement;
+            bool haveBestMeasurement = false;
+
+            const std::size_t candidateLimit =
+                std::min<std::size_t>(candidates.size(), 5);
+
+            for (std::size_t i = 0;
+                 i < candidateLimit;
+                 ++i) {
+                const auto& candidate = candidates[i];
+
+                const Measurement m = measurePhase(
+                    master,
+                    source,
+                    candidate.center,
+                    nativeWindow,
+                    0.0,
+                    -static_cast<double>(maxLag),
+                    static_cast<double>(maxLag),
+                    settings.sampleRate);
+
+                if (m.confidence <
+                    std::max(0.45, settings.minConfidence * 0.60))
+                    continue;
+
+                if (!haveBestMeasurement ||
+                    m.confidence > bestMeasurement.confidence) {
+                    bestMeasurement = m;
+                    haveBestMeasurement = true;
+                }
+            }
+
+            if (haveBestMeasurement) {
+                const double anchorAtZero =
+                    bestMeasurement.finalDelay /
+                    std::max(
+                        1.0e-12,
+                        settings.playbackRateRatio);
+
+                result.staticDelaySamples =
+                    anchorAtZero;
+                result.staticCorrelation =
+                    bestMeasurement.correlation;
+                result.staticConfidence =
+                    bestMeasurement.confidence;
+
+                result.curve.clear();
+
+                for (const auto& anchor : timeline) {
+                    const double t =
+                        static_cast<double>(anchor.center) /
+                        settings.sampleRate;
+
+                    Point p;
+                    p.timeSec = t;
+                    p.delaySamples =
+                        anchorAtZero +
+                        t * slopePerSec;
+                    p.confidence =
+                        std::max(result.staticConfidence, 0.50);
+                    p.keyPoint = true;
+                    p.phatDelaySamples = p.delaySamples;
+                    p.waveformDelaySamples = p.delaySamples;
+                    p.phaseAgreement = 1.0;
+                    result.curve.push_back(p);
+                }
+
+                result.modeUsed = Mode::Dynamic;
+                return result;
+            }
         }
     }
 
