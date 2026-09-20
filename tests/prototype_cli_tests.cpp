@@ -547,7 +547,7 @@ int main(int argc, char** argv)
         // trajectory, preventing the renderer from silently re-analyzing a
         // different scene/overlap and producing a different correction.
         {
-            const curvePath =
+            const auto curvePath =
                 base / "scene_curve.csv";
 
             {
@@ -583,8 +583,8 @@ int main(int argc, char** argv)
                 shellQuote(masterPath.string()) + " " +
                 shellQuote(dynamicSourcePath.string()) +
                 " 0 0 12 1 1 DYNAMIC_RENDER " +
-                shellQuote(curveCorrectedPath) + " " +
-                shellQuote(curvePath);
+                shellQuote(curveCorrectedPath.string()) + " " +
+                shellQuote(curvePath.string());
 
             if (!runCommand(
                     argv[1],
