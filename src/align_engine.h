@@ -54,6 +54,7 @@ struct Result {
     double scoutLastDelaySamples = 0.0;
     double scoutR2 = 0.0;
     double scoutDirectionConsistency = 0.0;
+    double scoutRobustShiftSamples = 0.0;
     bool scoutCoherent = false;
     std::vector<Point> curve;
     Mode modeUsed = Mode::Static;
