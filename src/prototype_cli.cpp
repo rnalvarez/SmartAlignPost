@@ -678,7 +678,7 @@ int main(int argc, char** argv)
     bool renderDynamic = false;
     std::string outputWav;
 
-    if (argc == 9) {
+    if (argc == 9 || argc == 10) {
         if (!parseDouble(argv[3], "MASTER_START_SEC", masterStart, error) ||
             !parseDouble(argv[4], "SOURCE_START_SEC", sourceStart, error) ||
             !parseDouble(argv[5], "DURATION_SEC", duration, error) ||
@@ -696,26 +696,36 @@ int main(int argc, char** argv)
         }
 
         const std::string mode = argv[8];
-        if (mode == "STATIC")
-            requestedMode = sap::Mode::Static;
-        else if (mode == "DYNAMIC")
-            requestedMode = sap::Mode::Dynamic;
-        else if (mode == "AUTO")
-            requestedMode = sap::Mode::Auto;
-        else if (mode == "DYNAMIC_RENDER")
-        {
+
+        if (mode == "DYNAMIC_RENDER") {
             if (argc != 10) {
                 std::cout
                     << "ERROR=DYNAMIC_RENDER requiere OUTPUT_WAV.\n";
                 return 6;
             }
+
             requestedMode = sap::Mode::Dynamic;
             renderDynamic = true;
             outputWav = argv[9];
         }
         else {
-            std::cout << "ERROR=MODE debe ser STATIC, DYNAMIC o AUTO.\n";
-            return 6;
+            if (argc != 9) {
+                std::cout
+                    << "ERROR=OUTPUT_WAV solo es válido con DYNAMIC_RENDER.\n";
+                return 6;
+            }
+
+            if (mode == "STATIC")
+                requestedMode = sap::Mode::Static;
+            else if (mode == "DYNAMIC")
+                requestedMode = sap::Mode::Dynamic;
+            else if (mode == "AUTO")
+                requestedMode = sap::Mode::Auto;
+            else {
+                std::cout
+                    << "ERROR=MODE debe ser STATIC, DYNAMIC, AUTO o DYNAMIC_RENDER.\n";
+                return 6;
+            }
         }
     }
 
