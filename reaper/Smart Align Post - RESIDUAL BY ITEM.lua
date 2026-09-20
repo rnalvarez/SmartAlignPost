@@ -820,12 +820,12 @@ local function inject_residual_fx(job)
     find_existing_fx(take)
 
   if fxIndex < 0 then
-    -- ReaScript's TakeFX_AddByName search is name based. Use the explicit
-    -- VST3 form first, then the plain factory name as a compatibility
-    -- fallback across REAPER installations.
+    -- Force creation of the residual VST3 if it is not already present.
+    -- REAPER accepts the explicit VST3 prefix for named FX insertion.
     local candidates = {
-      "VST3: " .. FX_NAME,
-      FX_NAME
+      "VST3: Smart Align Post Residual",
+      "VST3:Smart Align Post Residual",
+      "Smart Align Post Residual"
     }
 
     for _, candidate in ipairs(candidates) do
@@ -833,7 +833,7 @@ local function inject_residual_fx(job)
         reaper.TakeFX_AddByName(
           take,
           candidate,
-          1)
+          -1)
 
       if candidateIndex and candidateIndex >= 0 then
         fxIndex = candidateIndex
@@ -844,9 +844,32 @@ local function inject_residual_fx(job)
 
   if not fxIndex or fxIndex < 0 then
     return false,
-      "No se pudo insertar " ..
-      FX_NAME ..
-      " como Take FX. Verificá que el VST3 esté instalado y visible para REAPER."
+      "REAPER no pudo insertar 'Smart Align Post Residual' como Take FX. " ..
+      "Verificá que el VST3 residual esté instalado y que REAPER lo vea."
+  end
+
+  local okName, actualName =
+    reaper.TakeFX_GetFXName(
+      take,
+      fxIndex,
+      "")
+
+  local paramCount =
+    reaper.TakeFX_GetNumParams(
+      take,
+      fxIndex)
+
+  if not okName then
+    actualName = "desconocido"
+  end
+
+  if paramCount < 2 then
+    return false,
+      "El FX insertado no es el Smart Align Post Residual esperado: '" ..
+      tostring(actualName) ..
+      "' (" ..
+      tostring(paramCount) ..
+      " parámetros)."
   end
 
   local normalized =
@@ -861,37 +884,52 @@ local function inject_residual_fx(job)
         1.0,
         normalized))
 
-  -- Parameter 0 = Residual Samples.
-  -- Parameter 1 = Apply Residual.
+  -- VST3 parameters are addressed through REAPER's normalized API.
   local okResidual =
-    reaper.TakeFX_SetParam(
+    reaper.TakeFX_SetParamNormalized(
       take,
       fxIndex,
       0,
       normalized)
 
   local okApply =
-    reaper.TakeFX_SetParam(
+    reaper.TakeFX_SetParamNormalized(
       take,
       fxIndex,
       1,
       1.0)
 
-  if reaper.TakeFX_SetEnabled then
-    reaper.TakeFX_SetEnabled(
-      take,
-      fxIndex,
-      true)
-  end
-
   if not okResidual or not okApply then
     return false,
-      "El VST3 fue insertado, pero no se pudieron cargar sus parámetros residuales."
+      "El VST3 '" ..
+      tostring(actualName) ..
+      "' fue insertado, pero REAPER rechazó uno de sus parámetros."
   end
 
-  -- REAPER may automatically open the FX UI when an FX is inserted through
-  -- the quick-add path. Residual processing is batch-driven, so the windows
-  -- must remain closed; the FX stays instantiated and active on the Take.
+  local storedResidual =
+    reaper.TakeFX_GetParamNormalized(
+      take,
+      fxIndex,
+      0)
+
+  local storedApply =
+    reaper.TakeFX_GetParamNormalized(
+      take,
+      fxIndex,
+      1)
+
+  if math.abs(
+      (storedResidual or 0.0) -
+      normalized) > 0.0005 or
+     (storedApply or 0.0) < 0.5 then
+    return false,
+      string.format(
+        "El VST3 fue insertado pero no conservó los parámetros (residual %.6f/%.6f, apply %.6f).",
+        storedResidual or -1.0,
+        normalized,
+        storedApply or -1.0)
+  end
+
   if reaper.TakeFX_SetOpen then
     reaper.TakeFX_SetOpen(
       take,
@@ -900,7 +938,6 @@ local function inject_residual_fx(job)
   end
 
   if reaper.TakeFX_Show then
-    -- showFlag=2 hides a floating Take FX window without removing the FX.
     reaper.TakeFX_Show(
       take,
       fxIndex,
