@@ -713,79 +713,85 @@ local function correctionSeconds(job)
   return (job.delayMs or 0.0) / 1000.0
 end
 
-local function applyStatic(job)
+local function apply_static_correction(job, delayMs)
   local take = job.sourceTake
-  if not take then return false, "sin take" end
+  if not take then
+    return false, "sin take"
+  end
 
   local rate =
-    reaper.GetMediaItemTakeInfo_Value(take, "D_PLAYRATE")
+    reaper.GetMediaItemTakeInfo_Value(
+      take, "D_PLAYRATE")
 
   if rate <= 0 then
     return false, "PLAYRATE inválido"
   end
 
   local offs =
-    reaper.GetMediaItemTakeInfo_Value(take, "D_STARTOFFS")
-
-  -- Positive delay means SOURCE arrives later. Moving D_STARTOFFS forward
-  -- advances its media under the fixed timeline item without changing
-  -- D_POSITION.
-  local correction =
-    correctionSeconds(job) * rate
-
-  local target =
-    offs + correction
-
-  reaper.SetMediaItemTakeInfo_Value(
-    take, "D_STARTOFFS", target)
-
-  reaper.UpdateItemInProject(job.sourceItem)
-
-  local appliedOffs =
     reaper.GetMediaItemTakeInfo_Value(
       take, "D_STARTOFFS")
 
-  -- Some media/take combinations cannot represent a negative source offset.
-  -- Detect that explicitly instead of treating the operation as successful.
-  if math.abs(appliedOffs - target) > 1e-9 then
+  local correctionSec =
+    (delayMs or 0.0) / 1000.0
+
+  local targetOffs =
+    offs + correctionSec * rate
+
+  -- Normal STATIC path: adjust the media source offset while preserving
+  -- the editorial item position.
+  if targetOffs >= -1.0e-9 then
     reaper.SetMediaItemTakeInfo_Value(
       take,
       "D_STARTOFFS",
-      offs)
+      targetOffs)
 
     reaper.UpdateItemInProject(
       job.sourceItem)
 
-    -- Preserve the requested acoustic correction without changing the
-    -- source offset beyond the valid source range. Moving the ITEM itself is
-    -- only the fallback for the unrepresentable negative-offset edge case.
-    if target < 0.0 then
-      local itemPos =
-        reaper.GetMediaItemInfo_Value(
-          job.sourceItem, "D_POSITION")
+    local appliedOffs =
+      reaper.GetMediaItemTakeInfo_Value(
+        take, "D_STARTOFFS")
 
-      local remainingCorrection =
-        target - appliedOffs
-
-      reaper.SetMediaItemPosition(
-        job.sourceItem,
-        itemPos - remainingCorrection,
-        true)
-
-      reaper.UpdateItemInProject(
-        job.sourceItem)
-
+    if math.abs(appliedOffs - targetOffs) <= 1.0e-9 then
       return true
     end
-
-    return false,
-      string.format(
-        "REAPER no aceptó D_STARTOFFS %.6f s (quedó %.6f s).",
-        target,
-        appliedOffs)
   end
 
+  -- Edge case that matters for the BOOM/LAV onset test:
+  -- SOURCE starts at sample 0 and arrives early, so correcting it by
+  -- decreasing D_STARTOFFS would require a negative source offset.
+  -- In that situation the only physically valid non-rendered correction is
+  -- to move the SOURCE ITEM later by exactly -delay.
+  reaper.SetMediaItemTakeInfo_Value(
+    take,
+    "D_STARTOFFS",
+    offs)
+
+  reaper.UpdateItemInProject(
+    job.sourceItem)
+
+  local itemPos =
+    reaper.GetMediaItemInfo_Value(
+      job.sourceItem, "D_POSITION")
+
+  reaper.SetMediaItemPosition(
+    job.sourceItem,
+    itemPos - correctionSec,
+    true)
+
+  reaper.UpdateItemInProject(
+    job.sourceItem)
+
+  job.usedItemPositionFallback = true
+  job.appliedItemShiftSec = -correctionSec
+
   return true
+end
+
+local function applyStatic(job)
+  return apply_static_correction(
+    job,
+    job.delayMs or 0.0)
 end
 
 local function applyDynamic(job)
@@ -1346,8 +1352,35 @@ local function run_quick_residual(job)
     }
   end
 
+  local liveMasterPos =
+    reaper.GetMediaItemInfo_Value(
+      job.masterItem, "D_POSITION")
+  local liveMasterLen =
+    reaper.GetMediaItemInfo_Value(
+      job.masterItem, "D_LENGTH")
+  local liveSourcePos =
+    reaper.GetMediaItemInfo_Value(
+      job.sourceItem, "D_POSITION")
+  local liveSourceLen =
+    reaper.GetMediaItemInfo_Value(
+      job.sourceItem, "D_LENGTH")
+
+  local liveCommonStart =
+    math.max(
+      liveMasterPos,
+      liveSourcePos)
+  local liveCommonEnd =
+    math.min(
+      liveMasterPos + liveMasterLen,
+      liveSourcePos + liveSourceLen)
+
   local overlapDuration =
-    job.commonEnd - job.commonStart
+    liveCommonEnd - liveCommonStart
+
+  job.residualCommonStart =
+    liveCommonStart
+  job.residualCommonEnd =
+    liveCommonEnd
 
   if overlapDuration < 0.5 then
     return {
@@ -1378,15 +1411,15 @@ local function run_quick_residual(job)
 
   for index, fraction in ipairs(RESIDUAL_CHECK_FRACTIONS) do
     local center =
-      job.commonStart +
+      liveCommonStart +
       overlapDuration * fraction
 
     local startTime =
       math.max(
-        job.commonStart,
+        liveCommonStart,
         math.min(
           center - windowSec * 0.5,
-          job.commonEnd - windowSec))
+          liveCommonEnd - windowSec))
 
     if startTime < job.commonStart then
       startTime = job.commonStart
@@ -1591,34 +1624,21 @@ local function apply_residual_direct(job, result)
     return false, "residual no elegible"
   end
 
-  local take = job.sourceTake
-  if not take then
-    return false, "sin take"
-  end
-
-  local rate =
+  local originalPos =
+    reaper.GetMediaItemInfo_Value(
+      job.sourceItem, "D_POSITION")
+  local originalOffs =
     reaper.GetMediaItemTakeInfo_Value(
-      take, "D_PLAYRATE")
+      job.sourceTake, "D_STARTOFFS")
 
-  if rate <= 0 then
-    return false, "PLAYRATE inválido"
+  local ok, applyError =
+    apply_static_correction(
+      job,
+      result.residualMs or 0.0)
+
+  if not ok then
+    return false, applyError
   end
-
-  local offs =
-    reaper.GetMediaItemTakeInfo_Value(
-      take, "D_STARTOFFS")
-
-  local target =
-    offs +
-    (result.residualMs / 1000.0) * rate
-
-  reaper.SetMediaItemTakeInfo_Value(
-    take,
-    "D_STARTOFFS",
-    target)
-
-  reaper.UpdateItemInProject(
-    job.sourceItem)
 
   local verification =
     run_quick_residual(job)
@@ -1630,9 +1650,14 @@ local function apply_residual_direct(job, result)
      RESIDUAL_POST_TOLERANCE_SAMPLES then
 
     reaper.SetMediaItemTakeInfo_Value(
-      take,
+      job.sourceTake,
       "D_STARTOFFS",
-      offs)
+      originalOffs)
+
+    reaper.SetMediaItemPosition(
+      job.sourceItem,
+      originalPos,
+      true)
 
     reaper.UpdateItemInProject(
       job.sourceItem)
