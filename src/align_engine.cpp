@@ -1445,6 +1445,85 @@ Result AlignEngine::analyze(
     staticDelays.reserve(
         staticAnchors.size());
 
+    const double seededDelay =
+        settings.hasInitialDelaySamples
+            ? settings.initialDelaySamples
+            : 0.0;
+
+    for (const auto& anchor : staticAnchors) {
+        const Measurement m =
+            measurePhase(
+                master,
+                source,
+                anchor.center,
+                window,
+                seededDelay,
+                -static_cast<double>(maxLag),
+                static_cast<double>(maxLag),
+                settings.sampleRate,
+                anchor.onsetDriven,
+                anchor.onsetSample);
+
+        if (m.confidence <
+            settings.minConfidence * 0.75)
+            continue;
+
+        staticDelays.push_back(
+            m.finalDelay);
+        staticCorrelations.push_back(
+            m.correlation);
+        staticConfidences.push_back(
+            m.confidence);
+    }
+
+    result.staticSupportWindows =
+        static_cast<int>(
+            staticDelays.size());
+
+    if (!staticDelays.empty()) {
+        result.staticDelaySamples =
+            median(staticDelays);
+
+        result.staticCorrelation =
+            median(staticCorrelations);
+
+        const double rawConfidence =
+            median(staticConfidences);
+
+        std::vector<double> deviation;
+        deviation.reserve(
+            staticDelays.size());
+
+        for (double d : staticDelays) {
+            deviation.push_back(
+                std::abs(
+                    d -
+                    result.staticDelaySamples));
+        }
+
+        result.staticDelayMADSamples =
+            median(deviation);
+
+        const double redundancy =
+            std::min(
+                1.0,
+                std::sqrt(
+                    static_cast<double>(
+                        result.staticSupportWindows) /
+                    4.0));
+
+        result.staticConfidence =
+            rawConfidence *
+            redundancy;
+
+        if (result.staticSupportWindows == 1) {
+            result.staticConfidence =
+                std::min(
+                    result.staticConfidence,
+                    0.35);
+        }
+    }
+
     if (settings.mode == Mode::Static) {
         result.modeUsed = Mode::Static;
         return result;
