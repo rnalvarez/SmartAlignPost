@@ -25,6 +25,7 @@
 local WIN_W, WIN_H = 1080, 650
 local MIN_CONFIDENCE = 0.72
 local EXE_NAME = "SmartAlignPostPrototype.exe"
+local REQUIRED_ENGINE_VERSION = "20260920-dynamic-render-2"
 
 -- Residual verification is intentionally cheap: three short STATIC
 -- measurements after APPLY. Only inconclusive cases pay for full analysis.
@@ -398,7 +399,8 @@ local function parse_output(output)
     delayMs = tonumber(output:match("DELAY_MS=([%+%-]?[%d%.]+)")) or 0.0,
     confidence = tonumber(output:match("CONFIDENCE=([%+%-]?[%d%.]+)")) or 0.0,
     analyzeMs = tonumber(output:match("ANALYZE_MS=([%+%-]?[%d%.]+)")) or 0.0,
-    curve = {}
+    curve = {},
+    scoutTelemetry = output:find("SCOUT_POINTS=", 1, true) ~= nil
   }
 
   for t, ms, samples, conf, key, phat, wave, agreement in
@@ -532,6 +534,21 @@ local function analyze_job(job)
     return
   end
 
+  if result.engineVersion ~= REQUIRED_ENGINE_VERSION then
+    job.status = "ERROR"
+    job.error = string.format(
+      "ENGINE_VERSION incompatible: %s · se requiere %s.",
+      result.engineVersion,
+      REQUIRED_ENGINE_VERSION)
+    return
+  end
+
+  if not result.scoutTelemetry then
+    job.status = "ERROR"
+    job.error = "El ejecutable no reportó telemetría SCOUT. Reemplazá SmartAlignPostPrototype.exe por el del último artefacto."
+    return
+  end
+
   job.engineVersion = result.engineVersion
   job.modeRequested = result.modeRequested
   job.modeEffective = result.modeEffective
@@ -619,12 +636,13 @@ local function run_analysis(items)
       local diagnostics = {}
       for _, job in ipairs(jobs) do
         diagnostics[#diagnostics + 1] = string.format(
-          "%s · %s: rate %.6f/%.6f ratio %.6f · scout %d %.2f→%.2f ms R² %.3f dir %.3f coh %s · %s→%s→%s",
+          "%s · %s: rate %.6f/%.6f ratio %.6f · conf %.3f · scout %d %.2f→%.2f ms R² %.3f dir %.3f robust %.2f ms coh %s · %s→%s→%s",
           master_scene_label(job.masterItem),
           track_label(job.sourceTrack),
           job.masterRate or 0.0,
           job.sourceRate or 0.0,
           job.rateRatio or 1.0,
+          job.confidence or 0.0,
           job.scoutPoints or 0,
           job.scoutFirstMs or 0.0,
           job.scoutLastMs or 0.0,
@@ -639,7 +657,8 @@ local function run_analysis(items)
 
       set_status(
         string.format(
-          "ANÁLISIS COMPLETO · %d/%d listos · %d DYNAMIC · %d con confidence < %.2f · %s",
+          "ANÁLISIS COMPLETO · ENGINE %s · %d/%d listos · %d DYNAMIC · %d con confidence < %.2f · %s",
+          (#jobs > 0 and jobs[1].engineVersion) or "?",
           ready, #jobs, dynamic, low, MIN_CONFIDENCE,
           table.concat(diagnostics, " | ")),
         low > 0 and "warn" or "ok")
