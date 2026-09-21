@@ -276,6 +276,21 @@ int main()
             return 8;
         }
 
+        if (r.scoutPoints < 4 ||
+            !r.scoutCoherent) {
+            std::cerr
+                << "AUTO drift scout failed: points="
+                << r.scoutPoints
+                << " coherent="
+                << (r.scoutCoherent ? 1 : 0)
+                << " R2="
+                << r.scoutR2
+                << " direction="
+                << r.scoutDirectionConsistency
+                << "\n";
+            return 16;
+        }
+
         const double first = r.curve.front().delaySamples;
         const double last = r.curve.back().delaySamples;
 
