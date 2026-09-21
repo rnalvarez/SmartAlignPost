@@ -43,6 +43,8 @@ local masterItem = nil
 local jobs = {}
 local analyzing = false
 local analyzingIndex = 0
+local applying = false
+local applyState = nil
 local applied = false
 local mouseDown = false
 local dynamicRenderSerial = 0
@@ -851,7 +853,7 @@ local function applyDynamic(job)
       quote(curvePath))
 
   set_status(
-    "Renderizando DYNAMIC sample-accurate · " ..
+    "APPLY DYNAMIC · renderizando sample-accurate · " ..
     track_label(job.sourceTrack) ..
     (extrapolatedEdges and " · bordes extrapolados" or ""),
     "info")
@@ -991,8 +993,142 @@ local function applyDynamic(job)
   return true
 end
 
+local function finalize_apply_phase()
+  local state = applyState
+  if not state then
+    applying = false
+    return
+  end
+
+  reaper.UpdateArrange()
+  reaper.Undo_EndBlock(
+    "Smart Align Post — Phase Batch Apply",
+    -1)
+
+  applying = false
+  applyState = nil
+  applied = true
+
+  if state.failures > 0 then
+    local detail =
+      #state.applyErrors > 0 and
+      (" · " .. table.concat(state.applyErrors, " | ")) or
+      ""
+    set_status(
+      string.format(
+        "APPLY parcial · %d aplicados · %d omitidos · %d errores%s. Undo disponible.",
+        state.appliedCount,
+        state.skipped,
+        state.failures,
+        detail),
+      "error")
+  else
+    set_status(
+      string.format(
+        "APPLY COMPLETO · %d STATIC · %d DYNAMIC · %d omitidos. MASTER y D_POSITION intactos.",
+        state.staticCount,
+        state.dynamicCount,
+        state.skipped),
+      "ok")
+  end
+
+  draw_ui()
+  gfx.update()
+
+  -- Give the UI one full REAPER cycle before starting RESIDUAL.
+  reaper.defer(function()
+    residual_pass()
+  end)
+end
+
+local function apply_all_phase_step()
+  local state = applyState
+  if not state or not applying then
+    return
+  end
+
+  if state.index > #jobs then
+    finalize_apply_phase()
+    return
+  end
+
+  local jobIndex = state.index
+  state.index = state.index + 1
+  local job = jobs[jobIndex]
+
+  local dynamicReady =
+    job.status == "READY" and
+    job.modeUsed == "DYNAMIC" and
+    #job.curve >= 2
+
+  local confidenceAccept =
+    job.confidence >= MIN_CONFIDENCE or
+    dynamicReady
+
+  set_status(
+    string.format(
+      "APPLY %d/%d · %s · %s",
+      jobIndex,
+      #jobs,
+      track_label(job.sourceTrack),
+      job.modeUsed or "—"),
+    "info")
+  draw_ui()
+  gfx.update()
+
+  if job.status ~= "READY" or not confidenceAccept then
+    state.skipped = state.skipped + 1
+  else
+    local ok = false
+    local applyError = nil
+
+    if job.modeUsed == "DYNAMIC" then
+      ok, applyError = applyDynamic(job)
+      if ok then
+        state.dynamicCount = state.dynamicCount + 1
+      end
+    else
+      ok, applyError = applyStatic(job)
+      if ok then
+        state.staticCount = state.staticCount + 1
+      end
+    end
+
+    if not ok and applyError then
+      job.error = applyError
+      job.status = "APPLY ERROR"
+      state.applyErrors[#state.applyErrors + 1] =
+        string.format(
+          "%s / %s: %s",
+          master_scene_label(job.masterItem),
+          track_label(job.sourceTrack),
+          applyError)
+    end
+
+    if ok then
+      state.appliedCount = state.appliedCount + 1
+      if job.modeUsed == "DYNAMIC" and job.postValid then
+        job.status =
+          string.format(
+            "APPLIED · residual %.3f ms",
+            job.postDelayMs or 0.0)
+      else
+        job.status = "APPLIED"
+      end
+    else
+      state.failures = state.failures + 1
+    end
+  end
+
+  draw_ui()
+  gfx.update()
+
+  -- Yield between every item so REAPER can repaint and process window events.
+  reaper.defer(apply_all_phase_step)
+end
+
 local function apply_all_phase()
-  if analyzing or #jobs == 0 then
+  if analyzing or applying or #jobs == 0 then
     set_status("Primero ANALYZE.", "warn")
     return
   end
@@ -1045,88 +1181,28 @@ local function apply_all_phase()
 
   reaper.Undo_BeginBlock()
 
-  local appliedCount = 0
-  local skipped = 0
-  local failures = 0
-  local dynamicCount = 0
-  local staticCount = 0
-  local applyErrors = {}
+  applyState = {
+    index = 1,
+    appliedCount = 0,
+    skipped = 0,
+    failures = 0,
+    dynamicCount = 0,
+    staticCount = 0,
+    applyErrors = {}
+  }
 
-  for _, job in ipairs(jobs) do
-    local dynamicReady =
-      job.status == "READY" and
-      job.modeUsed == "DYNAMIC" and
-      #job.curve >= 2
+  applied = false
+  applying = true
 
-    local confidenceAccept =
-      job.confidence >= MIN_CONFIDENCE or
-      dynamicReady
+  set_status(
+    string.format(
+      "APPLY INICIADO · %d jobs · preparando…",
+      #jobs),
+    "info")
+  draw_ui()
+  gfx.update()
 
-    if job.status ~= "READY" or not confidenceAccept then
-      skipped = skipped + 1
-    else
-      local ok = false
-      local applyError = nil
-
-      if job.modeUsed == "DYNAMIC" then
-        ok, applyError = applyDynamic(job)
-        if ok then dynamicCount = dynamicCount + 1 end
-      else
-        ok, applyError = applyStatic(job)
-        if ok then staticCount = staticCount + 1 end
-      end
-
-      if not ok and applyError then
-        job.error = applyError
-        job.status = "APPLY ERROR"
-        applyErrors[#applyErrors + 1] =
-          string.format(
-            "%s / %s: %s",
-            master_scene_label(job.masterItem),
-            track_label(job.sourceTrack),
-            applyError)
-      end
-
-      if ok then
-        appliedCount = appliedCount + 1
-        if job.modeUsed == "DYNAMIC" and job.postValid then
-          job.status =
-            string.format(
-              "APPLIED · residual %.3f ms",
-              job.postDelayMs or 0.0)
-        else
-          job.status = "APPLIED"
-        end
-      else
-        failures = failures + 1
-      end
-    end
-  end
-
-  reaper.UpdateArrange()
-  reaper.Undo_EndBlock(
-    "Smart Align Post — Phase Batch Apply",
-    -1)
-
-  applied = true
-
-  if failures > 0 then
-    local detail =
-      #applyErrors > 0 and
-      (" · " .. table.concat(applyErrors, " | ")) or
-      ""
-    set_status(
-      string.format(
-        "APPLY parcial · %d aplicados · %d omitidos · %d errores%s. Undo disponible.",
-        appliedCount, skipped, failures, detail),
-      "error")
-  else
-    set_status(
-      string.format(
-        "APPLY COMPLETO · %d STATIC · %d DYNAMIC · %d omitidos. MASTER y D_POSITION intactos.",
-        staticCount, dynamicCount, skipped),
-      "ok")
-  end
+  reaper.defer(apply_all_phase_step)
 end
 
 local function median_values(values)
@@ -1741,17 +1817,22 @@ local function residual_pass()
 end
 
 local function apply_all()
+  if analyzing or applying then
+    return
+  end
   applied = false
   apply_all_phase()
-  if applied then
-    residual_pass()
-  end
 end
 
 local function reset_results()
+  if applying then
+    return
+  end
   jobs = {}
   analyzing = false
   analyzingIndex = 0
+  applying = false
+  applyState = nil
   applied = false
   set_status(
     "Resultados limpiados. MASTER = " ..
@@ -2003,13 +2084,13 @@ draw_ui = function()
   button(
     422, fy + 8, 155, 38,
     "APPLY ALL",
-    #jobs > 0 and not analyzing,
+    #jobs > 0 and not analyzing and not applying,
     true)
 
   button(
     589, fy + 8, 120, 38,
     "CLEAR",
-    not analyzing,
+    not analyzing and not applying,
     false)
 
   button(
@@ -2112,7 +2193,7 @@ local function loop()
     return
   end
 
-  if not analyzing then
+  if not analyzing and not applying then
     initializeMaster()
   end
 
