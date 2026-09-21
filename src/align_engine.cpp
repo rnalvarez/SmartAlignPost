@@ -1311,70 +1311,139 @@ Result AlignEngine::analyze(
     if (usable < 2048 || settings.sampleRate <= 0.0)
         return result;
 
-    const std::size_t window = std::clamp<std::size_t>(
-        static_cast<std::size_t>(
-            std::llround(settings.analysisWindowMs * settings.sampleRate / 1000.0)),
-        1024,
-        8192);
+    std::size_t window =
+        std::clamp<std::size_t>(
+            static_cast<std::size_t>(
+                std::llround(
+                    settings.analysisWindowMs *
+                    settings.sampleRate /
+                    1000.0)),
+            1024,
+            8192);
 
-    const std::size_t hop = std::max<std::size_t>(
-        1,
-        static_cast<std::size_t>(
-            std::llround(settings.hopMs * settings.sampleRate / 1000.0)));
+    std::size_t hop =
+        std::max<std::size_t>(
+            1,
+            static_cast<std::size_t>(
+                std::llround(
+                    settings.hopMs *
+                    settings.sampleRate /
+                    1000.0)));
 
-    const int maxLag = std::max(
-        1,
+    const int maxLag =
+        std::max(
+            1,
+            static_cast<int>(
+                std::llround(
+                    settings.maxDelayMs *
+                    settings.sampleRate /
+                    1000.0)));
+
+    constexpr std::size_t kMinimumAnchorCount = 4;
+
+    auto staticAnchors =
+        selectAnchors(
+            master,
+            source,
+            window,
+            hop,
+            settings.energyGateRatio,
+            settings.anchorSeparationMs / 1000.0,
+            settings.sampleRate,
+            std::max<std::size_t>(
+                1,
+                settings.staticAnchorCount));
+
+    if (staticAnchors.size() <
+        kMinimumAnchorCount) {
+        const std::size_t floorWindow =
+            std::max<std::size_t>(
+                1024,
+                static_cast<std::size_t>(
+                    std::llround(
+                        0.020 *
+                        settings.sampleRate)));
+
+        const std::size_t floorHop =
+            std::max<std::size_t>(
+                1,
+                static_cast<std::size_t>(
+                    std::llround(
+                        0.010 *
+                        settings.sampleRate)));
+
+        const double scales[] = {
+            0.75,
+            0.50,
+            0.333333333333
+        };
+
+        for (double scale : scales) {
+            const std::size_t candidateWindow =
+                std::max(
+                    floorWindow,
+                    static_cast<std::size_t>(
+                        std::llround(
+                            static_cast<double>(
+                                window) *
+                            scale)));
+
+            const std::size_t candidateHop =
+                std::max(
+                    floorHop,
+                    static_cast<std::size_t>(
+                        std::llround(
+                            static_cast<double>(
+                                hop) *
+                            scale)));
+
+            if (candidateWindow == window &&
+                candidateHop == hop)
+                continue;
+
+            const auto retry =
+                selectAnchors(
+                    master,
+                    source,
+                    candidateWindow,
+                    candidateHop,
+                    settings.energyGateRatio,
+                    settings.anchorSeparationMs / 1000.0,
+                    settings.sampleRate,
+                    std::max<std::size_t>(
+                        1,
+                        settings.staticAnchorCount));
+
+            if (retry.size() >
+                staticAnchors.size()) {
+                staticAnchors = retry;
+                window = candidateWindow;
+                hop = candidateHop;
+            }
+
+            if (staticAnchors.size() >=
+                kMinimumAnchorCount)
+                break;
+        }
+    }
+
+    result.staticTotalWindows =
         static_cast<int>(
-            std::llround(settings.maxDelayMs * settings.sampleRate / 1000.0)));
+            staticAnchors.size());
 
-    const auto staticAnchors = selectAnchors(
-        master, source, window, hop,
-        settings.energyGateRatio,
-        settings.anchorSeparationMs / 1000.0,
-        settings.sampleRate,
-        std::max<std::size_t>(1, settings.staticAnchorCount));
-
-    result.staticTotalWindows = static_cast<int>(staticAnchors.size());
     result.staticAnalysisTimeSec =
         staticAnchors.empty()
             ? 0.0
-            : static_cast<double>(staticAnchors[staticAnchors.size() / 2].center) /
+            : static_cast<double>(
+                staticAnchors[
+                    staticAnchors.size() / 2].center) /
               settings.sampleRate;
 
     std::vector<double> staticDelays;
     std::vector<double> staticCorrelations;
     std::vector<double> staticConfidences;
-    staticDelays.reserve(staticAnchors.size());
-
-    const double seededDelay = settings.hasInitialDelaySamples
-        ? settings.initialDelaySamples
-        : 0.0;
-
-    for (const auto& anchor : staticAnchors) {
-        const Measurement m = measurePhase(
-            master, source,
-            anchor.center,
-            window,
-            seededDelay,
-            -static_cast<double>(maxLag),
-            static_cast<double>(maxLag),
-            settings.sampleRate);
-
-        if (m.confidence < settings.minConfidence * 0.75)
-            continue;
-
-        staticDelays.push_back(m.finalDelay);
-        staticCorrelations.push_back(m.correlation);
-        staticConfidences.push_back(m.confidence);
-    }
-
-    result.staticSupportWindows = static_cast<int>(staticDelays.size());
-
-    if (!staticDelays.empty()) {
-        result.staticDelaySamples = median(staticDelays);
-        result.staticCorrelation = median(staticCorrelations);
-        result.staticConfidence = median(staticConfidences);
-    }
+    staticDelays.reserve(
+        staticAnchors.size());
 
     if (settings.mode == Mode::Static) {
         result.modeUsed = Mode::Static;
@@ -1534,7 +1603,8 @@ Result AlignEngine::analyze(
                     std::llround(
                         std::max(250.0, settings.hopMs) *
                         settings.sampleRate / 1000.0))),
-            7);
+            7,
+        settings.sampleRate);
 
         Measurement bestMeasurement;
         bool haveBest = false;
@@ -1548,7 +1618,9 @@ Result AlignEngine::analyze(
                 0.0,
                 -static_cast<double>(maxLag),
                 static_cast<double>(maxLag),
-                settings.sampleRate);
+                settings.sampleRate,
+                anchor.onsetDriven,
+                anchor.onsetSample);
 
             if (!haveBest || m.confidence > bestMeasurement.confidence) {
                 bestMeasurement = m;
@@ -1596,7 +1668,8 @@ Result AlignEngine::analyze(
                     std::llround(
                         std::max(250.0, settings.hopMs) *
                         settings.sampleRate / 1000.0))),
-            7);
+            7,
+        settings.sampleRate);
 
         std::vector<std::pair<double, double>> scout;
         scout.reserve(scoutAnchors.size());
@@ -1657,7 +1730,9 @@ Result AlignEngine::analyze(
                         : staticCenter,
                     searchMin,
                     searchMax,
-                    settings.sampleRate);
+                    settings.sampleRate,
+                    anchor.onsetDriven,
+                    anchor.onsetSample);
 
             double acceptedDelay = m.finalDelay;
             double effectiveConfidence = m.confidence;
@@ -1707,14 +1782,12 @@ Result AlignEngine::analyze(
                             hopSec *
                             settings.sampleRate);
 
-                    // Do not allow one weak local match to create an
-                    // implausible jump. Stronger trajectory evidence can
-                    // still accumulate over subsequent anchors.
-                    acceptedDelay =
-                        std::clamp(
-                            acceptedDelay,
-                            predictedDelay - maxStep,
-                            predictedDelay + maxStep);
+                    if (std::abs(
+                            acceptedDelay -
+                            predictedDelay) >
+                        maxStep * 1.25) {
+                        continue;
+                    }
                 }
 
                 scout.emplace_back(
@@ -1804,7 +1877,37 @@ Result AlignEngine::analyze(
             result.scoutDirectionConsistency =
                 directionConsistency;
 
-            const bool linearEvidence = rSquared >= 0.45;
+            std::vector<double> stepValues;
+            stepValues.reserve(
+                scout.size() - 1);
+
+            for (std::size_t i = 1;
+                 i < scout.size();
+                 ++i) {
+                stepValues.push_back(
+                    scout[i].second -
+                    scout[i - 1].second);
+            }
+
+            const double medianStep =
+                median(stepValues);
+
+            std::vector<double> stepDeviation;
+            stepDeviation.reserve(
+                stepValues.size());
+
+            for (double step : stepValues) {
+                stepDeviation.push_back(
+                    std::abs(
+                        step -
+                        medianStep));
+            }
+
+            result.scoutStepMADSamples =
+                median(stepDeviation);
+
+            const bool linearEvidence =
+                rSquared >= 0.45;
             const bool monotonicEvidence =
                 meaningfulSteps >= 3 &&
                 directionConsistency >= 0.67;
@@ -1841,22 +1944,54 @@ Result AlignEngine::analyze(
                     2.0 * dynamicThreshold,
                     1.0 * settings.sampleRate / 1000.0);
 
+            const bool enoughScoutAnchors =
+                scout.size() >=
+                kMinimumAnchorCount;
+
+            const double stepDispersionLimit =
+                std::max(
+                    48.0,
+                    0.20 *
+                        std::max(
+                            endToEnd,
+                            dynamicThreshold));
+
+            const bool lowMeasurementDispersion =
+                result.scoutStepMADSamples <=
+                stepDispersionLimit;
+
             coherentTemporalDrift =
+                enoughScoutAnchors &&
+                lowMeasurementDispersion &&
                 endToEnd > dynamicThreshold &&
                 (linearEvidence ||
                  monotonicEvidence ||
                  robustTemporalEvidence);
 
-            result.scoutCoherent = coherentTemporalDrift;
+            result.scoutCoherent =
+                coherentTemporalDrift;
         }
     }
 
-    const bool explicitDynamic = settings.mode == Mode::Dynamic;
+    const bool explicitDynamic =
+        settings.mode == Mode::Dynamic;
 
-    const bool needsDynamic = explicitDynamic ||
+    result.evidenceInsufficient =
+        settings.mode == Mode::Auto &&
+        (result.staticSupportWindows <
+            static_cast<int>(
+                kMinimumAnchorCount) ||
+         result.scoutPoints <
+            static_cast<int>(
+                kMinimumAnchorCount));
+
+    const bool needsDynamic =
+        explicitDynamic ||
         knownRateDrift ||
-        staticSpread > dynamicThreshold ||
-        coherentTemporalDrift;
+        coherentTemporalDrift ||
+        (settings.mode != Mode::Static &&
+         staticSpread > dynamicThreshold &&
+         !result.evidenceInsufficient);
 
     if (!needsDynamic) {
         result.modeUsed = Mode::Static;
@@ -1879,7 +2014,8 @@ Result AlignEngine::analyze(
         source,
         window,
         dynamicHop,
-        std::max<std::size_t>(1, settings.maxDynamicAnchors));
+        std::max<std::size_t>(1, settings.maxDynamicAnchors),
+        settings.sampleRate);
 
     if (anchors.empty()) {
         result.modeUsed = Mode::Static;
@@ -1942,19 +2078,23 @@ Result AlignEngine::analyze(
             predictedDelay,
             first ? -static_cast<double>(maxLag) : dynamicMin,
             first ? static_cast<double>(maxLag) : dynamicMax,
-            settings.sampleRate);
+            settings.sampleRate,
+            anchor.onsetDriven,
+            anchor.onsetSample);
 
         if (m.confidence >= dynamicPointMinConfidence) {
             double acceptedDelay = m.finalDelay;
 
             if (!first) {
-                const double delta = std::abs(acceptedDelay - predictedDelay);
-                if (delta > slewAllowance * 1.25) {
-                    // A discontinuity larger than the physical tracking
-                    // allowance is more likely a false acoustic match than a
-                    // genuine microphone movement. Keep the previous solution
-                    // and do not create a false warp point.
-                    previousCenter = anchor.center;
+                const double delta =
+                    std::abs(
+                        acceptedDelay -
+                        predictedDelay);
+
+                if (delta >
+                    slewAllowance * 1.25) {
+                    previousCenter =
+                        anchor.center;
                     continue;
                 }
             }
@@ -2002,7 +2142,8 @@ Result AlignEngine::analyze(
                         2,
                         std::min<std::size_t>(
                             settings.maxDynamicAnchors,
-                            32)));
+                            32)),
+                        settings.sampleRate);
 
             if (timeline.size() >= 2) {
                 const double durationSec =
