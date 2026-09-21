@@ -1,0 +1,2 @@
+Frozen test package base: f360e344c14d3e0c5d17573c7bb49780ebcf9cc4
+This marker only triggers the Windows package workflow; alignment source is otherwise unchanged.
