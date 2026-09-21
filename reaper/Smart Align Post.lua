@@ -49,6 +49,7 @@ local applied = false
 local mouseDown = false
 local dynamicRenderSerial = 0
 local draw_ui
+local residual_pass
 
 local function script_dir()
   local src = debug.getinfo(1, "S").source
@@ -1615,7 +1616,7 @@ local function write_residual_metadata(
   end
 end
 
-local function residual_pass()
+residual_pass = function()
   if not applied or #jobs == 0 then
     return
   end
