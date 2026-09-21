@@ -868,11 +868,13 @@ local function inject_residual_fx(job)
 
   if paramCount < 2 then
     return false,
-      "El FX insertado no es el Smart Align Post Residual esperado: '" ..
+      "FX insertado: '" ..
       tostring(actualName) ..
-      "' (" ..
+      "', índice " ..
+      tostring(fxIndex) ..
+      ", pero tiene " ..
       tostring(paramCount) ..
-      " parámetros)."
+      " parámetros; se esperaban 2."
   end
 
   local normalized =
@@ -904,9 +906,12 @@ local function inject_residual_fx(job)
 
   if not okResidual or not okApply then
     return false,
-      "El VST3 '" ..
-      tostring(actualName) ..
-      "' fue insertado, pero REAPER rechazó uno de sus parámetros."
+      string.format(
+        "FX '%s' índice %s insertado, pero SetParamNormalized falló: Residual=%s Apply=%s.",
+        tostring(actualName),
+        tostring(fxIndex),
+        tostring(okResidual),
+        tostring(okApply))
   end
 
   local storedResidual =
@@ -925,11 +930,21 @@ local function inject_residual_fx(job)
       (storedResidual or 0.0) -
       normalized) > 0.0005 or
      (storedApply or 0.0) < 0.5 then
+    local _, p0 =
+      reaper.TakeFX_GetParamName(
+        take, fxIndex, 0)
+    local _, p1 =
+      reaper.TakeFX_GetParamName(
+        take, fxIndex, 1)
+
     return false,
       string.format(
-        "El VST3 fue insertado pero no conservó los parámetros (residual %.6f/%.6f, apply %.6f).",
+        "FX '%s' insertado, pero los valores no quedaron almacenados: P0 '%s'=%.6f/%.6f · P1 '%s'=%.6f.",
+        tostring(actualName),
+        tostring(p0),
         storedResidual or -1.0,
         normalized,
+        tostring(p1),
         storedApply or -1.0)
   end
 
@@ -1026,7 +1041,9 @@ local function run_analysis(items)
             write_metadata(job)
           else
             job.status = "FX ERROR"
+            -- Keep the actual insertion/configuration diagnostic.
             job.error =
+              job.error or
               "No se pudo cargar el Take FX residual."
             write_metadata(job)
             counts.errors =
