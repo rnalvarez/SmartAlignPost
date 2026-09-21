@@ -730,13 +730,60 @@ local function applyStatic(job)
   -- Positive delay means SOURCE arrives later. Moving D_STARTOFFS forward
   -- advances its media under the fixed timeline item without changing
   -- D_POSITION.
+  local correction =
+    correctionSeconds(job) * rate
+
   local target =
-    offs + correctionSeconds(job) * rate
+    offs + correction
 
   reaper.SetMediaItemTakeInfo_Value(
     take, "D_STARTOFFS", target)
 
   reaper.UpdateItemInProject(job.sourceItem)
+
+  local appliedOffs =
+    reaper.GetMediaItemTakeInfo_Value(
+      take, "D_STARTOFFS")
+
+  -- Some media/take combinations cannot represent a negative source offset.
+  -- Detect that explicitly instead of treating the operation as successful.
+  if math.abs(appliedOffs - target) > 1e-9 then
+    reaper.SetMediaItemTakeInfo_Value(
+      take,
+      "D_STARTOFFS",
+      offs)
+
+    reaper.UpdateItemInProject(
+      job.sourceItem)
+
+    -- Preserve the requested acoustic correction without changing the
+    -- source offset beyond the valid source range. Moving the ITEM itself is
+    -- only the fallback for the unrepresentable negative-offset edge case.
+    if target < 0.0 then
+      local itemPos =
+        reaper.GetMediaItemInfo_Value(
+          job.sourceItem, "D_POSITION")
+
+      local remainingCorrection =
+        target - appliedOffs
+
+      reaper.SetMediaItemPosition(
+        job.sourceItem,
+        itemPos - remainingCorrection,
+        true)
+
+      reaper.UpdateItemInProject(
+        job.sourceItem)
+
+      return true
+    end
+
+    return false,
+      string.format(
+        "REAPER no aceptó D_STARTOFFS %.6f s (quedó %.6f s).",
+        target,
+        appliedOffs)
+  end
 
   return true
 end
