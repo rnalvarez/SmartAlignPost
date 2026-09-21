@@ -79,17 +79,18 @@
         transparent="true"/>
 
     <view
-        class="COnOffButton"
+        class="CTextButton"
         origin="30, 154"
         size="220, 42"
         control-tag="ApplyResidual"
         title="APPLY RESIDUAL"
-        tooltip="Activa o desactiva la corrección residual ya cuantificada."
-        frame-color="Muted"
-        frame-width="1"
-        back-color="Button"
-        value-on="1"
-        value-off="0"/>
+        font="~ NormalFont"
+        text-color="Text"
+        text-color-highlighted="Text"
+        gradient="ButtonGradient"
+        gradient-highlighted="ButtonGradientHi"
+        kick-style="true"
+        round-radius="8"/>
 
     <view
         class="CTextLabel"
