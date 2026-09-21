@@ -9,10 +9,12 @@
 --
 -- This pass does NOT replace PHASE BATCH. It measures the residual left
 -- after the main alignment and, only when the measurement is reliable,
--- automatically inserts the mono Smart Align Post Take FX in that item.
+-- can apply a small STATIC residual directly to the SOURCE take.
 --
--- The VST receives the measured residual in samples. Positive residual means
--- SOURCE is late and the processor advances the SOURCE by that amount.
+-- Positive residual means SOURCE is late. The correction is applied by
+-- advancing the media with D_STARTOFFS while preserving D_POSITION.
+-- After every correction the same item is re-measured; the correction is
+-- accepted only when the post residual is effectively zero.
 --
 -- Ambiguous/cross-scene items are never auto-corrected.
 
@@ -21,10 +23,9 @@ local MIN_CONFIDENCE = 0.72
 local MIN_RESIDUAL_SAMPLES = 2.0
 local MIN_OVERLAP_SECONDS = 0.5
 local MIN_SCENE_COVERAGE = 0.95
-local MAX_RESIDUAL_SAMPLES = 256.0
+local MAX_POST_RESIDUAL_SAMPLES = 1.0
 
 local EXE_NAME = "SmartAlignPostPrototype.exe"
-local FX_NAME = "Smart Align Post Residual"
 
 local status = "Seleccioná primero un item del MASTER y luego items de los SOURCE tracks."
 local statusKind = "info"
@@ -782,196 +783,175 @@ local function write_metadata(job)
     true)
 end
 
-local function find_existing_fx(take)
-  if not take then
-    return -1
-  end
-
-  local count =
-    reaper.TakeFX_GetCount(take)
-
-  for i = 0, count - 1 do
-    local ok, name =
-      reaper.TakeFX_GetFXName(
-        take, i, "")
-
-    if ok and (
-        name == FX_NAME or
-        name:find(FX_NAME, 1, true)
-      ) then
-      return i
-    end
-  end
-
-  return -1
+local function correctionSeconds(job)
+  return (job.residualMs or 0.0) / 1000.0
 end
 
-local function inject_residual_fx(job)
+local function apply_static_residual(job)
   if job.status ~= "ELIGIBLE" then
     return false, "job no elegible"
   end
 
-  local take =
-    reaper.GetActiveTake(
-      job.sourceItem)
+  if job.modeUsed ~= "STATIC" then
+    return false, "el residual no es STATIC; requiere revisión."
+  end
 
+  local take = job.sourceTake
   if not take then
     return false, "sin take"
   end
 
-  local fxIndex =
-    find_existing_fx(take)
+  local rate =
+    reaper.GetMediaItemTakeInfo_Value(
+      take, "D_PLAYRATE")
 
-  if fxIndex < 0 then
-    -- Force creation of the residual VST3 if it is not already present.
-    -- REAPER accepts the explicit VST3 prefix for named FX insertion.
-    local candidates = {
-      "VST3: Smart Align Post Residual",
-      "VST3:Smart Align Post Residual",
-      "Smart Align Post Residual"
-    }
-
-    for _, candidate in ipairs(candidates) do
-      local candidateIndex =
-        reaper.TakeFX_AddByName(
-          take,
-          candidate,
-          -1)
-
-      if candidateIndex and candidateIndex >= 0 then
-        fxIndex = candidateIndex
-        break
-      end
-    end
+  if rate <= 0 then
+    return false, "PLAYRATE inválido"
   end
 
-  if not fxIndex or fxIndex < 0 then
-    return false,
-      "REAPER no pudo insertar 'Smart Align Post Residual' como Take FX. " ..
-      "Verificá que el VST3 residual esté instalado y que REAPER lo vea."
+  local residualSamples =
+    tonumber(job.residualSamples) or 0.0
+
+  if math.abs(residualSamples) < MIN_RESIDUAL_SAMPLES then
+    return false, "residual por debajo del umbral"
   end
 
-  local okName, actualName =
-    reaper.TakeFX_GetFXName(
-      take,
-      fxIndex,
-      "")
+  local offs =
+    reaper.GetMediaItemTakeInfo_Value(
+      take, "D_STARTOFFS")
 
-  local paramCount =
-    reaper.TakeFX_GetNumParams(
-      take,
-      fxIndex)
+  -- Positive residual means SOURCE is late. Increasing D_STARTOFFS
+  -- advances the media while preserving the item's D_POSITION.
+  local target =
+    offs +
+    correctionSeconds(job) * rate
 
-  if not okName then
-    actualName = "desconocido"
-  end
-
-  if paramCount < 2 then
-    return false,
-      "FX insertado: '" ..
-      tostring(actualName) ..
-      "', índice " ..
-      tostring(fxIndex) ..
-      ", pero tiene " ..
-      tostring(paramCount) ..
-      " parámetros; se esperaban 2."
-  end
-
-  local normalized =
-    (job.residualSamples +
-     MAX_RESIDUAL_SAMPLES) /
-    (2.0 * MAX_RESIDUAL_SAMPLES)
-
-  normalized =
-    math.max(
-      0.0,
-      math.min(
-        1.0,
-        normalized))
-
-  -- VST3 parameters are addressed through REAPER's normalized API.
-  local okResidual =
-    reaper.TakeFX_SetParamNormalized(
-      take,
-      fxIndex,
-      0,
-      normalized)
-
-  local okApply =
-    reaper.TakeFX_SetParamNormalized(
-      take,
-      fxIndex,
-      1,
-      1.0)
-
-  if not okResidual or not okApply then
-    return false,
-      string.format(
-        "FX '%s' índice %s insertado, pero SetParamNormalized falló: Residual=%s Apply=%s.",
-        tostring(actualName),
-        tostring(fxIndex),
-        tostring(okResidual),
-        tostring(okApply))
-  end
-
-  local storedResidual =
-    reaper.TakeFX_GetParamNormalized(
-      take,
-      fxIndex,
-      0)
-
-  local storedApply =
-    reaper.TakeFX_GetParamNormalized(
-      take,
-      fxIndex,
-      1)
-
-  if math.abs(
-      (storedResidual or 0.0) -
-      normalized) > 0.0005 or
-     (storedApply or 0.0) < 0.5 then
-    local _, p0 =
-      reaper.TakeFX_GetParamName(
-        take, fxIndex, 0)
-    local _, p1 =
-      reaper.TakeFX_GetParamName(
-        take, fxIndex, 1)
-
-    return false,
-      string.format(
-        "FX '%s' insertado, pero los valores no quedaron almacenados: P0 '%s'=%.6f/%.6f · P1 '%s'=%.6f.",
-        tostring(actualName),
-        tostring(p0),
-        storedResidual or -1.0,
-        normalized,
-        tostring(p1),
-        storedApply or -1.0)
-  end
-
-  if reaper.TakeFX_SetOpen then
-    reaper.TakeFX_SetOpen(
-      take,
-      fxIndex,
-      false)
-  end
-
-  if reaper.TakeFX_Show then
-    reaper.TakeFX_Show(
-      take,
-      fxIndex,
-      2)
-  end
-
-  reaper.GetSetMediaItemInfo_String(
-    job.sourceItem,
-    "P_EXT:SmartAlignPost.Residual.FX",
-    "AUTO_INSERTED",
-    true)
+  reaper.SetMediaItemTakeInfo_Value(
+    take,
+    "D_STARTOFFS",
+    target)
 
   reaper.UpdateItemInProject(
     job.sourceItem)
 
+  -- Re-measure immediately using the same MASTER scene and current item.
+  analyze_job(job)
+
+  local postResidual =
+    tonumber(job.residualSamples) or 0.0
+
+  if job.modeUsed ~= "STATIC" then
+    return false,
+      string.format(
+        "verificación inválida · MODE=%s · residual post %+0.3f samples",
+        tostring(job.modeUsed),
+        postResidual)
+  end
+
+  if math.abs(postResidual) >
+     MAX_POST_RESIDUAL_SAMPLES then
+
+    return false,
+      string.format(
+        "corrección no verificada · antes %+0.3f samples · después %+0.3f samples",
+        residualSamples,
+        postResidual)
+  end
+
+  job.appliedResidualSamples = residualSamples
+  job.postResidualSamples = postResidual
+  job.status = "APPLIED"
+  job.error = nil
+
   return true
+end
+
+local function apply_all()
+  if analyzing or #jobs == 0 then
+    set_status(
+      "Primero ANALYZE.",
+      "warn")
+    return
+  end
+
+  local eligible = 0
+
+  for _, job in ipairs(jobs) do
+    if job.status == "ELIGIBLE" and
+       job.modeUsed == "STATIC" then
+      eligible = eligible + 1
+    end
+  end
+
+  if eligible == 0 then
+    set_status(
+      "No hay residuos STATIC elegibles para corregir.",
+      "ok")
+    return
+  end
+
+  reaper.Undo_BeginBlock()
+
+  local appliedCount = 0
+  local failures = 0
+  local skipped = 0
+  local errors = {}
+
+  for _, job in ipairs(jobs) do
+    if job.status == "ELIGIBLE" and
+       job.modeUsed == "STATIC" then
+
+      local ok, err =
+        apply_static_residual(job)
+
+      if ok then
+        appliedCount = appliedCount + 1
+      else
+        failures = failures + 1
+        job.status = "APPLY ERROR"
+        job.error =
+          err or
+          "falló la corrección residual"
+
+        errors[#errors + 1] =
+          string.format(
+            "%s / %s: %s",
+            scene_label(
+              masterTrack,
+              job.masterItem),
+            track_label(job.sourceTrack),
+            job.error)
+      end
+
+      write_metadata(job)
+    else
+      skipped = skipped + 1
+    end
+  end
+
+  reaper.UpdateArrange()
+
+  reaper.Undo_EndBlock(
+    "Smart Align Post — Apply Residual Directo",
+    -1)
+
+  if failures > 0 then
+    set_status(
+      string.format(
+        "RESIDUAL APPLY PARCIAL · %d corregidos · %d omitidos · %d errores · %s",
+        appliedCount,
+        skipped,
+        failures,
+        table.concat(errors, " | ")),
+      "error")
+  else
+    set_status(
+      string.format(
+        "RESIDUAL APPLY COMPLETO · %d corregidos y verificados · %d omitidos. D_POSITION y PLAYRATE intactos.",
+        appliedCount,
+        skipped),
+      "ok")
+  end
 end
 
 local function run_analysis(items)
@@ -1014,11 +994,8 @@ local function run_analysis(items)
         eligible = 0,
         low = 0,
         review = 0,
-        errors = 0,
-        injected = 0
+        errors = 0
       }
-
-      reaper.Undo_BeginBlock()
 
       for _, job in ipairs(jobs) do
         write_metadata(job)
@@ -1030,25 +1007,6 @@ local function run_analysis(items)
         elseif job.status == "ELIGIBLE" then
           counts.eligible =
             counts.eligible + 1
-
-          local ok =
-            inject_residual_fx(job)
-
-          if ok then
-            counts.injected =
-              counts.injected + 1
-            job.status = "FX INSERTED"
-            write_metadata(job)
-          else
-            job.status = "FX ERROR"
-            -- Keep the actual insertion/configuration diagnostic.
-            job.error =
-              job.error or
-              "No se pudo cargar el Take FX residual."
-            write_metadata(job)
-            counts.errors =
-              counts.errors + 1
-          end
 
         elseif job.status == "LOW CONF" then
           counts.low =
@@ -1067,27 +1025,14 @@ local function run_analysis(items)
 
       reaper.UpdateArrange()
 
-      reaper.Undo_EndBlock(
-        "Smart Align Post — Residual Scan / Item FX",
-        -1)
-
-      local firstError = ""
-      for _, job in ipairs(jobs) do
-        if job.status == "FX ERROR" and job.error then
-          firstError = " · " .. job.error
-          break
-        end
-      end
-
       set_status(
         string.format(
-          "RESIDUAL COMPLETO · %d alineados · %d FX insertados · %d baja conf · %d revisión · %d errores%s",
+          "RESIDUAL COMPLETO · %d alineados · %d elegibles · %d baja conf · %d revisión · %d errores",
           counts.aligned,
-          counts.injected,
+          counts.eligible,
           counts.low,
           counts.review,
-          counts.errors,
-          firstError),
+          counts.errors),
         counts.errors > 0 and
         "warn" or
         "ok")
@@ -1274,7 +1219,7 @@ draw_ui = function()
 
     if job.status == "ELIGIBLE" then
       rr, gg, bb = 125, 220, 155
-    elseif job.status == "FX INSERTED" then
+    elseif job.status == "APPLIED" then
       rr, gg, bb = 105, 235, 180
     elseif job.status == "ALIGNED" then
       rr, gg, bb = 145, 205, 180
@@ -1283,7 +1228,8 @@ draw_ui = function()
            job.status == "SCENE REVIEW" then
       rr, gg, bb = 240, 200, 110
     elseif job.status == "ERROR" or
-           job.status == "FX ERROR" then
+           job.status == "FX ERROR" or
+           job.status == "APPLY ERROR" then
       rr, gg, bb = 245, 125, 125
     end
 
@@ -1378,7 +1324,13 @@ draw_ui = function()
     true)
 
   button(
-    462, fy + 8, 165, 38,
+    462, fy + 8, 190, 38,
+    "APPLY RESIDUAL",
+    #jobs > 0 and not analyzing,
+    true)
+
+  button(
+    664, fy + 8, 120, 38,
     "CLEAR",
     not analyzing,
     false)
@@ -1452,7 +1404,14 @@ local function mouse_handler()
         selected_source_items())
 
     elseif gfx.mouse_x >= 462 and
-           gfx.mouse_x <= 627 and
+           gfx.mouse_x <= 652 and
+           gfx.mouse_y >= fy + 8 and
+           gfx.mouse_y <= fy + 46 then
+
+      apply_all()
+
+    elseif gfx.mouse_x >= 664 and
+           gfx.mouse_x <= 784 and
            gfx.mouse_y >= fy + 8 and
            gfx.mouse_y <= fy + 46 then
 
