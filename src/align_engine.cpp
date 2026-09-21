@@ -712,7 +712,9 @@ bool isImpulsiveMaterial(
                         : staticCenter,
                     searchMin,
                     searchMax,
-                    settings.sampleRate);
+                    settings.sampleRate,
+                    anchor.onsetDriven,
+                    anchor.onsetSample);
 
             double acceptedDelay = m.finalDelay;
             double effectiveConfidence = m.confidence;
