@@ -1078,10 +1078,34 @@ int main(int argc, char** argv)
         const double residualSamples =
             postStatic.staticDelaySamples;
 
+        double postResidualSpanSamples = 0.0;
+        if (post.curve.size() >= 2) {
+            double minResidual = post.curve.front().delaySamples;
+            double maxResidual = minResidual;
+
+            for (const auto& point : post.curve) {
+                minResidual =
+                    std::min(
+                        minResidual,
+                        point.delaySamples);
+                maxResidual =
+                    std::max(
+                        maxResidual,
+                        point.delaySamples);
+            }
+
+            postResidualSpanSamples =
+                maxResidual - minResidual;
+        }
+
+        // Validation is based on residual magnitude and residual-curve span,
+        // never on the classifier label. A good correction may still be
+        // acoustically tagged DYNAMIC by AUTO after rendering.
         const bool postValid =
             std::isfinite(residualSamples) &&
+            std::isfinite(postResidualSpanSamples) &&
             std::abs(residualSamples) <= 2.0 &&
-            post.modeUsed != sap::Mode::Dynamic;
+            postResidualSpanSamples <= 3.0;
 
         std::cout
             << "POST_MODE_USED="
@@ -1098,6 +1122,10 @@ int main(int argc, char** argv)
         std::cout
             << "POST_DELAY_MS="
             << residualSamples * 1000.0 / settings.sampleRate
+            << "\n";
+        std::cout
+            << "POST_RESIDUAL_SPAN_SAMPLES="
+            << postResidualSpanSamples
             << "\n";
         std::cout
             << "POST_CONFIDENCE="
