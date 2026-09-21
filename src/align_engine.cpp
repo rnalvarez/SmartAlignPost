@@ -513,6 +513,146 @@ Measurement measurePhase(
     return out;
 }
 
+struct DynamicLocalResult
+{
+    double delaySamples = 0.0;
+    double score = 0.0;
+};
+
+DynamicLocalResult refineDynamicLocalDelay(
+    const std::vector<float>& master,
+    const std::vector<float>& source,
+    std::size_t center,
+    double predictedDelaySamples,
+    double sampleRate,
+    double windowMs,
+    double searchMs)
+{
+    DynamicLocalResult result{predictedDelaySamples, 0.0};
+
+    if (sampleRate <= 0.0 ||
+        master.size() < 128 ||
+        source.size() < 128) {
+        return result;
+    }
+
+    const std::size_t windowSamples =
+        std::max<std::size_t>(
+            96,
+            static_cast<std::size_t>(
+                std::llround(
+                    sampleRate * windowMs / 1000.0)));
+
+    const std::size_t halfWindow =
+        windowSamples / 2;
+
+    if (halfWindow < 48 ||
+        center < halfWindow ||
+        center + halfWindow >= master.size()) {
+        return result;
+    }
+
+    const int radius =
+        std::max(
+            1,
+            static_cast<int>(
+                std::llround(
+                    sampleRate * searchMs / 1000.0)));
+
+    const int centerLag =
+        static_cast<int>(
+            std::llround(predictedDelaySamples));
+
+    std::vector<double> scores(
+        static_cast<std::size_t>(2 * radius + 1),
+        0.0);
+
+    for (int offset = -radius;
+         offset <= radius;
+         ++offset) {
+        const double lag =
+            static_cast<double>(centerLag + offset);
+
+        // Use absolute waveform correlation here. Microphone polarity or
+        // small spectral changes must not make an otherwise stable local
+        // correspondence disappear from the DYNAMIC scout.
+        const double corr =
+            std::abs(
+                normalizedWaveformCorrelation(
+                    master,
+                    source,
+                    center,
+                    halfWindow,
+                    lag));
+
+        scores[
+            static_cast<std::size_t>(
+                offset + radius)] = corr;
+    }
+
+    int best = radius;
+
+    for (int i = 1;
+         i < static_cast<int>(scores.size());
+         ++i) {
+        if (scores[
+                static_cast<std::size_t>(i)] >
+            scores[
+                static_cast<std::size_t>(best)]) {
+            best = i;
+        }
+    }
+
+    const double bestScore =
+        scores[
+            static_cast<std::size_t>(best)];
+
+    if (bestScore <= 0.0)
+        return result;
+
+    double refined =
+        static_cast<double>(
+            centerLag + best - radius);
+
+    if (best > 0 &&
+        best + 1 <
+            static_cast<int>(scores.size())) {
+        const double ym =
+            scores[
+                static_cast<std::size_t>(best - 1)];
+        const double y0 =
+            scores[
+                static_cast<std::size_t>(best)];
+        const double yp =
+            scores[
+                static_cast<std::size_t>(best + 1)];
+
+        const double denom =
+            ym - 2.0 * y0 + yp;
+
+        if (std::abs(denom) > 1.0e-12) {
+            refined += std::clamp(
+                0.5 * (ym - yp) / denom,
+                -0.5,
+                0.5);
+        }
+    }
+
+    // The local stage is a fallback/refinement around the predictive estimate;
+    // it may not jump to a completely unrelated correlation basin.
+    const double maxCorrection =
+        sampleRate * searchMs / 1000.0;
+
+    if (std::abs(refined - predictedDelaySamples) >
+        maxCorrection + 0.5) {
+        return result;
+    }
+
+    result.delaySamples = refined;
+    result.score = bestScore;
+    return result;
+}
+
 double fallbackEstimate(
     const std::vector<float>& master,
     const std::vector<float>& source,
@@ -841,22 +981,130 @@ Result AlignEngine::analyze(
         std::vector<std::pair<double, double>> scout;
         scout.reserve(scoutAnchors.size());
 
-        for (const auto& anchor : scoutAnchors) {
-            const Measurement m = measurePhase(
-                master,
-                source,
-                anchor.center,
-                window,
-                staticCenter,
-                -static_cast<double>(maxLag),
-                static_cast<double>(maxLag),
-                settings.sampleRate);
+        double predictedDelay = staticCenter;
+        bool havePrediction = false;
+        std::size_t previousCenter = 0;
 
-            if (m.confidence >= settings.minConfidence * 0.75) {
-                scout.emplace_back(
-                    static_cast<double>(anchor.center) /
+        for (const auto& anchor : scoutAnchors) {
+            const std::size_t center = anchor.center;
+
+            double searchMin =
+                -static_cast<double>(maxLag);
+            double searchMax =
+                static_cast<double>(maxLag);
+
+            if (havePrediction) {
+                const double hopSec =
+                    static_cast<double>(
+                        center - previousCenter) /
+                    settings.sampleRate;
+
+                const double maxStep =
+                    std::max(
+                        2.0,
+                        settings.maxSlewMsPerSecond /
+                        1000.0 *
+                        hopSec *
+                        settings.sampleRate);
+
+                const double localSearch =
+                    std::min(
+                        static_cast<double>(maxLag),
+                        std::max(
+                            4.0 *
+                                settings.sampleRate /
+                                1000.0,
+                            2.0 * maxStep));
+
+                searchMin =
+                    std::max(
+                        -static_cast<double>(maxLag),
+                        predictedDelay - localSearch);
+                searchMax =
+                    std::min(
+                        static_cast<double>(maxLag),
+                        predictedDelay + localSearch);
+            }
+
+            const Measurement m =
+                measurePhase(
+                    master,
+                    source,
+                    center,
+                    window,
+                    havePrediction
+                        ? predictedDelay
+                        : staticCenter,
+                    searchMin,
+                    searchMax,
+                    settings.sampleRate);
+
+            double acceptedDelay = m.finalDelay;
+            double effectiveConfidence = m.confidence;
+
+            // Consolidated REAPER time-stretch can weaken the broadband
+            // GCC-PHAT confidence even when the local waveform relationship
+            // remains very strong. Recover that evidence with a short
+            // predictive waveform search around the current estimate.
+            if (effectiveConfidence <
+                    settings.minConfidence) {
+                const DynamicLocalResult local =
+                    refineDynamicLocalDelay(
+                        master,
+                        source,
+                        center,
+                        acceptedDelay,
                         settings.sampleRate,
-                    m.finalDelay);
+                        settings.dynamicScoutWindowMs,
+                        settings.dynamicScoutSearchMs);
+
+                if (local.score >=
+                    std::max(
+                        0.60,
+                        settings.minConfidence * 0.85)) {
+                    acceptedDelay =
+                        local.delaySamples;
+                    effectiveConfidence =
+                        std::max(
+                            effectiveConfidence,
+                            local.score);
+                }
+            }
+
+            if (effectiveConfidence >=
+                settings.minConfidence * 0.75) {
+                if (havePrediction) {
+                    const double hopSec =
+                        static_cast<double>(
+                            center - previousCenter) /
+                        settings.sampleRate;
+
+                    const double maxStep =
+                        std::max(
+                            2.0,
+                            settings.maxSlewMsPerSecond /
+                            1000.0 *
+                            hopSec *
+                            settings.sampleRate);
+
+                    // Do not allow one weak local match to create an
+                    // implausible jump. Stronger trajectory evidence can
+                    // still accumulate over subsequent anchors.
+                    acceptedDelay =
+                        std::clamp(
+                            acceptedDelay,
+                            predictedDelay - maxStep,
+                            predictedDelay + maxStep);
+                }
+
+                scout.emplace_back(
+                    static_cast<double>(center) /
+                        settings.sampleRate,
+                    acceptedDelay);
+
+                predictedDelay = acceptedDelay;
+                havePrediction = true;
+                previousCenter = center;
             }
         }
 
