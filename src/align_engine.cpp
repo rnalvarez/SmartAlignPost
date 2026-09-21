@@ -1727,10 +1727,8 @@ Result AlignEngine::analyze(
     // anchors. A gentle time-stretch can produce a perfectly coherent drift
     // while those high-energy anchors happen to cluster in one part of the
     // take. First run a very cheap temporal scout across the whole overlap.
-    const double staticCenter = result.staticDelaySamples;
-    double staticSpread = 0.0;
-    for (double d : staticDelays)
-        staticSpread = std::max(staticSpread, std::abs(d - staticCenter));
+    const double staticCenter =
+        result.staticDelaySamples;
 
     const double dynamicThreshold =
         std::max(0.75, 0.45 * settings.sampleRate / 1000.0);
@@ -2067,10 +2065,7 @@ Result AlignEngine::analyze(
     const bool needsDynamic =
         explicitDynamic ||
         knownRateDrift ||
-        coherentTemporalDrift ||
-        (settings.mode != Mode::Static &&
-         staticSpread > dynamicThreshold &&
-         !result.evidenceInsufficient);
+        coherentTemporalDrift;
 
     if (!needsDynamic) {
         result.modeUsed = Mode::Static;
