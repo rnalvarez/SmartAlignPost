@@ -1,5 +1,7 @@
--- Smart Align Post — PHASE BATCH
--- Phase-first production workflow for REAPER.
+-- Smart Align Post
+-- Unified production workflow for REAPER.
+-- PHASE BATCH = primary correction engine.
+-- RESIDUAL = automatic post-apply verification/correction layer.
 --
 -- MASTER = track of the first selected item.
 -- SOURCE TRACKS = tracks represented by the other selected items.
@@ -23,6 +25,15 @@
 local WIN_W, WIN_H = 1080, 650
 local MIN_CONFIDENCE = 0.72
 local EXE_NAME = "SmartAlignPostPrototype.exe"
+
+-- Residual verification is intentionally cheap: three short STATIC
+-- measurements after APPLY. Only inconclusive cases pay for full analysis.
+local RESIDUAL_WINDOW_SEC = 1.5
+local RESIDUAL_CHECK_FRACTIONS = {0.20, 0.50, 0.80}
+local RESIDUAL_MIN_CONFIDENCE = 0.72
+local RESIDUAL_SIGNIFICANT_SAMPLES = 2.0
+local RESIDUAL_POST_TOLERANCE_SAMPLES = 1.0
+local RESIDUAL_SPREAD_TOLERANCE_SAMPLES = 2.0
 
 local status = "Seleccioná primero un item del MASTER y luego al menos un item de cada SOURCE."
 local statusKind = "info"
@@ -902,6 +913,14 @@ local function applyDynamic(job)
       "No se pudo reemplazar el SOURCE del take"
   end
 
+  local refreshedPath, refreshedTake =
+    take_source_path(job.sourceItem)
+
+  if refreshedPath then
+    job.sourcePath = refreshedPath
+    job.sourceTake = refreshedTake
+  end
+
   -- The generated WAV has no REAPER peak cache yet. Build it now so the
   -- corrected waveform is immediately visible at normal zoom levels.
   if reaper.PCM_Source_BuildPeaks then
@@ -953,7 +972,7 @@ local function applyDynamic(job)
   return true
 end
 
-local function apply_all()
+local function apply_all_phase()
   if analyzing or #jobs == 0 then
     set_status("Primero ANALYZE.", "warn")
     return
@@ -1091,6 +1110,632 @@ local function apply_all()
   end
 end
 
+local function median_values(values)
+  if #values == 0 then return 0.0 end
+
+  local copy = {}
+  for i, value in ipairs(values) do
+    copy[i] = value
+  end
+
+  table.sort(copy)
+
+  local mid = math.floor((#copy + 1) / 2)
+  if #copy % 2 == 1 then
+    return copy[mid]
+  end
+
+  return 0.5 * (copy[mid] + copy[mid + 1])
+end
+
+local function run_quick_residual(job)
+  local masterPath, masterTake, masterErr =
+    take_source_path(job.masterItem)
+  local sourcePath, sourceTake, sourceErr =
+    take_source_path(job.sourceItem)
+
+  if not masterPath or not sourcePath then
+    return {
+      state = "REVIEW",
+      error = sourceErr or masterErr or "source inválido"
+    }
+  end
+
+  job.masterTake = masterTake
+  job.sourceTake = sourceTake
+  job.masterPath = masterPath
+  job.sourcePath = sourcePath
+
+  local masterPos =
+    reaper.GetMediaItemInfo_Value(job.masterItem, "D_POSITION")
+  local sourcePos =
+    reaper.GetMediaItemInfo_Value(job.sourceItem, "D_POSITION")
+
+  local masterOffs =
+    reaper.GetMediaItemTakeInfo_Value(masterTake, "D_STARTOFFS")
+  local sourceOffs =
+    reaper.GetMediaItemTakeInfo_Value(sourceTake, "D_STARTOFFS")
+
+  local masterRate =
+    reaper.GetMediaItemTakeInfo_Value(masterTake, "D_PLAYRATE")
+  local sourceRate =
+    reaper.GetMediaItemTakeInfo_Value(sourceTake, "D_PLAYRATE")
+
+  if masterRate <= 0 or sourceRate <= 0 then
+    return {
+      state = "REVIEW",
+      error = "PLAYRATE inválido"
+    }
+  end
+
+  local overlapDuration =
+    job.commonEnd - job.commonStart
+
+  if overlapDuration < 0.5 then
+    return {
+      state = "REVIEW",
+      error = "solapamiento residual insuficiente"
+    }
+  end
+
+  local windowSec =
+    math.min(
+      RESIDUAL_WINDOW_SEC,
+      math.max(
+        0.30,
+        overlapDuration * 0.45))
+
+  if windowSec > overlapDuration then
+    windowSec = overlapDuration
+  end
+
+  if windowSec <= 0.20 then
+    return {
+      state = "REVIEW",
+      error = "ventana residual demasiado corta"
+    }
+  end
+
+  local measurements = {}
+
+  for index, fraction in ipairs(RESIDUAL_CHECK_FRACTIONS) do
+    local center =
+      job.commonStart +
+      overlapDuration * fraction
+
+    local startTime =
+      math.max(
+        job.commonStart,
+        math.min(
+          center - windowSec * 0.5,
+          job.commonEnd - windowSec))
+
+    if startTime < job.commonStart then
+      startTime = job.commonStart
+    end
+
+    local masterStart =
+      masterOffs +
+      (startTime - masterPos) * masterRate
+
+    local sourceStart =
+      sourceOffs +
+      (startTime - sourcePos) * sourceRate
+
+    local exe =
+      script_dir() ..
+      "\" ..
+      EXE_NAME
+
+    local cmd =
+      quote(exe) .. " " ..
+      quote(masterPath) .. " " ..
+      quote(sourcePath) .. " " ..
+      string.format(
+        ""%.9f" "%.9f" "%.6f" "%.9f" "%.9f" STATIC",
+        masterStart,
+        sourceStart,
+        windowSec,
+        masterRate,
+        sourceRate)
+
+    set_status(
+      string.format(
+        "RESIDUAL CHECK %d/%d · %s · %.1f s",
+        index,
+        #RESIDUAL_CHECK_FRACTIONS,
+        track_label(job.sourceTrack),
+        windowSec),
+      "info")
+
+    draw_ui()
+    gfx.update()
+
+    local processResult =
+      reaper.ExecProcess(cmd, 120000)
+
+    if not processResult then
+      return {
+        state = "REVIEW",
+        error = "ExecProcess falló en residual"
+      }
+    end
+
+    processResult =
+      processResult:gsub(
+        "
+", "
+")
+        :gsub("", "
+")
+
+    local firstNl =
+      processResult:find(
+        "
+", 1, true)
+
+    local code = nil
+    local output = processResult
+
+    if firstNl then
+      code =
+        tonumber(
+          processResult:sub(
+            1,
+            firstNl - 1))
+
+      if code ~= nil then
+        output =
+          processResult:sub(firstNl + 1)
+      end
+    end
+
+    if output:sub(1, 6) == "ERROR=" or
+       (code ~= nil and code ~= 0) then
+      return {
+        state = "REVIEW",
+        error =
+          output ~= "" and
+          output or
+          ("exit code " .. tostring(code))
+      }
+    end
+
+    local result =
+      parse_output(output)
+
+    if not result.engineVersion then
+      return {
+        state = "REVIEW",
+        error = "el ejecutable no reportó ENGINE_VERSION"
+      }
+    end
+
+    if result.confidence >=
+       RESIDUAL_MIN_CONFIDENCE then
+
+      measurements[#measurements + 1] = {
+        samples = result.delaySamples,
+        ms = result.delayMs,
+        confidence = result.confidence
+      }
+    end
+  end
+
+  if #measurements < 2 then
+    return {
+      state = "REVIEW",
+      error = "menos de 2 mediciones residuales confiables",
+      measurements = measurements
+    }
+  end
+
+  local sampleValues = {}
+  local msValues = {}
+  local confidenceValues = {}
+  local minSample = math.huge
+  local maxSample = -math.huge
+
+  for _, measurement in ipairs(measurements) do
+    sampleValues[#sampleValues + 1] =
+      measurement.samples
+    msValues[#msValues + 1] =
+      measurement.ms
+    confidenceValues[#confidenceValues + 1] =
+      measurement.confidence
+
+    minSample =
+      math.min(
+        minSample,
+        measurement.samples)
+
+    maxSample =
+      math.max(
+        maxSample,
+        measurement.samples)
+  end
+
+  local residualSamples =
+    median_values(sampleValues)
+
+  local residualMs =
+    median_values(msValues)
+
+  local confidence =
+    median_values(confidenceValues)
+
+  local spread =
+    maxSample - minSample
+
+  job.residualSamples = residualSamples
+  job.residualMs = residualMs
+  job.residualConfidence = confidence
+  job.residualSpread = spread
+
+  if confidence < RESIDUAL_MIN_CONFIDENCE or
+     spread > RESIDUAL_SPREAD_TOLERANCE_SAMPLES then
+
+    return {
+      state = "REVIEW",
+      residualSamples = residualSamples,
+      residualMs = residualMs,
+      confidence = confidence,
+      spread = spread,
+      measurements = measurements,
+      error =
+        spread > RESIDUAL_SPREAD_TOLERANCE_SAMPLES and
+        string.format(
+          "mediciones no consistentes · spread %.3f samples",
+          spread) or
+        "confidence residual insuficiente"
+    }
+  end
+
+  if math.abs(residualSamples) <
+     RESIDUAL_SIGNIFICANT_SAMPLES then
+
+    return {
+      state = "ALIGNED",
+      residualSamples = residualSamples,
+      residualMs = residualMs,
+      confidence = confidence,
+      spread = spread,
+      measurements = measurements
+    }
+  end
+
+  return {
+    state = "ELIGIBLE",
+    residualSamples = residualSamples,
+    residualMs = residualMs,
+    confidence = confidence,
+    spread = spread,
+    measurements = measurements
+  }
+end
+
+local function apply_residual_direct(job, result)
+  if not result or
+     result.state ~= "ELIGIBLE" then
+    return false, "residual no elegible"
+  end
+
+  local take = job.sourceTake
+  if not take then
+    return false, "sin take"
+  end
+
+  local rate =
+    reaper.GetMediaItemTakeInfo_Value(
+      take, "D_PLAYRATE")
+
+  if rate <= 0 then
+    return false, "PLAYRATE inválido"
+  end
+
+  local offs =
+    reaper.GetMediaItemTakeInfo_Value(
+      take, "D_STARTOFFS")
+
+  local target =
+    offs +
+    (result.residualMs / 1000.0) * rate
+
+  reaper.SetMediaItemTakeInfo_Value(
+    take,
+    "D_STARTOFFS",
+    target)
+
+  reaper.UpdateItemInProject(
+    job.sourceItem)
+
+  local verification =
+    run_quick_residual(job)
+
+  if not verification or
+     verification.state ~= "ALIGNED" or
+     math.abs(
+       verification.residualSamples or 0.0) >
+     RESIDUAL_POST_TOLERANCE_SAMPLES then
+
+    reaper.SetMediaItemTakeInfo_Value(
+      take,
+      "D_STARTOFFS",
+      offs)
+
+    reaper.UpdateItemInProject(
+      job.sourceItem)
+
+    return false,
+      string.format(
+        "residual no verificado · antes %+0.3f samples · después %+0.3f samples · corrección revertida",
+        result.residualSamples or 0.0,
+        verification and
+          verification.residualSamples or
+          0.0)
+  end
+
+  job.residualBefore =
+    result.residualSamples
+
+  job.residualAfter =
+    verification.residualSamples
+
+  job.residualApplied =
+    true
+
+  return true
+end
+
+local function write_residual_metadata(
+  job,
+  state,
+  message)
+
+  if not job.sourceItem then
+    return
+  end
+
+  reaper.GetSetMediaItemInfo_String(
+    job.sourceItem,
+    "P_EXT:SmartAlignPost.Residual.Samples",
+    string.format(
+      "%.9f",
+      job.residualSamples or 0.0),
+    true)
+
+  reaper.GetSetMediaItemInfo_String(
+    job.sourceItem,
+    "P_EXT:SmartAlignPost.Residual.Confidence",
+    string.format(
+      "%.6f",
+      job.residualConfidence or 0.0),
+    true)
+
+  reaper.GetSetMediaItemInfo_String(
+    job.sourceItem,
+    "P_EXT:SmartAlignPost.Residual.Status",
+    state or "",
+    true)
+
+  if message then
+    reaper.GetSetMediaItemInfo_String(
+      job.sourceItem,
+      "P_EXT:SmartAlignPost.Residual.Message",
+      message,
+      true)
+  end
+end
+
+local function residual_pass()
+  if not applied or #jobs == 0 then
+    return
+  end
+
+  local aligned = 0
+  local corrected = 0
+  local review = 0
+  local errors = {}
+
+  reaper.Undo_BeginBlock()
+
+  for _, job in ipairs(jobs) do
+    if type(job.status) == "string" and
+       job.status:match("^APPLIED") then
+
+      local quick =
+        run_quick_residual(job)
+
+      if quick.state == "ALIGNED" then
+        aligned = aligned + 1
+
+        job.residualSamples =
+          quick.residualSamples
+        job.residualMs =
+          quick.residualMs
+        job.residualConfidence =
+          quick.confidence
+        job.status = "ALIGNED"
+
+        write_residual_metadata(
+          job,
+          "ALIGNED",
+          "Quick residual check OK.")
+
+      elseif quick.state == "ELIGIBLE" then
+        local ok, err =
+          apply_residual_direct(
+            job,
+            quick)
+
+        if ok then
+          corrected = corrected + 1
+          job.status =
+            string.format(
+              "RESIDUAL APPLIED · %.3f→%.3f samples",
+              quick.residualSamples or 0.0,
+              job.residualAfter or 0.0)
+
+          write_residual_metadata(
+            job,
+            "APPLIED",
+            "Residual directo verificado.")
+        else
+          review = review + 1
+          job.status = "RESIDUAL REVIEW"
+          job.error = err
+
+          errors[#errors + 1] =
+            string.format(
+              "%s / %s: %s",
+              master_scene_label(job.masterItem),
+              track_label(job.sourceTrack),
+              err)
+
+          write_residual_metadata(
+            job,
+            "REVIEW",
+            err)
+        end
+
+      else
+        -- Only inconclusive quick checks pay the cost of the full
+        -- analyzer. PHASE BATCH itself is not modified.
+        analyze_job(job)
+
+        local fullResidualSamples =
+          (job.delayMs / 1000.0) *
+          (job.masterRate or 48000.0)
+
+        if job.status == "READY" and
+           job.modeUsed == "STATIC" and
+           math.abs(fullResidualSamples) >=
+             RESIDUAL_SIGNIFICANT_SAMPLES and
+           job.confidence >= MIN_CONFIDENCE then
+
+          local fallback = {
+            state = "ELIGIBLE",
+            residualSamples = fullResidualSamples,
+            residualMs = job.delayMs,
+            confidence = job.confidence
+          }
+
+          local ok, err =
+            apply_residual_direct(
+              job,
+              fallback)
+
+          if ok then
+            corrected = corrected + 1
+            job.status =
+              string.format(
+                "RESIDUAL APPLIED · %.3f→%.3f samples",
+                fallback.residualSamples,
+                job.residualAfter or 0.0)
+
+            write_residual_metadata(
+              job,
+              "APPLIED",
+              "Residual verificado tras full fallback.")
+          else
+            review = review + 1
+            job.status = "RESIDUAL REVIEW"
+            job.error = err
+
+            errors[#errors + 1] =
+              string.format(
+                "%s / %s: %s",
+                master_scene_label(job.masterItem),
+                track_label(job.sourceTrack),
+                err)
+
+            write_residual_metadata(
+              job,
+              "REVIEW",
+              err)
+          end
+
+        elseif job.status == "READY" and
+               job.modeUsed == "STATIC" and
+               math.abs(fullResidualSamples) <
+                 RESIDUAL_SIGNIFICANT_SAMPLES then
+
+          aligned = aligned + 1
+
+          job.residualSamples =
+            fullResidualSamples
+          job.residualMs =
+            job.delayMs
+          job.residualConfidence =
+            job.confidence
+          job.status = "ALIGNED"
+
+          write_residual_metadata(
+            job,
+            "ALIGNED",
+            "Full residual fallback OK.")
+        else
+          review = review + 1
+          job.status = "RESIDUAL REVIEW"
+          local message = quick.error or
+            "residual requiere revisión"
+
+          job.error = message
+
+          errors[#errors + 1] =
+            string.format(
+              "%s / %s: %s",
+              master_scene_label(job.masterItem),
+              track_label(job.sourceTrack),
+              message)
+
+          write_residual_metadata(
+            job,
+            "REVIEW",
+            message)
+        end
+      end
+
+      draw_ui()
+      gfx.update()
+    end
+  end
+
+  reaper.UpdateArrange()
+
+  reaper.Undo_EndBlock(
+    "Smart Align Post — Residual Verify",
+    -1)
+
+  if #errors > 0 then
+    set_status(
+      string.format(
+        "RESIDUAL PARCIAL · %d OK · %d corregidos · %d revisión · %d errores · %s",
+        aligned,
+        corrected,
+        review,
+        #errors,
+        table.concat(errors, " | ")),
+      "warn")
+  else
+    set_status(
+      string.format(
+        "RESIDUAL VERIFICADO · %d OK · %d corregidos · %d revisión.",
+        aligned,
+        corrected,
+        review),
+      review > 0 and "warn" or "ok")
+  end
+end
+
+local function apply_all()
+  applied = false
+  apply_all_phase()
+  if applied then
+    residual_pass()
+  end
+end
+
 local function reset_results()
   jobs = {}
   analyzing = false
@@ -1171,7 +1816,7 @@ draw_ui = function()
 
   text(
     24, 50,
-    "PHASE BATCH · GCC-PHAT + waveform refinement",
+    "PHASE BATCH · GCC-PHAT + waveform refinement · RESIDUAL AUTO VERIFY",
     15, 160, 175, 190)
 
   text(
@@ -1318,6 +1963,16 @@ draw_ui = function()
     status,
     13, rr, gg, bb)
 
+  local footer =
+    "Diseñado y creado por Ramiro N. Alvarez · con herramientas de IA."
+  local footerWidth = gfx.measurestr(footer)
+
+  text(
+    (gfx.w - footerWidth) * 0.5,
+    gfx.h - 18,
+    footer,
+    11, 125, 130, 140)
+
   local hasMaster = masterTrack ~= nil
   local hasSelection = reaper.CountSelectedMediaItems(0) >= 2
 
@@ -1455,7 +2110,7 @@ local function loop()
 end
 
 gfx.init(
-  "Smart Align Post — PHASE BATCH",
+  "Smart Align Post",
   WIN_W, WIN_H)
 
 gfx.clear =

@@ -45,18 +45,13 @@ jobs:
           if (-not (Test-Path $exe)) { throw "No se encontró $exe" }
           Copy-Item $exe artifacts/package/SmartAlignPost/
 
-          $luaBatch = 'reaper/Smart Align Post - PHASE BATCH.lua'
-          if (-not (Test-Path $luaBatch)) { throw "No se encontró $luaBatch" }
-          Copy-Item $luaBatch artifacts/package/SmartAlignPost/
-
-          $luaResidual = 'reaper/Smart Align Post - RESIDUAL BY ITEM.lua'
-          if (-not (Test-Path $luaResidual)) { throw "No se encontró $luaResidual" }
-          Copy-Item $luaResidual artifacts/package/SmartAlignPost/
+          $luaUnified = 'reaper/Smart Align Post.lua'
+          if (-not (Test-Path $luaUnified)) { throw "No se encontró $luaUnified" }
+          Copy-Item $luaUnified artifacts/package/SmartAlignPost/
 
           $required = @(
             'SmartAlignPostPrototype.exe',
-            'Smart Align Post - PHASE BATCH.lua',
-            'Smart Align Post - RESIDUAL BY ITEM.lua'
+            'Smart Align Post.lua'
           )
 
           foreach ($name in $required) {
@@ -80,9 +75,8 @@ jobs:
             $names = $archive.Entries | ForEach-Object { $_.FullName }
 
             $expected = @(
-              'SmartAlignPost/SmartAlignPostPrototype.exe',
-              'SmartAlignPost/Smart Align Post - PHASE BATCH.lua',
-              'SmartAlignPost/Smart Align Post - RESIDUAL BY ITEM.lua'
+                'SmartAlignPost/SmartAlignPostPrototype.exe',
+              'SmartAlignPost/Smart Align Post.lua'
             )
 
             foreach ($entry in $expected) {
