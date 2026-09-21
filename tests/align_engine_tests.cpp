@@ -109,7 +109,7 @@ static std::vector<float> makeImpulseReverbSignal(
 {
     std::vector<float> x(n, 0.0f);
 
-    std::mt19937 rng(0x51A7C1APu);
+    std::mt19937 rng(0x51A7C1Au);
     std::uniform_real_distribution<double> noise(-1.0, 1.0);
 
     for (std::size_t i = onset;
