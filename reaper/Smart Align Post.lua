@@ -401,6 +401,9 @@ local function parse_output(output)
     delaySamples = tonumber(output:match("DELAY_SAMPLES=([%+%-]?[%d%.]+)")) or 0.0,
     delayMs = tonumber(output:match("DELAY_MS=([%+%-]?[%d%.]+)")) or 0.0,
     confidence = tonumber(output:match("CONFIDENCE=([%+%-]?[%d%.]+)")) or 0.0,
+    correlation = tonumber(output:match("CORRELATION=([%+%-]?[%d%.eE]+)")) or 0.0,
+    supportWindows = tonumber(output:match("SUPPORT_WINDOWS=([%d]+)")) or 0,
+    evidenceInsufficient = output:match("EVIDENCE_INSUFFICIENT=1") ~= nil,
     analyzeMs = tonumber(output:match("ANALYZE_MS=([%+%-]?[%d%.]+)")) or 0.0,
     curve = {},
     scoutTelemetry = output:find("SCOUT_POINTS=", 1, true) ~= nil
@@ -678,6 +681,32 @@ local function run_analysis(items)
   end
 
   reaper.defer(step)
+end
+
+local function directStaticApplyEvidence(job)
+  if not job or
+     job.status ~= "READY" or
+     job.modeUsed ~= "STATIC" then
+    return false
+  end
+
+  -- AUTO may deliberately return low statistical confidence when there is
+  -- only one physical onset anchor. That penalty measures redundancy, not
+  -- the quality of the direct-arrival measurement itself.
+  --
+  -- Permit APPLY only for this narrowly defined case:
+  --   • exactly one scout observation;
+  --   • one static support window;
+  --   • engine explicitly reports insufficient redundancy;
+  --   • measured direct correlation remains strong.
+  --
+  -- This is designed for isolated impulsive/direct-arrival material such as
+  -- the BOOM/LAV onset case. It does not weaken the normal 0.72 gate for
+  -- ordinary low-confidence STATIC results.
+  return job.scoutPoints == 1 and
+         job.supportWindows == 1 and
+         job.evidenceInsufficient == true and
+         (job.correlation or 0.0) >= 0.55
 end
 
 local function correctionSeconds(job)
@@ -1064,9 +1093,13 @@ local function apply_all_phase_step()
     job.modeUsed == "DYNAMIC" and
     #job.curve >= 2
 
+  local directStaticReady =
+    directStaticApplyEvidence(job)
+
   local confidenceAccept =
     job.confidence >= MIN_CONFIDENCE or
-    dynamicReady
+    dynamicReady or
+    directStaticReady
 
   set_status(
     string.format(
@@ -1144,7 +1177,7 @@ local function apply_all_phase()
        job.confidence < MIN_CONFIDENCE then
       if job.modeUsed == "DYNAMIC" and #job.curve >= 2 then
         lowDynamic = lowDynamic + 1
-      else
+      elseif not directStaticApplyEvidence(job) then
         lowStatic = lowStatic + 1
       end
     end
