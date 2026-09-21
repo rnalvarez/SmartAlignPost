@@ -25,7 +25,7 @@
 local WIN_W, WIN_H = 1080, 650
 local MIN_CONFIDENCE = 0.72
 local EXE_NAME = "SmartAlignPostPrototype.exe"
-local REQUIRED_ENGINE_VERSION = "20260920-dynamic-render-2"
+local REQUIRED_ENGINE_VERSION = "20260920-dynamic-scout-1"
 
 -- Residual verification is intentionally cheap: three short STATIC
 -- measurements after APPLY. Only inconclusive cases pay for full analysis.
@@ -1006,7 +1006,6 @@ local function finalize_apply_phase()
     "Smart Align Post — Phase Batch Apply",
     -1)
 
-  applying = false
   applyState = nil
   applied = true
 
@@ -1039,6 +1038,9 @@ local function finalize_apply_phase()
   -- Give the UI one full REAPER cycle before starting RESIDUAL.
   reaper.defer(function()
     residual_pass()
+    applying = false
+    draw_ui()
+    gfx.update()
   end)
 end
 
@@ -2097,7 +2099,7 @@ draw_ui = function()
   button(
     gfx.w - 145, fy + 8, 127, 38,
     "CLOSE",
-    true,
+    not analyzing and not applying,
     false)
 end
 
