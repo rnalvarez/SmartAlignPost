@@ -10,6 +10,11 @@
     <color name="Good" rgba="#79d99aff"/>
   </colors>
 
+  <control-tags>
+    <control-tag name="ResidualSamples" tag="1001"/>
+    <control-tag name="ApplyResidual" tag="1002"/>
+  </control-tags>
+
   <gradients>
     <gradient name="ButtonGradient">
       <color-stop rgba="#474950ff" start="0"/>
@@ -54,7 +59,7 @@
         class="CParamDisplay"
         origin="30, 88"
         size="220, 44"
-        control-tag="Residual Samples"
+        control-tag="ResidualSamples"
         font="~ NormalFontVeryBig"
         font-color="Text"
         back-color="Panel2"
@@ -77,7 +82,8 @@
         class="COnOffButton"
         origin="30, 154"
         size="220, 42"
-        control-tag="Apply Residual"
+        control-tag="ApplyResidual"
+        title="APPLY RESIDUAL"
         tooltip="Activa o desactiva la corrección residual ya cuantificada."
         frame-color="Muted"
         frame-width="1"
