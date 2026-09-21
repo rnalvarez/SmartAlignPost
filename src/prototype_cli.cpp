@@ -1196,6 +1196,9 @@ int main(int argc, char** argv)
               << result.staticCorrelation << "\n";
     std::cout << "SUPPORT_WINDOWS="
               << result.staticSupportWindows << "\n";
+    std::cout << "STATIC_DELAY_MAD_SAMPLES="
+              << result.staticDelayMADSamples
+              << "\n";
     std::cout << "TOTAL_WINDOWS="
               << result.staticTotalWindows << "\n";
     std::cout << "CURVE_COUNT="
@@ -1212,9 +1215,15 @@ int main(int argc, char** argv)
               << result.scoutDirectionConsistency << "\n";
     std::cout << "SCOUT_ROBUST_SHIFT_MS="
               << result.scoutRobustShiftSamples * 1000.0 / sr << "\n";
+    std::cout << "SCOUT_STEP_MAD_SAMPLES="
+              << result.scoutStepMADSamples
+              << "\n";
     std::cout << "SCOUT_COHERENT="
               << (result.scoutCoherent ? 1 : 0) << "\n";
 
+    std::cout << "EVIDENCE_INSUFFICIENT="
+              << (result.evidenceInsufficient ? 1 : 0)
+              << "\n";
     for (const auto& p : result.curve) {
         const double delayMs =
             p.delaySamples * 1000.0 / sr;
