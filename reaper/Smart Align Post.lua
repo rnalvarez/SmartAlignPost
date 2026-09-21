@@ -1224,7 +1224,7 @@ local function run_quick_residual(job)
 
     local exe =
       script_dir() ..
-      "\" ..
+      "\\" ..
       EXE_NAME
 
     local cmd =
@@ -1232,7 +1232,7 @@ local function run_quick_residual(job)
       quote(masterPath) .. " " ..
       quote(sourcePath) .. " " ..
       string.format(
-        ""%.9f" "%.9f" "%.6f" "%.9f" "%.9f" STATIC",
+        "\"%.9f\" \"%.9f\" \"%.6f\" \"%.9f\" \"%.9f\" STATIC",
         masterStart,
         sourceStart,
         windowSec,
