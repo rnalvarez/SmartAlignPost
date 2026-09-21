@@ -23,6 +23,10 @@ struct Settings {
     double anchorSeparationMs = 180.0;
     std::size_t staticAnchorCount = 8;
     std::size_t maxDynamicAnchors = 240;
+    // Local waveform fallback used by the AUTO DYNAMIC scout when a
+    // consolidated/timestretched SOURCE weakens GCC-PHAT confidence.
+    double dynamicScoutWindowMs = 12.0;
+    double dynamicScoutSearchMs = 3.0;
     double phaseMinHz = 250.0;
     double phaseMaxHz = 7000.0;
     // Known project-time playback-rate ratio SOURCE / MASTER. A value
