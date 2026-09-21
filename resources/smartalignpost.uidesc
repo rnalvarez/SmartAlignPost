@@ -89,7 +89,7 @@
         text-color-highlighted="Text"
         gradient="ButtonGradient"
         gradient-highlighted="ButtonGradientHi"
-        kick-style="true"
+        kick-style="false"
         round-radius="8"/>
 
     <view
