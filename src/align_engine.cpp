@@ -535,7 +535,8 @@ bool isImpulsiveMaterial(
                             2,
                             std::min<std::size_t>(
                                 settings.maxDynamicAnchors,
-                                32)));
+                                32)),
+                        settings.sampleRate));
 
                 if (timeline.size() >= 2) {
                     result.curve.clear();
@@ -587,7 +588,8 @@ bool isImpulsiveMaterial(
                     std::llround(
                         std::max(250.0, settings.hopMs) *
                         settings.sampleRate / 1000.0))),
-            7);
+            7,
+            settings.sampleRate);
 
         Measurement bestMeasurement;
         bool haveBest = false;
@@ -651,7 +653,8 @@ bool isImpulsiveMaterial(
                     std::llround(
                         std::max(250.0, settings.hopMs) *
                         settings.sampleRate / 1000.0))),
-            7);
+            7,
+            settings.sampleRate);
 
         std::vector<std::pair<double, double>> scout;
         scout.reserve(scoutAnchors.size());
@@ -999,7 +1002,8 @@ bool isImpulsiveMaterial(
         source,
         window,
         dynamicHop,
-        std::max<std::size_t>(1, settings.maxDynamicAnchors));
+        std::max<std::size_t>(1, settings.maxDynamicAnchors),
+        settings.sampleRate);
 
     if (anchors.empty()) {
         result.modeUsed = Mode::Static;
@@ -1126,7 +1130,8 @@ bool isImpulsiveMaterial(
                         2,
                         std::min<std::size_t>(
                             settings.maxDynamicAnchors,
-                            32)));
+                            32)),
+                    settings.sampleRate));
 
             if (timeline.size() >= 2) {
                 const double durationSec =
