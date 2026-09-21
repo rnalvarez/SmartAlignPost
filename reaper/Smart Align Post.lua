@@ -1262,11 +1262,11 @@ local function run_quick_residual(job)
     end
 
     processResult =
-      processResult:gsub("\\r\\n", "\\n")
-        :gsub("\\r", "\\n")
+      processResult:gsub("\r\n", "\n")
+        :gsub("\r", "\n")
 
     local firstNl =
-      processResult:find("\\n", 1, true)
+      processResult:find("\n", 1, true)
     local code = nil
     local output = processResult
 
