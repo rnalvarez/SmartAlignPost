@@ -525,6 +525,21 @@ int main(int argc, char** argv)
                     output,
                     "POST_DELAY_SAMPLES");
 
+            const double residualSpan =
+                field(
+                    output,
+                    "POST_RESIDUAL_SPAN_SAMPLES");
+
+            if (!std::isfinite(residualSpan) ||
+                residualSpan > 3.0) {
+                std::cerr
+                    << "dynamic render residual span too large: "
+                    << residualSpan
+                    << " samples\n"
+                    << output;
+                return 20;
+            }
+
             if (!std::isfinite(residual) ||
                 std::abs(residual) > 2.0) {
                 std::cerr
