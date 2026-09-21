@@ -25,7 +25,7 @@
 local WIN_W, WIN_H = 1080, 650
 local MIN_CONFIDENCE = 0.72
 local EXE_NAME = "SmartAlignPostPrototype.exe"
-local REQUIRED_ENGINE_VERSION = "20260921-onset-evidence-1"
+local REQUIRED_ENGINE_VERSION = "20260921-onset-evidence-2"
 
 -- Residual verification is intentionally cheap: three short STATIC
 -- measurements after APPLY. Only inconclusive cases pay for full analysis.
