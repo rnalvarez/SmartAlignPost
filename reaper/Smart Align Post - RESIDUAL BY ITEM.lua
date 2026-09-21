@@ -841,9 +841,15 @@ local function apply_static_residual(job)
     tonumber(job.residualSamples) or 0.0
 
   if job.modeUsed ~= "STATIC" then
+    reaper.SetMediaItemTakeInfo_Value(
+      take,
+      "D_STARTOFFS",
+      offs)
+    reaper.UpdateItemInProject(job.sourceItem)
+
     return false,
       string.format(
-        "verificación inválida · MODE=%s · residual post %+0.3f samples",
+        "verificación inválida · MODE=%s · residual post %+0.3f samples · corrección revertida",
         tostring(job.modeUsed),
         postResidual)
   end
@@ -851,9 +857,15 @@ local function apply_static_residual(job)
   if math.abs(postResidual) >
      MAX_POST_RESIDUAL_SAMPLES then
 
+    reaper.SetMediaItemTakeInfo_Value(
+      take,
+      "D_STARTOFFS",
+      offs)
+    reaper.UpdateItemInProject(job.sourceItem)
+
     return false,
       string.format(
-        "corrección no verificada · antes %+0.3f samples · después %+0.3f samples",
+        "corrección no verificada · antes %+0.3f samples · después %+0.3f samples · corrección revertida",
         residualSamples,
         postResidual)
   end
