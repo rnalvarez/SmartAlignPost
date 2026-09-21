@@ -102,6 +102,57 @@ static std::vector<float> varyingDelaySignal(
     return y;
 }
 
+static std::vector<float> makeImpulseReverbSignal(
+    std::size_t n,
+    std::size_t onset,
+    double sampleRate)
+{
+    std::vector<float> x(n, 0.0f);
+
+    std::mt19937 rng(0x51A7C1APu);
+    std::uniform_real_distribution<double> noise(-1.0, 1.0);
+
+    for (std::size_t i = onset;
+         i < n;
+         ++i) {
+        const double t =
+            static_cast<double>(i - onset) /
+            sampleRate;
+
+        // Broadband direct transient: strong attack concentrated in the
+        // first few milliseconds.
+        const double direct =
+            t < 0.008
+                ? 1.4 *
+                    std::exp(-t / 0.0018) *
+                    (0.70 + 0.30 * noise(rng))
+                : 0.0;
+
+        // Independent, decaying room tail. It deliberately occupies much
+        // more of the recording than the direct sound but is not identical
+        // between microphones.
+        const double room =
+            0.34 *
+            std::exp(-t / 0.115) *
+            noise(rng);
+
+        const double earlyReflection =
+            (t >= 0.018 && t < 0.026)
+                ? 0.42 *
+                    std::exp(
+                        -(t - 0.018) / 0.003) *
+                    (0.7 + 0.3 * noise(rng))
+                : 0.0;
+
+        x[i] = static_cast<float>(
+            direct +
+            room +
+            earlyReflection);
+    }
+
+    return x;
+}
+
 static bool approx(
     double a,
     double b,
@@ -113,6 +164,128 @@ static bool approx(
 int main()
 {
     constexpr double sr = 48000.0;
+
+    std::cerr
+        << "PHASE TEST: impulsive transient with reverb
+";
+
+    {
+        constexpr std::size_t n =
+            static_cast<std::size_t>(
+                sr * 1.45);
+
+        constexpr std::size_t onset =
+            static_cast<std::size_t>(
+                sr * 0.310);
+
+        constexpr double expected =
+            -339.0;
+
+        const auto master =
+            makeImpulseReverbSignal(
+                n,
+                onset,
+                sr);
+
+        auto source =
+            delaySignal(
+                master,
+                expected);
+
+        // Give SOURCE a different reverberant tail while keeping the first
+        // direct arrival strongly correlated. This models the boom/lav
+        // acoustic-path difference that defeats full-band PHAT matching.
+        std::mt19937 rng(0xA17C0DEu);
+        std::normal_distribution<double> roomNoise(
+            0.0,
+            0.10);
+
+        for (std::size_t i = onset;
+             i < n;
+             ++i) {
+            const double t =
+                static_cast<double>(i - onset) /
+                sr;
+
+            if (t > 0.008) {
+                source[i] = static_cast<float>(
+                    0.55 * source[i] +
+                    0.45 *
+                        std::exp(-t / 0.11) *
+                        roomNoise(rng));
+            }
+        }
+
+        sap::Settings s;
+        s.sampleRate = sr;
+        s.maxDelayMs = 40.0;
+        s.analysisWindowMs = 60.0;
+        s.hopMs = 250.0;
+        s.minConfidence = 0.72;
+
+        s.mode = sap::Mode::Static;
+        const auto rStatic =
+            sap::AlignEngine::analyze(
+                master,
+                source,
+                s);
+
+        if (!approx(
+                rStatic.staticDelaySamples,
+                expected,
+                10.0)) {
+            std::cerr
+                << "impulsive static delay failed: got "
+                << rStatic.staticDelaySamples
+                << " expected "
+                << expected
+                << " support="
+                << rStatic.staticSupportWindows
+                << " total="
+                << rStatic.staticTotalWindows
+                << " MAD="
+                << rStatic.staticDelayMADSamples
+                << "
+";
+            return 17;
+        }
+
+        if (rStatic.staticSupportWindows < 1 ||
+            rStatic.staticConfidence > 0.35) {
+            std::cerr
+                << "impulsive confidence redundancy failed: support="
+                << rStatic.staticSupportWindows
+                << " confidence="
+                << rStatic.staticConfidence
+                << "
+";
+            return 18;
+        }
+
+        s.mode = sap::Mode::Auto;
+        const auto rAuto =
+            sap::AlignEngine::analyze(
+                master,
+                source,
+                s);
+
+        if (rAuto.modeUsed != sap::Mode::Static ||
+            !rAuto.evidenceInsufficient ||
+            rAuto.scoutPoints >= 4) {
+            std::cerr
+                << "impulsive AUTO evidence gate failed: mode="
+                << (rAuto.modeUsed == sap::Mode::Dynamic
+                        ? "DYNAMIC"
+                        : "STATIC")
+                << " evidenceInsufficient="
+                << (rAuto.evidenceInsufficient ? 1 : 0)
+                << " scoutPoints="
+                << rAuto.scoutPoints
+                << "
+";
+            return 19;
+        }
+    }
 
     std::cerr << "PHASE TEST: integer delay\n";
 
