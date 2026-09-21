@@ -166,8 +166,7 @@ int main()
     constexpr double sr = 48000.0;
 
     std::cerr
-        << "PHASE TEST: impulsive transient with reverb
-";
+        << "PHASE TEST: impulsive transient with reverb\n";
 
     {
         constexpr std::size_t n =
@@ -245,8 +244,7 @@ int main()
                 << rStatic.staticTotalWindows
                 << " MAD="
                 << rStatic.staticDelayMADSamples
-                << "
-";
+                << "\n";
             return 17;
         }
 
@@ -257,8 +255,7 @@ int main()
                 << rStatic.staticSupportWindows
                 << " confidence="
                 << rStatic.staticConfidence
-                << "
-";
+                << "\n";
             return 18;
         }
 
@@ -281,8 +278,7 @@ int main()
                 << (rAuto.evidenceInsufficient ? 1 : 0)
                 << " scoutPoints="
                 << rAuto.scoutPoints
-                << "
-";
+                << "\n";
             return 19;
         }
     }
