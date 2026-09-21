@@ -525,6 +525,21 @@ int main(int argc, char** argv)
                     output,
                     "POST_DELAY_SAMPLES");
 
+            const double residualSpan =
+                field(
+                    output,
+                    "POST_RESIDUAL_SPAN_SAMPLES");
+
+            if (!std::isfinite(residualSpan) ||
+                residualSpan > 3.0) {
+                std::cerr
+                    << "dynamic render residual span too large: "
+                    << residualSpan
+                    << " samples\n"
+                    << output;
+                return 20;
+            }
+
             if (!std::isfinite(residual) ||
                 std::abs(residual) > 2.0) {
                 std::cerr
@@ -539,6 +554,93 @@ int main(int argc, char** argv)
                 std::cerr
                     << "dynamic renderer did not create output WAV\n";
                 return 12;
+            }
+        }
+
+        // DYNAMIC_RENDER must also honor an externally supplied curve.
+        // The REAPER PHASE BATCH layer passes the already analyzed scene
+        // trajectory, preventing the renderer from silently re-analyzing a
+        // different scene/overlap and producing a different correction.
+        {
+            const auto curvePath =
+                base / "scene_curve.csv";
+
+            {
+                std::ofstream curve(curvePath);
+                curve
+                    << "0.000000000,72.000000000\n"
+                    << "3.000000000,111.000000000\n"
+                    << "6.000000000,150.000000000\n"
+                    << "9.000000000,189.000000000\n"
+                    << "12.000000000,228.000000000\n";
+            }
+
+            const auto dynamicSource =
+                varyingDelaySignal(
+                    master,
+                    72.0,
+                    228.0);
+
+            const auto dynamicSourcePath =
+                base / "curve_file_source.wav";
+            const auto curveCorrectedPath =
+                base / "curve_file_corrected.wav";
+
+            writeFloatWav(
+                dynamicSourcePath,
+                dynamicSource,
+                sr);
+
+            std::string output;
+            int status = 1;
+
+            const std::string args =
+                shellQuote(masterPath.string()) + " " +
+                shellQuote(dynamicSourcePath.string()) +
+                " 0 0 12 1 1 DYNAMIC_RENDER " +
+                shellQuote(curveCorrectedPath.string()) + " " +
+                shellQuote(curvePath.string());
+
+            if (!runCommand(
+                    argv[1],
+                    args,
+                    output,
+                    status)) {
+                throw std::runtime_error(
+                    "could not launch curve-file dynamic renderer");
+            }
+
+            if (status != 0 ||
+                output.find("POST_VALID=1") ==
+                    std::string::npos ||
+                output.find("RENDER_CURVE_SOURCE=ANALYZED_JOB") ==
+                    std::string::npos) {
+                std::cerr
+                    << "curve-file dynamic render was not validated\n"
+                    << output;
+                return 17;
+            }
+
+            const double residual =
+                field(
+                    output,
+                    "POST_DELAY_SAMPLES");
+
+            if (!std::isfinite(residual) ||
+                std::abs(residual) > 2.0) {
+                std::cerr
+                    << "curve-file dynamic residual too large: "
+                    << residual
+                    << " samples\n"
+                    << output;
+                return 18;
+            }
+
+            if (!std::filesystem::exists(
+                    curveCorrectedPath)) {
+                std::cerr
+                    << "curve-file dynamic renderer did not create output WAV\n";
+                return 19;
             }
         }
 

@@ -8,6 +8,7 @@
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <sstream>
 #include <vector>
 
 namespace {
@@ -262,6 +263,100 @@ bool loadWav(
         out.mono[i] =
             static_cast<float>(sum / out.channels);
     }
+
+    return true;
+}
+
+bool readCurveFile(
+    const std::string& path,
+    std::vector<sap::Point>& curve,
+    std::string& error)
+{
+    std::ifstream f(path);
+    if (!f) {
+        error = "No se pudo abrir la curva DYNAMIC: " + path;
+        return false;
+    }
+
+    curve.clear();
+
+    std::string line;
+    std::size_t lineNumber = 0;
+
+    while (std::getline(f, line)) {
+        ++lineNumber;
+
+        if (!line.empty() &&
+            line.back() == '\r') {
+            line.pop_back();
+        }
+
+        std::string trimmed = line;
+
+        const auto first = trimmed.find_first_not_of(" \t");
+        if (first == std::string::npos)
+            continue;
+
+        if (trimmed[first] == '#')
+            continue;
+
+        const auto comma = trimmed.find(',', first);
+        if (comma == std::string::npos) {
+            error =
+                "Curva DYNAMIC inválida en línea " +
+                std::to_string(lineNumber);
+            return false;
+        }
+
+        try {
+            const double timeSec =
+                std::stod(
+                    trimmed.substr(
+                        first,
+                        comma - first));
+
+            const double delaySamples =
+                std::stod(
+                    trimmed.substr(comma + 1));
+
+            if (!std::isfinite(timeSec) ||
+                !std::isfinite(delaySamples)) {
+                error =
+                    "Curva DYNAMIC no finita en línea " +
+                    std::to_string(lineNumber);
+                return false;
+            }
+
+            sap::Point p;
+            p.timeSec = timeSec;
+            p.delaySamples = delaySamples;
+            p.confidence = 1.0;
+            p.keyPoint = true;
+            p.phatDelaySamples = delaySamples;
+            p.waveformDelaySamples = delaySamples;
+            p.phaseAgreement = 1.0;
+
+            curve.push_back(p);
+        } catch (...) {
+            error =
+                "Curva DYNAMIC inválida en línea " +
+                std::to_string(lineNumber);
+            return false;
+        }
+    }
+
+    if (curve.size() < 2) {
+        error =
+            "Curva DYNAMIC necesita al menos 2 puntos.";
+        return false;
+    }
+
+    std::sort(
+        curve.begin(),
+        curve.end(),
+        [](const sap::Point& a, const sap::Point& b) {
+            return a.timeSec < b.timeSec;
+        });
 
     return true;
 }
@@ -661,10 +756,11 @@ const char* modeName(sap::Mode mode)
 
 int main(int argc, char** argv)
 {
-    if (argc != 3 && argc != 9 && argc != 10) {
+    if (argc != 3 && argc != 9 && argc != 10 && argc != 11) {
         std::cout
             << "ERROR=Uso: SmartAlignPostPrototype.exe MASTER.wav SOURCE.wav "
-               "[MASTER_START SOURCE_START DURATION MASTER_RATE SOURCE_RATE MODE [OUTPUT_WAV]]\n";
+               "[MASTER_START SOURCE_START DURATION MASTER_RATE SOURCE_RATE "
+               "MODE [OUTPUT_WAV [CURVE_FILE]]]\n";
         return 2;
     }
 
@@ -677,8 +773,9 @@ int main(int argc, char** argv)
     sap::Mode requestedMode = sap::Mode::Auto;
     bool renderDynamic = false;
     std::string outputWav;
+    std::string curveFile;
 
-    if (argc == 9 || argc == 10) {
+    if (argc == 9 || argc == 10 || argc == 11) {
         if (!parseDouble(argv[3], "MASTER_START_SEC", masterStart, error) ||
             !parseDouble(argv[4], "SOURCE_START_SEC", sourceStart, error) ||
             !parseDouble(argv[5], "DURATION_SEC", duration, error) ||
@@ -698,7 +795,7 @@ int main(int argc, char** argv)
         const std::string mode = argv[8];
 
         if (mode == "DYNAMIC_RENDER") {
-            if (argc != 10) {
+            if (argc != 10 && argc != 11) {
                 std::cout
                     << "ERROR=DYNAMIC_RENDER requiere OUTPUT_WAV.\n";
                 return 6;
@@ -707,6 +804,9 @@ int main(int argc, char** argv)
             requestedMode = sap::Mode::Dynamic;
             renderDynamic = true;
             outputWav = argv[9];
+
+            if (argc == 11)
+                curveFile = argv[10];
         }
         else {
             if (argc != 9) {
@@ -862,11 +962,25 @@ int main(int argc, char** argv)
 
 
     if (renderDynamic) {
-        if (result.modeUsed != sap::Mode::Dynamic ||
-            result.curve.size() < 2) {
-            std::cout
-                << "ERROR=DYNAMIC_RENDER no obtuvo una curva DYNAMIC válida.\\n";
-            return 11;
+        std::vector<sap::Point> renderCurve;
+
+        if (!curveFile.empty()) {
+            if (!readCurveFile(
+                    curveFile,
+                    renderCurve,
+                    error)) {
+                std::cout << "ERROR=" << error << "\\n";
+                return 11;
+            }
+        } else {
+            if (result.modeUsed != sap::Mode::Dynamic ||
+                result.curve.size() < 2) {
+                std::cout
+                    << "ERROR=DYNAMIC_RENDER no obtuvo una curva DYNAMIC válida.\\n";
+                return 11;
+            }
+
+            renderCurve = result.curve;
         }
 
         constexpr double kRenderPadSeconds = 0.080;
@@ -904,13 +1018,11 @@ int main(int argc, char** argv)
         // SOURCE is loaded from renderStart. Keep the item-start offset
         // in native SOURCE time (not project time), because the renderer
         // advances through native SOURCE frames using sourceRate.
+        //
+        // When CURVE_FILE is supplied, the Lua integration has already
+        // shifted the measured curve onto the item-relative timeline.
         std::vector<sap::Point> shiftedCurve =
-            result.curve;
-
-        for (auto& point : shiftedCurve) {
-            point.timeSec =
-                point.timeSec;
-        }
+            std::move(renderCurve);
 
         std::vector<float> correctedInterleaved;
         std::vector<float> correctedMono;
@@ -966,10 +1078,34 @@ int main(int argc, char** argv)
         const double residualSamples =
             postStatic.staticDelaySamples;
 
+        double postResidualSpanSamples = 0.0;
+        if (post.curve.size() >= 2) {
+            double minResidual = post.curve.front().delaySamples;
+            double maxResidual = minResidual;
+
+            for (const auto& point : post.curve) {
+                minResidual =
+                    std::min(
+                        minResidual,
+                        point.delaySamples);
+                maxResidual =
+                    std::max(
+                        maxResidual,
+                        point.delaySamples);
+            }
+
+            postResidualSpanSamples =
+                maxResidual - minResidual;
+        }
+
+        // Validation is based on residual magnitude and residual-curve span,
+        // never on the classifier label. A good correction may still be
+        // acoustically tagged DYNAMIC by AUTO after rendering.
         const bool postValid =
             std::isfinite(residualSamples) &&
+            std::isfinite(postResidualSpanSamples) &&
             std::abs(residualSamples) <= 2.0 &&
-            post.modeUsed != sap::Mode::Dynamic;
+            postResidualSpanSamples <= 3.0;
 
         std::cout
             << "POST_MODE_USED="
@@ -986,6 +1122,10 @@ int main(int argc, char** argv)
         std::cout
             << "POST_DELAY_MS="
             << residualSamples * 1000.0 / settings.sampleRate
+            << "\n";
+        std::cout
+            << "POST_RESIDUAL_SPAN_SAMPLES="
+            << postResidualSpanSamples
             << "\n";
         std::cout
             << "POST_CONFIDENCE="
@@ -1014,13 +1154,21 @@ int main(int argc, char** argv)
             << "\n";
         std::cout
             << "POST_VALID=1\n";
+        std::cout
+            << "RENDER_CURVE_SOURCE="
+            << (curveFile.empty() ? "REANALYZED" : "ANALYZED_JOB")
+            << "\n";
+        std::cout
+            << "RENDER_CURVE_COUNT="
+            << shiftedCurve.size()
+            << "\n";
     }
 
     const double totalMs =
         std::chrono::duration<double, std::milli>(
             analyzeEnd - totalStart).count();
 
-    constexpr const char* kEngineVersion = "20260920-dynamic-render-1";
+    constexpr const char* kEngineVersion = "20260921-onset-evidence-2";
 
     std::cout << "ENGINE_VERSION="
               << kEngineVersion << "\n";
@@ -1048,6 +1196,9 @@ int main(int argc, char** argv)
               << result.staticCorrelation << "\n";
     std::cout << "SUPPORT_WINDOWS="
               << result.staticSupportWindows << "\n";
+    std::cout << "STATIC_DELAY_MAD_SAMPLES="
+              << result.staticDelayMADSamples
+              << "\n";
     std::cout << "TOTAL_WINDOWS="
               << result.staticTotalWindows << "\n";
     std::cout << "CURVE_COUNT="
@@ -1064,9 +1215,15 @@ int main(int argc, char** argv)
               << result.scoutDirectionConsistency << "\n";
     std::cout << "SCOUT_ROBUST_SHIFT_MS="
               << result.scoutRobustShiftSamples * 1000.0 / sr << "\n";
+    std::cout << "SCOUT_STEP_MAD_SAMPLES="
+              << result.scoutStepMADSamples
+              << "\n";
     std::cout << "SCOUT_COHERENT="
               << (result.scoutCoherent ? 1 : 0) << "\n";
 
+    std::cout << "EVIDENCE_INSUFFICIENT="
+              << (result.evidenceInsufficient ? 1 : 0)
+              << "\n";
     for (const auto& p : result.curve) {
         const double delayMs =
             p.delaySamples * 1000.0 / sr;

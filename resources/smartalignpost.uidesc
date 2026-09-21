@@ -7,7 +7,14 @@
     <color name="Muted" rgba="#aeb4bdff"/>
     <color name="Button" rgba="#3b3d43ff"/>
     <color name="ButtonHi" rgba="#5a5e68ff"/>
+    <color name="Good" rgba="#79d99aff"/>
   </colors>
+
+  <control-tags>
+    <control-tag name="ResidualSamples" tag="1001"/>
+    <control-tag name="ApplyResidual" tag="1002"/>
+  </control-tags>
+
   <gradients>
     <gradient name="ButtonGradient">
       <color-stop rgba="#474950ff" start="0"/>
@@ -18,13 +25,91 @@
       <color-stop rgba="#444750ff" start="1"/>
     </gradient>
   </gradients>
-  <template name="view" class="CViewContainer" size="420, 230" minSize="420, 230" maxSize="420, 230" background-color="Panel" transparent="false">
-    <view class="CTextLabel" origin="20, 18" size="380, 34" title="SMART ALIGN POST" font="~ NormalFontVeryBig" font-color="Text" text-alignment="center" transparent="true"/>
-    <view class="CTextLabel" origin="30, 65" size="95, 28" title="MODE" font="~ NormalFont" font-color="Muted" text-alignment="left" transparent="true"/>
-    <view class="COptionMenu" origin="130, 61" size="260, 36" control-tag="Mode" font="~ NormalFont" font-color="Text" back-color="Panel2" frame-color="Muted" frame-width="1"/>
-    <view class="CTextLabel" origin="30, 108" size="360, 22" title="Reference / source selection will be added next" font="~ NormalFontSmall" font-color="Muted" text-alignment="center" transparent="true"/>
-    <view class="CTextButton" origin="30, 150" size="170, 48" control-tag="Analyze" title="ANALYZE" font="~ NormalFont" text-color="Text" text-color-highlighted="Text" gradient="ButtonGradient" gradient-highlighted="ButtonGradientHi" kick-style="true" round-radius="8"/>
-    <view class="CTextButton" origin="220, 150" size="170, 48" control-tag="Apply" title="APPLY" font="~ NormalFont" text-color="Text" text-color-highlighted="Text" gradient="ButtonGradient" gradient-highlighted="ButtonGradientHi" kick-style="true" round-radius="8"/>
-    <view class="CTextLabel" origin="30, 205" size="360, 16" title="Windows / REAPER prototype" font="~ NormalFontSmall" font-color="Muted" text-alignment="center" transparent="true"/>
+
+  <template
+      name="view"
+      class="CViewContainer"
+      size="440, 250"
+      minSize="440, 250"
+      maxSize="440, 250"
+      background-color="Panel"
+      transparent="false">
+
+    <view
+        class="CTextLabel"
+        origin="20, 18"
+        size="400, 30"
+        title="SMART ALIGN POST · RESIDUAL"
+        font="~ NormalFontVeryBig"
+        font-color="Text"
+        text-alignment="center"
+        transparent="true"/>
+
+    <view
+        class="CTextLabel"
+        origin="30, 58"
+        size="160, 22"
+        title="CUANTIFICACIÓN RESIDUAL"
+        font="~ NormalFontSmall"
+        font-color="Muted"
+        text-alignment="left"
+        transparent="true"/>
+
+    <view
+        class="CParamDisplay"
+        origin="30, 88"
+        size="220, 44"
+        control-tag="ResidualSamples"
+        font="~ NormalFontVeryBig"
+        font-color="Text"
+        back-color="Panel2"
+        frame-color="Muted"
+        frame-width="1"
+        text-alignment="center"
+        style-round-rect="true"/>
+
+    <view
+        class="CTextLabel"
+        origin="262, 99"
+        size="145, 24"
+        title="samples"
+        font="~ NormalFont"
+        font-color="Muted"
+        text-alignment="left"
+        transparent="true"/>
+
+    <view
+        class="CTextButton"
+        origin="30, 154"
+        size="220, 42"
+        control-tag="ApplyResidual"
+        title="APPLY RESIDUAL"
+        font="~ NormalFont"
+        text-color="Text"
+        text-color-highlighted="Text"
+        gradient="ButtonGradient"
+        gradient-highlighted="ButtonGradientHi"
+        kick-style="false"
+        round-radius="8"/>
+
+    <view
+        class="CTextLabel"
+        origin="262, 160"
+        size="145, 38"
+        title="CORRECCIÓN ACTIVA"
+        font="~ NormalFontSmall"
+        font-color="Good"
+        text-alignment="left"
+        transparent="true"/>
+
+    <view
+        class="CTextLabel"
+        origin="30, 214"
+        size="380, 18"
+        title="El valor debe provenir de un análisis Smart Align. No ajustar manualmente."
+        font="~ NormalFontSmall"
+        font-color="Muted"
+        text-alignment="center"
+        transparent="true"/>
   </template>
 </vstgui-ui-description>

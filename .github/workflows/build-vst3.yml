@@ -32,10 +32,11 @@ jobs:
       - name: Ejecutar pruebas DSP
         run: ctest --test-dir build --build-config Release --output-on-failure
 
-      - name: Empaquetar VST3 + prototipo REAPER
+      - name: Empaquetar VST3 + prototipos REAPER
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path artifacts/package/SmartAlignPost | Out-Null
+
           $vst3 = Get-ChildItem -Path build -Filter '*.vst3' -Recurse | Select-Object -First 1
           if (-not $vst3) { throw 'No se encontró ningún archivo .vst3' }
           Copy-Item -Recurse $vst3.FullName artifacts/package/SmartAlignPost/
@@ -44,14 +45,15 @@ jobs:
           if (-not (Test-Path $exe)) { throw "No se encontró $exe" }
           Copy-Item $exe artifacts/package/SmartAlignPost/
 
-          $lua = 'reaper/Smart Align Post - PHASE BATCH.lua'
-          if (-not (Test-Path $lua)) { throw "No se encontró $lua" }
-          Copy-Item $lua artifacts/package/SmartAlignPost/
+          $luaUnified = 'reaper/Smart Align Post.lua'
+          if (-not (Test-Path $luaUnified)) { throw "No se encontró $luaUnified" }
+          Copy-Item $luaUnified artifacts/package/SmartAlignPost/
 
           $required = @(
             'SmartAlignPostPrototype.exe',
-            'Smart Align Post - PHASE BATCH.lua'
+            'Smart Align Post.lua'
           )
+
           foreach ($name in $required) {
             if (-not (Test-Path (Join-Path 'artifacts/package/SmartAlignPost' $name))) {
               throw "Falta en el paquete: $name"
@@ -65,16 +67,22 @@ jobs:
         run: |
           $zip = 'artifacts/SmartAlignPost-Windows-VST3-Prototype.zip'
           if (-not (Test-Path $zip)) { throw 'No se generó el ZIP final' }
+
           Add-Type -AssemblyName System.IO.Compression.FileSystem
           $archive = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path $zip))
+
           try {
             $names = $archive.Entries | ForEach-Object { $_.FullName }
+
             $expected = @(
-              'SmartAlignPost/SmartAlignPostPrototype.exe',
-              'SmartAlignPost/Smart Align Post - PHASE BATCH.lua'
+                'SmartAlignPost/SmartAlignPostPrototype.exe',
+              'SmartAlignPost/Smart Align Post.lua'
             )
+
             foreach ($entry in $expected) {
-              if ($names -notcontains $entry) { throw "El ZIP no contiene: $entry" }
+              if ($names -notcontains $entry) {
+                throw "El ZIP no contiene: $entry"
+              }
             }
           } finally {
             $archive.Dispose()
@@ -85,4 +93,3 @@ jobs:
         with:
           name: SmartAlignPost-Windows-VST3-Prototype
           path: artifacts/SmartAlignPost-Windows-VST3-Prototype.zip
-

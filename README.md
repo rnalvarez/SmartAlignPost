@@ -40,32 +40,71 @@ Esto permite distinguir un delay acústico fijo de una diferencia temporal acumu
 
 ## Flujo de trabajo en REAPER
 
-El script principal es reaper/Smart Align Post - PHASE BATCH.lua.
+El script principal es `reaper/Smart Align Post - PHASE BATCH.lua`.
 
-El primer item seleccionado define el MASTER TRACK.
-
-Los demás tracks representados por los items seleccionados se consideran SOURCE TRACKS.
+El primer item seleccionado define el MASTER TRACK. El MASTER TRACK puede contener muchos items, normalmente uno por escena/plano.
 
 ### ANALYZE SELECTION
 
 Analiza únicamente los SOURCE items actualmente seleccionados.
 
+Cada SOURCE item se empareja con el item del MASTER TRACK que tenga el mayor solapamiento temporal.
+
 ### ANALYZE PROJECT
 
-Recorre todos los items de los SOURCE TRACKS declarados por la selección y busca automáticamente el item MASTER con mayor solapamiento temporal.
+Recorre todos los items de los SOURCE TRACKS declarados por la selección y construye una relación por escena:
 
-Esto permite seleccionar los tracks de boom/corbateros y procesar el proyecto completo sin tener que ir plano por plano.
+`MASTER item (escena N) → SOURCE item`
+
+La referencia no es el track MASTER como un bloque continuo: la unidad de análisis es el **item del MASTER correspondiente a la escena**.
+
+Esto permite que una misma pista de lavalier tenga, a lo largo del proyecto, correcciones diferentes para cada escena.
 
 ### APPLY ALL
 
-Los resultados con confidence suficiente se aplican de manera no destructiva:
+Los resultados con confidence suficiente se aplican manteniendo `D_POSITION`:
 
-- STATIC: corrección mediante D_STARTOFFS;
-- DYNAMIC: time-warp mediante stretch markers;
-- D_POSITION del item no se modifica;
+- STATIC: corrección mediante `D_STARTOFFS`;
+- DYNAMIC: render sample-domain a un WAV corregido y reemplazo del source del take;
+- `D_POSITION` del item no se modifica;
 - todos los cambios quedan dentro de un único Undo de REAPER.
 
 Los resultados por debajo del umbral de confianza se omiten para revisión manual.
+
+## Residual BY ITEM
+
+La arquitectura posterior al batch utiliza `reaper/Smart Align Post - RESIDUAL BY ITEM.lua`.
+
+Este segundo paso vuelve a medir el residuo después de la alineación principal.
+
+La relación sigue siendo por escena:
+
+`MASTER item de la escena → SOURCE item correspondiente`
+
+Un SOURCE item nunca hereda una corrección global de su track.
+
+El escaneo residual:
+
+1. identifica el MASTER scene item con mayor solapamiento;
+2. mide el delay residual del SOURCE;
+3. guarda en el item los datos de MASTER GUID, escena, residuo y confidence;
+4. sólo considera elegible una corrección si el residuo supera 2 samples y la confidence es >= 0.72;
+5. no corrige automáticamente items que cruzan escenas, tienen cobertura insuficiente o presentan un residuo DYNAMIC;
+6. para un residuo estático confiable, inserta automáticamente `Smart Align Post` como **Take FX** en ese item y carga el valor cuantificado.
+
+Los items que ya están alineados no reciben ningún FX.
+
+## VST3 residual
+
+El VST3 de esta arquitectura es ahora un procesador **mono de Take FX**, pensado para el residuo de un único item.
+
+Su función no es volver a descubrir la alineación completa. El valor residual llega cuantificado desde Smart Align Post.
+
+El parámetro `Residual Samples` representa la corrección necesaria en muestras y admite corrección fraccional. El procesador utiliza una línea de retardo con interpolación de 4 puntos y reporta su latencia al host para que REAPER pueda compensarla.
+
+La interfaz muestra el valor residual y permite activar/desactivar la corrección. El valor no debe decidirse a oído: debe provenir del análisis de Smart Align.
+
+La consolidación física del resultado en un WAV y su verificación final son pasos posteriores del flujo REAPER; el VST no modifica directamente el archivo fuente.
 
 ## Qué valida el motor
 
@@ -84,17 +123,22 @@ El criterio no es solamente producir una curva o una confidence alta: las prueba
 
 El motor DSP está separado de la integración con REAPER.
 
-REAPER se ocupa de descubrir items, construir pares MASTER/SOURCE, lanzar el análisis y aplicar el mapa temporal.
+REAPER se ocupa de descubrir items, construir pares MASTER/SOURCE por escena, lanzar el análisis y aplicar el mapa temporal.
 
 El ejecutable SmartAlignPostPrototype funciona como interfaz offline del motor para la integración actual.
 
-La futura integración VST3 puede reutilizar el mismo motor, pero no forma parte del flujo offline de REAPER.
+El flujo VST residual reutiliza una corrección ya cuantificada por el motor y no sustituye al alineamiento batch.
 
 ## Estado
 
-Esta rama inaugura el rediseño PHASE ALIGNMENT CORE.
+Esta rama desarrolla la siguiente etapa sobre el PHASE ALIGNMENT CORE:
 
-El objetivo de esta etapa es validar primero la calidad de la medición temporal/fásica con material sintético y real. El flujo batch se construye alrededor de ese núcleo, no al revés.
+- relación MASTER/SOURCE explícita por item de escena;
+- residual analysis posterior al batch;
+- inserción automática del Take FX sólo en items elegibles;
+- VST3 mono para corrección residual sample-accurate.
+
+La consolidación final y la verificación post-render siguen siendo obligatorias antes de considerar un residuo corregido como definitivo.
 
 ## Licencia
 

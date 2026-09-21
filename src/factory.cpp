@@ -3,7 +3,7 @@
 #include "controller.h"
 #include "version.h"
 
-#define stringPluginName "Smart Align Post"
+#define stringPluginName "Smart Align Post Residual"
 
 BEGIN_FACTORY_DEF("Ramiro N. Alvarez",
                   "https://github.com/rnalvarez/SmartAlignPost",

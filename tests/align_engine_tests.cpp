@@ -102,6 +102,57 @@ static std::vector<float> varyingDelaySignal(
     return y;
 }
 
+static std::vector<float> makeImpulseReverbSignal(
+    std::size_t n,
+    std::size_t onset,
+    double sampleRate)
+{
+    std::vector<float> x(n, 0.0f);
+
+    std::mt19937 rng(0x51A7C1Au);
+    std::uniform_real_distribution<double> noise(-1.0, 1.0);
+
+    for (std::size_t i = onset;
+         i < n;
+         ++i) {
+        const double t =
+            static_cast<double>(i - onset) /
+            sampleRate;
+
+        // Broadband direct transient: strong attack concentrated in the
+        // first few milliseconds.
+        const double direct =
+            t < 0.008
+                ? 1.4 *
+                    std::exp(-t / 0.0018) *
+                    (0.70 + 0.30 * noise(rng))
+                : 0.0;
+
+        // Independent, decaying room tail. It deliberately occupies much
+        // more of the recording than the direct sound but is not identical
+        // between microphones.
+        const double room =
+            0.34 *
+            std::exp(-t / 0.115) *
+            noise(rng);
+
+        const double earlyReflection =
+            (t >= 0.018 && t < 0.026)
+                ? 0.42 *
+                    std::exp(
+                        -(t - 0.018) / 0.003) *
+                    (0.7 + 0.3 * noise(rng))
+                : 0.0;
+
+        x[i] = static_cast<float>(
+            direct +
+            room +
+            earlyReflection);
+    }
+
+    return x;
+}
+
 static bool approx(
     double a,
     double b,
@@ -113,6 +164,124 @@ static bool approx(
 int main()
 {
     constexpr double sr = 48000.0;
+
+    std::cerr
+        << "PHASE TEST: impulsive transient with reverb\n";
+
+    {
+        constexpr std::size_t n =
+            static_cast<std::size_t>(
+                sr * 1.45);
+
+        constexpr std::size_t onset =
+            static_cast<std::size_t>(
+                sr * 0.310);
+
+        constexpr double expected =
+            -339.0;
+
+        const auto master =
+            makeImpulseReverbSignal(
+                n,
+                onset,
+                sr);
+
+        auto source =
+            delaySignal(
+                master,
+                expected);
+
+        // Give SOURCE a different reverberant tail while keeping the first
+        // direct arrival strongly correlated. This models the boom/lav
+        // acoustic-path difference that defeats full-band PHAT matching.
+        std::mt19937 rng(0xA17C0DEu);
+        std::normal_distribution<double> roomNoise(
+            0.0,
+            0.10);
+
+        for (std::size_t i = onset;
+             i < n;
+             ++i) {
+            const double t =
+                static_cast<double>(i - onset) /
+                sr;
+
+            if (t > 0.008) {
+                source[i] = static_cast<float>(
+                    0.55 * source[i] +
+                    0.45 *
+                        std::exp(-t / 0.11) *
+                        roomNoise(rng));
+            }
+        }
+
+        sap::Settings s;
+        s.sampleRate = sr;
+        s.maxDelayMs = 40.0;
+        s.analysisWindowMs = 60.0;
+        s.hopMs = 250.0;
+        s.minConfidence = 0.72;
+
+        s.mode = sap::Mode::Static;
+        const auto rStatic =
+            sap::AlignEngine::analyze(
+                master,
+                source,
+                s);
+
+        if (!approx(
+                rStatic.staticDelaySamples,
+                expected,
+                10.0)) {
+            std::cerr
+                << "impulsive static delay failed: got "
+                << rStatic.staticDelaySamples
+                << " expected "
+                << expected
+                << " support="
+                << rStatic.staticSupportWindows
+                << " total="
+                << rStatic.staticTotalWindows
+                << " MAD="
+                << rStatic.staticDelayMADSamples
+                << "\n";
+            return 17;
+        }
+
+        if (rStatic.staticSupportWindows < 1 ||
+            rStatic.staticConfidence > 0.35) {
+            std::cerr
+                << "impulsive confidence redundancy failed: support="
+                << rStatic.staticSupportWindows
+                << " confidence="
+                << rStatic.staticConfidence
+                << "\n";
+            return 18;
+        }
+
+        s.mode = sap::Mode::Auto;
+        const auto rAuto =
+            sap::AlignEngine::analyze(
+                master,
+                source,
+                s);
+
+        if (rAuto.modeUsed != sap::Mode::Static ||
+            !rAuto.evidenceInsufficient ||
+            rAuto.scoutPoints >= 4) {
+            std::cerr
+                << "impulsive AUTO evidence gate failed: mode="
+                << (rAuto.modeUsed == sap::Mode::Dynamic
+                        ? "DYNAMIC"
+                        : "STATIC")
+                << " evidenceInsufficient="
+                << (rAuto.evidenceInsufficient ? 1 : 0)
+                << " scoutPoints="
+                << rAuto.scoutPoints
+                << "\n";
+            return 19;
+        }
+    }
 
     std::cerr << "PHASE TEST: integer delay\n";
 
@@ -276,6 +445,21 @@ int main()
             return 8;
         }
 
+        if (r.scoutPoints < 4 ||
+            !r.scoutCoherent) {
+            std::cerr
+                << "AUTO drift scout failed: points="
+                << r.scoutPoints
+                << " coherent="
+                << (r.scoutCoherent ? 1 : 0)
+                << " R2="
+                << r.scoutR2
+                << " direction="
+                << r.scoutDirectionConsistency
+                << "\n";
+            return 16;
+        }
+
         const double first = r.curve.front().delaySamples;
         const double last = r.curve.back().delaySamples;
 
@@ -329,6 +513,62 @@ int main()
                 << "known-rate drift unexpected: "
                 << drift << " samples\n";
             return 11;
+        }
+    }
+
+    std::cerr << "PHASE TEST: playback-rate drift above 1.0 uses inverse slope\n";
+
+    {
+        const double expected = 120.0;
+        const double ratio = 1.007463;
+
+        const auto source =
+            delaySignal(master, expected);
+
+        sap::Settings s;
+        s.sampleRate = sr;
+        s.mode = sap::Mode::Auto;
+        s.maxDelayMs = 12.0;
+        s.analysisWindowMs = 60.0;
+        s.hopMs = 250.0;
+        s.minConfidence = 0.72;
+        s.playbackRateRatio = ratio;
+
+        const auto r =
+            sap::AlignEngine::analyze(master, source, s);
+
+        if (r.modeUsed != sap::Mode::Dynamic ||
+            r.curve.size() < 2) {
+            std::cerr
+                << "above-1 playback-rate drift not dynamic: curve="
+                << r.curve.size()
+                << "\n";
+            return 14;
+        }
+
+        const double curveDurationSec =
+            r.curve.back().timeSec -
+            r.curve.front().timeSec;
+
+        const double expectedDrift =
+            (1.0 / ratio - 1.0) *
+            curveDurationSec *
+            sr;
+
+        const double actualDrift =
+            r.curve.back().delaySamples -
+            r.curve.front().delaySamples;
+
+        if (std::abs(actualDrift - expectedDrift) > 8.0) {
+            std::cerr
+                << "above-1 playback-rate slope failed: actual="
+                << actualDrift
+                << " expected="
+                << expectedDrift
+                << " curveDuration="
+                << curveDurationSec
+                << " s\n";
+            return 15;
         }
     }
 
