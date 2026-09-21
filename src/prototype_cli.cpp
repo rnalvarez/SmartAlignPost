@@ -1168,7 +1168,7 @@ int main(int argc, char** argv)
         std::chrono::duration<double, std::milli>(
             analyzeEnd - totalStart).count();
 
-    constexpr const char* kEngineVersion = "20260920-dynamic-scout-1";
+    constexpr const char* kEngineVersion = "20260921-onset-evidence-1";
 
     std::cout << "ENGINE_VERSION="
               << kEngineVersion << "\n";
