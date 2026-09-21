@@ -483,11 +483,30 @@ std::vector<Anchor> selectAnchors(
                 maxAnchors,
                 minSeparation);
 
+        const std::size_t onsetLeadCompensation =
+            std::max<std::size_t>(
+                1,
+                static_cast<std::size_t>(
+                    std::llround(
+                        sampleRate *
+                        0.0025)));
+
         for (const auto& onset : onsets) {
+            // The 5 ms envelope detector reports the window center, which is
+            // late by half an envelope window relative to the acoustic attack.
+            // Move the physical onset back to the leading edge so the direct
+            // sound window starts at the attack instead of entering the
+            // reverberant decay.
+            const std::size_t physicalOnset =
+                onset.first > onsetLeadCompensation
+                    ? onset.first -
+                        onsetLeadCompensation
+                    : onset.first;
+
             const std::size_t center =
                 std::min(
                     usable - half - 1,
-                    onset.first +
+                    physicalOnset +
                         static_cast<std::size_t>(
                             std::llround(
                                 sampleRate *
@@ -500,7 +519,7 @@ std::vector<Anchor> selectAnchors(
                     center,
                     half),
                 onset.second,
-                onset.first,
+                physicalOnset,
                 true
             });
         }
@@ -635,11 +654,25 @@ std::vector<Anchor> selectTimelineAnchors(
                         0.180 *
                         sampleRate)));
 
+        const std::size_t onsetLeadCompensation =
+            std::max<std::size_t>(
+                1,
+                static_cast<std::size_t>(
+                    std::llround(
+                        sampleRate *
+                        0.0025)));
+
         for (const auto& onset : onsets) {
+            const std::size_t physicalOnset =
+                onset.first > onsetLeadCompensation
+                    ? onset.first -
+                        onsetLeadCompensation
+                    : onset.first;
+
             const std::size_t center =
                 std::min(
                     usable - half - 1,
-                    onset.first +
+                    physicalOnset +
                         static_cast<std::size_t>(
                             std::llround(
                                 sampleRate *
@@ -652,7 +685,7 @@ std::vector<Anchor> selectTimelineAnchors(
                     center,
                     half),
                 onset.second,
-                onset.first,
+                physicalOnset,
                 true
             });
         }
