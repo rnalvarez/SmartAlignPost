@@ -51,6 +51,7 @@ struct Result {
     double staticConfidence = 0.0;
     double staticAnalysisTimeSec = 0.0;
     double staticCorrelation = 0.0;
+    double staticDelayMADSamples = 0.0;
     int staticSupportWindows = 0;
     int staticTotalWindows = 0;
     int scoutPoints = 0;
@@ -59,7 +60,9 @@ struct Result {
     double scoutR2 = 0.0;
     double scoutDirectionConsistency = 0.0;
     double scoutRobustShiftSamples = 0.0;
+    double scoutStepMADSamples = 0.0;
     bool scoutCoherent = false;
+    bool evidenceInsufficient = false;
     std::vector<Point> curve;
     Mode modeUsed = Mode::Static;
 };
