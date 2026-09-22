@@ -517,6 +517,47 @@ int main()
         }
     }
 
+    std::cerr << "PHASE TEST: far-field impulse with 14 ms direct delay\n";
+
+    {
+        const double expected = -700.0;
+        const auto source =
+            makeFarFieldReverbSignal(
+                master,
+                expected);
+
+        sap::Settings s;
+        s.sampleRate = sr;
+        s.mode = sap::Mode::Static;
+        s.maxDelayMs = 20.0;
+        s.analysisWindowMs = 60.0;
+        s.hopMs = 250.0;
+        s.minConfidence = 0.72;
+        s.phaseMinHz = 700.0;
+        s.phaseMaxHz = 8000.0;
+
+        const auto r =
+            sap::AlignEngine::analyze(
+                master,
+                source,
+                s);
+
+        if (!approx(
+                r.staticDelaySamples,
+                expected,
+                10.0)) {
+            std::cerr
+                << "14 ms far-field delay failed: got "
+                << r.staticDelaySamples
+                << " expected "
+                << expected
+                << " confidence="
+                << r.staticConfidence
+                << "\n";
+            return 15;
+        }
+    }
+
     std::cerr << "PHASE TEST: noisy source\n";
 
     {
