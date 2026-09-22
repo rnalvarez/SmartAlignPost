@@ -967,8 +967,16 @@ Result AlignEngine::analyze(
 
             result.scoutRobustShiftSamples = robustShift;
 
+            // A large early-vs-late shift is not enough by itself to
+            // declare a dynamic acoustic delay. Reverberation, source
+            // mismatch, or changing spectral balance can move the local
+            // correlation peak while the true direct arrival is static.
+            // In AUTO, require the static phase solution itself to be at or
+            // above the normal confidence floor before this robust-only
+            // temporal cue can promote the take to DYNAMIC.
             const bool robustTemporalEvidence =
                 scout.size() >= 4 &&
+                result.staticConfidence >= settings.minConfidence &&
                 robustShift > std::max(
                     2.0 * dynamicThreshold,
                     1.0 * settings.sampleRate / 1000.0);
@@ -985,9 +993,17 @@ Result AlignEngine::analyze(
 
     const bool explicitDynamic = settings.mode == Mode::Dynamic;
 
+    // In AUTO, a low-confidence static solution must remain conservative:
+    // isolated anchor disagreement is not enough to promote BOOM/LAV material
+    // to DYNAMIC. The temporal drift cues are allowed to do so only when the
+    // underlying static phase solution is already trusted.
+    const bool staticSpreadDynamic =
+        staticSpread > dynamicThreshold &&
+        result.staticConfidence >= settings.minConfidence;
+
     const bool needsDynamic = explicitDynamic ||
         knownRateDrift ||
-        staticSpread > dynamicThreshold ||
+        staticSpreadDynamic ||
         coherentTemporalDrift;
 
     if (!needsDynamic) {
