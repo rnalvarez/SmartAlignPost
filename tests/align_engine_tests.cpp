@@ -102,6 +102,47 @@ static std::vector<float> varyingDelaySignal(
     return y;
 }
 
+static std::vector<float> makeFarFieldReverbSignal(
+    const std::vector<float>& direct,
+    double delaySamples)
+{
+    const std::size_t n = direct.size();
+    std::vector<float> lowpassed(n, 0.0f);
+    std::vector<float> out(n, 0.0f);
+
+    // Deliberately make the direct component relatively weak and give the
+    // reverberant tail substantially more low-mid energy.
+    double state = 0.0;
+    constexpr double alpha = 0.12;
+
+    for (std::size_t i = 0; i < n; ++i) {
+        state =
+            state * (1.0 - alpha) +
+            static_cast<double>(direct[i]) * alpha;
+        lowpassed[i] = static_cast<float>(state);
+    }
+
+    const double tail1 = delaySamples + 320.0;
+    const double tail2 = delaySamples + 980.0;
+
+    for (std::size_t i = 3; i + 2 < n; ++i) {
+        const double p0 =
+            static_cast<double>(i) - delaySamples;
+        const double p1 =
+            static_cast<double>(i) - tail1;
+        const double p2 =
+            static_cast<double>(i) - tail2;
+
+        out[i] =
+            static_cast<float>(
+                0.18 * lagrange4(direct, p0) +
+                1.00 * lagrange4(lowpassed, p1) +
+                0.72 * lagrange4(lowpassed, p2));
+    }
+
+    return out;
+}
+
 static bool approx(
     double a,
     double b,
@@ -430,6 +471,49 @@ int main()
                 << r.scoutRobustShiftSamples
                 << "\n";
             return 13;
+        }
+    }
+
+    std::cerr << "PHASE TEST: weak direct arrival + low-mid reverberation\n";
+
+    {
+        const double expected = -420.0;
+        const auto source =
+            makeFarFieldReverbSignal(
+                master,
+                expected);
+
+        sap::Settings s;
+        s.sampleRate = sr;
+        s.mode = sap::Mode::Static;
+        s.maxDelayMs = 20.0;
+        s.analysisWindowMs = 60.0;
+        s.hopMs = 250.0;
+        s.minConfidence = 0.72;
+        s.phaseMinHz = 700.0;
+        s.phaseMaxHz = 8000.0;
+
+        const auto r =
+            sap::AlignEngine::analyze(
+                master,
+                source,
+                s);
+
+        if (!approx(
+                r.staticDelaySamples,
+                expected,
+                8.0)) {
+            std::cerr
+                << "far-field reverberant delay failed: got "
+                << r.staticDelaySamples
+                << " expected "
+                << expected
+                << " confidence="
+                << r.staticConfidence
+                << " support="
+                << r.staticSupportWindows
+                << "\n";
+            return 14;
         }
     }
 
