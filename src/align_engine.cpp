@@ -598,11 +598,38 @@ Measurement measurePhaseAdaptive(
     if (full.confidence >= settings.minConfidence)
         return full;
 
-    const Measurement band = measurePhaseBand(
+    // Recovery path for weak BOOM/LAV measurements:
+    // 1) preserve the original full-band result;
+    // 2) re-measure with a much shorter temporal window, which reduces the
+    //    amount of reverberant tail inside the correlation;
+    // 3) repeat the short-window measurement in the direct-arrival band.
+    //
+    // We only replace the original result when BOTH short measurements agree.
+    // This prevents a single alternative correlation peak from becoming the
+    // new answer.
+    const std::size_t shortWindow =
+        std::clamp<std::size_t>(
+            static_cast<std::size_t>(
+                std::llround(
+                    32.0 * settings.sampleRate / 1000.0)),
+            1024,
+            window);
+
+    const Measurement shortFull = measurePhase(
         master,
         source,
         center,
-        window,
+        shortWindow,
+        predictedDelaySamples,
+        searchMinSamples,
+        searchMaxSamples,
+        settings.sampleRate);
+
+    const Measurement shortBand = measurePhaseBand(
+        master,
+        source,
+        center,
+        shortWindow,
         predictedDelaySamples,
         searchMinSamples,
         searchMaxSamples,
@@ -610,10 +637,33 @@ Measurement measurePhaseAdaptive(
         settings.phaseMinHz,
         settings.phaseMaxHz);
 
-    if (band.confidence >= full.confidence + 0.02 ||
-        band.confidence >= full.confidence * 0.90)
-        return band;
+    const double shortAgreement =
+        std::abs(
+            shortFull.finalDelay -
+            shortBand.finalDelay);
 
+    const double agreementLimit =
+        std::max(
+            48.0,
+            0.001 * settings.sampleRate);
+
+    const bool shortResultsAgree =
+        shortFull.confidence >= 0.35 &&
+        shortBand.confidence >= 0.35 &&
+        shortAgreement <= agreementLimit;
+
+    if (shortResultsAgree) {
+        // Prefer the band-limited result only when it is at least competitive
+        // with the full short-window measurement. Otherwise the short full-band
+        // measurement remains the safer direct-arrival estimate.
+        return shortBand.confidence >=
+                   shortFull.confidence * 0.90
+            ? shortBand
+            : shortFull;
+    }
+
+    // If the short-window methods disagree, keep the original result rather
+    // than inventing a new delay from ambiguous reverberant material.
     return full;
 }
 
