@@ -242,6 +242,9 @@ local function parse_output(output)
     delaySamples = tonumber(output:match("DELAY_SAMPLES=([%+%-]?[%d%.]+)")) or 0.0,
     delayMs = tonumber(output:match("DELAY_MS=([%+%-]?[%d%.]+)")) or 0.0,
     confidence = tonumber(output:match("CONFIDENCE=([%+%-]?[%d%.]+)")) or 0.0,
+    correlation = tonumber(output:match("CORRELATION=([%+%-]?[%d%.eE]+)")) or 0.0,
+    supportWindows = tonumber(output:match("SUPPORT_WINDOWS=([%d]+)")) or 0,
+    totalWindows = tonumber(output:match("TOTAL_WINDOWS=([%d]+)")) or 0,
     analyzeMs = tonumber(output:match("ANALYZE_MS=([%+%-]?[%d%.]+)")) or 0.0,
     curve = {}
   }
@@ -390,6 +393,9 @@ local function analyze_job(job)
   job.scoutRobustShiftMs = result.scoutRobustShiftMs
   job.scoutCoherent = result.scoutCoherent
   job.confidence = result.confidence
+  job.correlation = result.correlation
+  job.supportWindows = result.supportWindows
+  job.totalWindows = result.totalWindows
   job.delayMs = result.delayMs
   job.curve = result.curve
   job.analyzeMs = result.analyzeMs
@@ -464,7 +470,7 @@ local function run_analysis(items)
       local diagnostics = {}
       for _, job in ipairs(jobs) do
         diagnostics[#diagnostics + 1] = string.format(
-          "%s: rate %.6f/%.6f ratio %.6f · scout %d %.2f→%.2f ms R² %.3f dir %.3f coh %s · %s→%s→%s",
+          "%s: rate %.6f/%.6f ratio %.6f · scout %d %.2f→%.2f ms R² %.3f dir %.3f robust %.2f ms coh %s · %s→%s→%s",
           track_label(job.sourceTrack),
           job.masterRate or 0.0,
           job.sourceRate or 0.0,
@@ -526,8 +532,32 @@ local function applyStatic(job)
   local target =
     offs + correctionSeconds(job) * rate
 
-  reaper.SetMediaItemTakeInfo_Value(
-    take, "D_STARTOFFS", target)
+  -- D_STARTOFFS cannot represent a negative media offset. When the desired
+  -- correction would push it below zero, consume the representable part by
+  -- returning D_STARTOFFS to zero and express the remaining time shift by
+  -- moving D_POSITION. MASTER remains untouched.
+  if target >= -1e-9 then
+    reaper.SetMediaItemTakeInfo_Value(
+      take, "D_STARTOFFS", math.max(0.0, target))
+    job.applyPath = "D_STARTOFFS"
+  else
+    local position =
+      reaper.GetMediaItemInfo_Value(
+        job.sourceItem, "D_POSITION")
+
+    local remainingSeconds =
+      (-target) / rate
+
+    reaper.SetMediaItemTakeInfo_Value(
+      take, "D_STARTOFFS", 0.0)
+
+    reaper.SetMediaItemInfo_Value(
+      job.sourceItem,
+      "D_POSITION",
+      position + remainingSeconds)
+
+    job.applyPath = "D_POSITION_FALLBACK"
+  end
 
   reaper.UpdateItemInProject(job.sourceItem)
 
@@ -761,6 +791,8 @@ local function apply_all()
     end
   end
 
+  local staticOverrideConfirmed = false
+
   if lowStatic > 0 or lowDynamic > 0 then
     local parts = {}
 
@@ -775,7 +807,7 @@ local function apply_all()
     if lowStatic > 0 then
       parts[#parts + 1] =
         string.format(
-          "%d STATIC con confidence < %.2f: se omitirán.",
+          "%d STATIC con confidence < %.2f: se podrán aplicar sólo después de esta confirmación explícita.",
           lowStatic,
           MIN_CONFIDENCE)
     end
@@ -791,6 +823,8 @@ local function apply_all()
     if answer ~= 1 then
       return
     end
+
+    staticOverrideConfirmed = lowStatic > 0
   end
 
   reaper.Undo_BeginBlock()
@@ -807,9 +841,15 @@ local function apply_all()
       job.modeUsed == "DYNAMIC" and
       #job.curve >= 2
 
+    local lowConfidenceStaticOverride =
+      job.modeUsed == "STATIC" and
+      job.confidence < MIN_CONFIDENCE and
+      staticOverrideConfirmed
+
     local confidenceAccept =
       job.confidence >= MIN_CONFIDENCE or
-      dynamicReady
+      dynamicReady or
+      lowConfidenceStaticOverride
 
     if job.status ~= "READY" or not confidenceAccept then
       skipped = skipped + 1
