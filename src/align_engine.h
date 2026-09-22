@@ -23,8 +23,10 @@ struct Settings {
     double anchorSeparationMs = 180.0;
     std::size_t staticAnchorCount = 8;
     std::size_t maxDynamicAnchors = 240;
-    double phaseMinHz = 250.0;
-    double phaseMaxHz = 7000.0;
+    // High-frequency rescue band used only when full-band phase confidence is weak.
+    // This is deliberately above the most reverberant low-mid region.
+    double phaseMinHz = 700.0;
+    double phaseMaxHz = 8000.0;
     // Known project-time playback-rate ratio SOURCE / MASTER. A value
     // different from 1.0 is deterministic evidence of a temporal drift.
     double playbackRateRatio = 1.0;
