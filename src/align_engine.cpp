@@ -347,7 +347,7 @@ std::vector<Anchor> selectTimelineAnchors(
     return anchors;
 }
 
-Measurement measurePhase(
+Measurement measurePhaseBand(
     const std::vector<float>& master,
     const std::vector<float>& source,
     std::size_t center,
@@ -355,7 +355,9 @@ Measurement measurePhase(
     double predictedDelaySamples,
     double searchMinSamples,
     double searchMaxSamples,
-    double sampleRate)
+    double sampleRate,
+    double phaseMinHz,
+    double phaseMaxHz)
 {
     Measurement out;
 
@@ -384,10 +386,47 @@ Measurement measurePhase(
     fft(b, false);
 
     std::vector<Complex> cross(fftSize);
+
+    const double nyquist = sampleRate * 0.5;
+    const double bandMin =
+        std::clamp(
+            std::min(phaseMinHz, phaseMaxHz),
+            0.0,
+            nyquist);
+    const double bandMax =
+        std::clamp(
+            std::max(phaseMinHz, phaseMaxHz),
+            0.0,
+            nyquist);
+    const bool useBand =
+        bandMax > 0.0 &&
+        bandMax < nyquist - 1.0 &&
+        bandMax > bandMin;
+
     for (std::size_t k = 0; k < fftSize; ++k) {
+        if (useBand) {
+            const std::size_t wrappedBin =
+                k <= fftSize / 2
+                    ? k
+                    : fftSize - k;
+
+            const double hz =
+                static_cast<double>(wrappedBin) *
+                sampleRate /
+                static_cast<double>(fftSize);
+
+            if (hz < bandMin || hz > bandMax) {
+                cross[k] = Complex(0.0, 0.0);
+                continue;
+            }
+        }
+
         const Complex c = b[k] * std::conj(a[k]);
         const double mag = std::abs(c);
-        cross[k] = mag > 1.0e-14 ? c / mag : Complex(0.0, 0.0);
+        cross[k] =
+            mag > 1.0e-14
+                ? c / mag
+                : Complex(0.0, 0.0);
     }
 
     fft(cross, true);
@@ -513,6 +552,71 @@ Measurement measurePhase(
     return out;
 }
 
+Measurement measurePhase(
+    const std::vector<float>& master,
+    const std::vector<float>& source,
+    std::size_t center,
+    std::size_t window,
+    double predictedDelaySamples,
+    double searchMinSamples,
+    double searchMaxSamples,
+    double sampleRate)
+{
+    return measurePhaseBand(
+        master,
+        source,
+        center,
+        window,
+        predictedDelaySamples,
+        searchMinSamples,
+        searchMaxSamples,
+        sampleRate,
+        0.0,
+        0.0);
+}
+
+Measurement measurePhaseAdaptive(
+    const std::vector<float>& master,
+    const std::vector<float>& source,
+    std::size_t center,
+    std::size_t window,
+    double predictedDelaySamples,
+    double searchMinSamples,
+    double searchMaxSamples,
+    const Settings& settings)
+{
+    const Measurement full = measurePhase(
+        master,
+        source,
+        center,
+        window,
+        predictedDelaySamples,
+        searchMinSamples,
+        searchMaxSamples,
+        settings.sampleRate);
+
+    if (full.confidence >= settings.minConfidence)
+        return full;
+
+    const Measurement band = measurePhaseBand(
+        master,
+        source,
+        center,
+        window,
+        predictedDelaySamples,
+        searchMinSamples,
+        searchMaxSamples,
+        settings.sampleRate,
+        settings.phaseMinHz,
+        settings.phaseMaxHz);
+
+    if (band.confidence >= full.confidence + 0.02 ||
+        band.confidence >= full.confidence * 0.90)
+        return band;
+
+    return full;
+}
+
 double fallbackEstimate(
     const std::vector<float>& master,
     const std::vector<float>& source,
@@ -591,14 +695,14 @@ Result AlignEngine::analyze(
         : 0.0;
 
     for (const auto& anchor : staticAnchors) {
-        const Measurement m = measurePhase(
+        const Measurement m = measurePhaseAdaptive(
             master, source,
             anchor.center,
             window,
             seededDelay,
             -static_cast<double>(maxLag),
             static_cast<double>(maxLag),
-            settings.sampleRate);
+            settings);
 
         if (m.confidence < settings.minConfidence * 0.75)
             continue;
@@ -780,7 +884,7 @@ Result AlignEngine::analyze(
         bool haveBest = false;
 
         for (const auto& anchor : coarseAnchors) {
-            const Measurement m = measurePhase(
+            const Measurement m = measurePhaseAdaptive(
                 master,
                 source,
                 anchor.center,
@@ -788,7 +892,7 @@ Result AlignEngine::analyze(
                 0.0,
                 -static_cast<double>(maxLag),
                 static_cast<double>(maxLag),
-                settings.sampleRate);
+                settings);
 
             if (!haveBest || m.confidence > bestMeasurement.confidence) {
                 bestMeasurement = m;
@@ -842,7 +946,7 @@ Result AlignEngine::analyze(
         scout.reserve(scoutAnchors.size());
 
         for (const auto& anchor : scoutAnchors) {
-            const Measurement m = measurePhase(
+            const Measurement m = measurePhaseAdaptive(
                 master,
                 source,
                 anchor.center,
@@ -850,7 +954,7 @@ Result AlignEngine::analyze(
                 staticCenter,
                 -static_cast<double>(maxLag),
                 static_cast<double>(maxLag),
-                settings.sampleRate);
+                settings);
 
             if (m.confidence >= settings.minConfidence * 0.75) {
                 scout.emplace_back(
@@ -1083,14 +1187,14 @@ Result AlignEngine::analyze(
 
         const bool first = result.curve.empty();
 
-        const Measurement m = measurePhase(
+        const Measurement m = measurePhaseAdaptive(
             master, source,
             anchor.center,
             window,
             predictedDelay,
             first ? -static_cast<double>(maxLag) : dynamicMin,
             first ? static_cast<double>(maxLag) : dynamicMax,
-            settings.sampleRate);
+            settings);
 
         if (m.confidence >= dynamicPointMinConfidence) {
             double acceptedDelay = m.finalDelay;
