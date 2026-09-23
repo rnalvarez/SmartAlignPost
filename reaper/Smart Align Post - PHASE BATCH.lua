@@ -489,7 +489,7 @@ local function run_analysis(items)
 
       set_status(
         string.format(
-          "ANÁLISIS COMPLETO · %d/%d listos · %d DYNAMIC · %d con evidencia automática limitada (< %.2f) · chequeo manual recomendado · %s",
+          "ANÁLISIS COMPLETO · %d/%d listos · %d DYNAMIC · %d con confianza automática baja · chequeo manual recomendado · %s",
           ready, #jobs, dynamic, low, MIN_CONFIDENCE,
           table.concat(diagnostics, " | ")),
         low > 0 and "warn" or "ok")
