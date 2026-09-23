@@ -202,6 +202,269 @@ double median(std::vector<double> values)
     return result;
 }
 
+struct TransientEstimate {
+    bool valid = false;
+    double delaySamples = 0.0;
+    double confidence = 0.0;
+    double masterOnsetSamples = 0.0;
+    double sourceOnsetSamples = 0.0;
+    double refinedCorrelation = 0.0;
+};
+
+double transientDerivativeRms(
+    const std::vector<float>& x,
+    std::size_t center,
+    std::size_t radius)
+{
+    if (x.size() < 2)
+        return 0.0;
+
+    const std::size_t first = center > radius ? center - radius : 1;
+    const std::size_t last = std::min(x.size(), center + radius + 1);
+
+    if (first >= last)
+        return 0.0;
+
+    long double sum = 0.0;
+    for (std::size_t i = first; i < last; ++i) {
+        const double d =
+            static_cast<double>(x[i]) -
+            static_cast<double>(x[i - 1]);
+        sum += d * d;
+    }
+
+    return std::sqrt(
+        static_cast<double>(
+            sum / static_cast<long double>(last - first)));
+}
+
+bool findDirectOnset(
+    const std::vector<float>& x,
+    double sampleRate,
+    double& onsetSamples,
+    double& confidence)
+{
+    confidence = 0.0;
+
+    if (x.size() < 2048 || sampleRate <= 0.0)
+        return false;
+
+    const std::size_t frame = 96; // 2 ms @ 48 kHz
+    const std::size_t hop = 24;   // 0.5 ms @ 48 kHz
+    const std::size_t half = frame / 2;
+
+    std::vector<double> scores;
+    std::vector<double> levels;
+
+    for (std::size_t center = half;
+         center + half < x.size();
+         center += hop) {
+        scores.push_back(
+            transientDerivativeRms(x, center, half));
+        levels.push_back(
+            rmsAround(x, center, half));
+    }
+
+    if (scores.size() < 8)
+        return false;
+
+    const double baseline = median(scores);
+
+    std::vector<double> deviations;
+    deviations.reserve(scores.size());
+    for (double v : scores)
+        deviations.push_back(std::abs(v - baseline));
+
+    const double mad = median(deviations);
+    const double peak = *std::max_element(scores.begin(), scores.end());
+    const double peakLevel = *std::max_element(levels.begin(), levels.end());
+
+    if (peak <= 0.0 || peakLevel <= 0.0)
+        return false;
+
+    // A transient must stand clearly above the derivative/noise floor.
+    const double threshold = std::max(
+        baseline + 5.0 * std::max(mad, 1.0e-12),
+        0.22 * peak);
+
+    if (peak < baseline * 1.8 || threshold >= peak)
+        return false;
+
+    const std::size_t minCenter =
+        static_cast<std::size_t>(
+            std::llround(0.040 * sampleRate));
+
+    std::size_t found = 0;
+    bool haveFound = false;
+
+    for (std::size_t i = 0; i < scores.size(); ++i) {
+        const std::size_t center =
+            half + i * hop;
+
+        if (center < minCenter)
+            continue;
+
+        if (scores[i] < threshold)
+            continue;
+
+        if (i + 1 < scores.size() &&
+            scores[i + 1] < threshold * 0.55)
+            continue;
+
+        if (levels[i] < peakLevel * 0.05)
+            continue;
+
+        found = center;
+        haveFound = true;
+        break;
+    }
+
+    if (!haveFound)
+        return false;
+
+    const double clarity =
+        std::clamp(
+            (scores[found >= half
+                ? std::min(
+                    scores.size() - 1,
+                    (found - half) / hop)
+                : 0] - baseline) /
+            std::max(
+                peak - baseline,
+                1.0e-12),
+            0.0,
+            1.0);
+
+    const std::size_t foundIndex =
+        (found - half) / hop;
+    const double levelFraction =
+        std::clamp(
+            levels[foundIndex] /
+            std::max(peakLevel, 1.0e-12),
+            0.0,
+            1.0);
+
+    confidence =
+        0.70 * clarity +
+        0.30 * std::clamp(levelFraction / 0.20, 0.0, 1.0);
+
+    onsetSamples = static_cast<double>(found);
+    return confidence >= 0.50;
+}
+
+TransientEstimate estimateDirectTransient(
+    const std::vector<float>& master,
+    const std::vector<float>& source,
+    const Settings& settings,
+    int maxLag)
+{
+    TransientEstimate out;
+
+    double masterOnset = 0.0;
+    double sourceOnset = 0.0;
+    double masterConfidence = 0.0;
+    double sourceConfidence = 0.0;
+
+    if (!findDirectOnset(
+            master,
+            settings.sampleRate,
+            masterOnset,
+            masterConfidence) ||
+        !findDirectOnset(
+            source,
+            settings.sampleRate,
+            sourceOnset,
+            sourceConfidence)) {
+        return out;
+    }
+
+    const double onsetDelay =
+        sourceOnset - masterOnset;
+
+    if (std::abs(onsetDelay) >
+        static_cast<double>(maxLag)) {
+        return out;
+    }
+
+    const std::size_t center =
+        static_cast<std::size_t>(
+            std::llround(masterOnset));
+
+    if (center < 384 ||
+        center + 384 >= master.size()) {
+        return out;
+    }
+
+    // Refine the first-arrival estimate only around the detected attack.
+    // Keeping the search local prevents the room tail from becoming the
+    // selected correlation peak again.
+    const std::size_t refineWindow = 768; // 16 ms @ 48 kHz
+    const double localHalfRange =
+        4.0 * settings.sampleRate / 1000.0;
+
+    const double searchMin =
+        std::max(
+            -static_cast<double>(maxLag),
+            onsetDelay - localHalfRange);
+
+    const double searchMax =
+        std::min(
+            static_cast<double>(maxLag),
+            onsetDelay + localHalfRange);
+
+    const Measurement refined =
+        measurePhaseBand(
+            master,
+            source,
+            center,
+            refineWindow,
+            onsetDelay,
+            searchMin,
+            searchMax,
+            settings.sampleRate,
+            settings.phaseMinHz,
+            settings.phaseMaxHz);
+
+    double finalDelay = onsetDelay;
+    double refineWeight = 0.0;
+
+    // The onset detector gives the physical first-arrival estimate. The
+    // waveform/PHAT step is allowed to refine it only when it remains close
+    // to that first-arrival estimate and has a useful local correlation.
+    if (refined.correlation >= 0.35 &&
+        refined.confidence >= 0.40 &&
+        std::abs(refined.finalDelay - onsetDelay) <=
+            2.0 * settings.sampleRate / 1000.0) {
+        finalDelay = refined.finalDelay;
+        refineWeight = 1.0;
+    }
+
+    out.valid = true;
+    out.delaySamples = finalDelay;
+    out.masterOnsetSamples = masterOnset;
+    out.sourceOnsetSamples = sourceOnset;
+    out.refinedCorrelation = refined.correlation;
+
+    const double onsetConfidence =
+        std::sqrt(
+            std::clamp(
+                masterConfidence * sourceConfidence,
+                0.0,
+                1.0));
+
+    out.confidence =
+        std::clamp(
+            0.65 * onsetConfidence +
+            0.35 * (refineWeight > 0.0
+                ? std::max(0.0, refined.confidence)
+                : onsetConfidence),
+            0.0,
+            1.0);
+
+    return out;
+}
+
+
 std::vector<double> buildEnergyCurve(
     const std::vector<float>& master,
     const std::vector<float>& source,
@@ -770,6 +1033,40 @@ Result AlignEngine::analyze(
         result.staticConfidence = median(staticConfidences);
     }
 
+    // When the conventional RMS/GCC path is weak, explicitly look for the
+    // first direct arrival. This is critical for far-field BOOM/LAV material
+    // where the loudest 60 ms window may be dominated by room decay rather
+    // than by the physical arrival of the useful signal.
+    const bool needsTransientRescue =
+        staticDelays.empty() ||
+        result.staticConfidence < settings.minConfidence ||
+        result.staticSupportWindows < 2;
+
+    if (needsTransientRescue) {
+        const TransientEstimate transient =
+            estimateDirectTransient(
+                master,
+                source,
+                settings,
+                maxLag);
+
+        if (transient.valid &&
+            transient.confidence >= 0.50) {
+            result.staticDelaySamples =
+                transient.delaySamples;
+            result.staticAnalysisTimeSec =
+                transient.masterOnsetSamples /
+                settings.sampleRate;
+            result.staticCorrelation =
+                transient.refinedCorrelation;
+            result.staticConfidence =
+                std::max(
+                    result.staticConfidence,
+                    transient.confidence);
+            result.staticSupportWindows = 1;
+        }
+    }
+
     if (settings.mode == Mode::Static) {
         result.modeUsed = Mode::Static;
         return result;
@@ -975,6 +1272,15 @@ Result AlignEngine::analyze(
     for (double d : staticDelays)
         staticSpread = std::max(staticSpread, std::abs(d - staticCenter));
 
+    std::vector<double> staticAbsoluteDeviations;
+    staticAbsoluteDeviations.reserve(staticDelays.size());
+    for (double d : staticDelays)
+        staticAbsoluteDeviations.push_back(
+            std::abs(d - staticCenter));
+
+    const double staticMad =
+        median(staticAbsoluteDeviations);
+
     const double dynamicThreshold =
         std::max(0.75, 0.45 * settings.sampleRate / 1000.0);
 
@@ -993,7 +1299,9 @@ Result AlignEngine::analyze(
             7);
 
         std::vector<std::pair<double, double>> scout;
+        std::vector<double> scoutConfidences;
         scout.reserve(scoutAnchors.size());
+        scoutConfidences.reserve(scoutAnchors.size());
 
         for (const auto& anchor : scoutAnchors) {
             const Measurement m = measurePhaseAdaptive(
@@ -1011,6 +1319,7 @@ Result AlignEngine::analyze(
                     static_cast<double>(anchor.center) /
                         settings.sampleRate,
                     m.finalDelay);
+                scoutConfidences.push_back(m.confidence);
             }
         }
 
@@ -1090,8 +1399,23 @@ Result AlignEngine::analyze(
             result.scoutDirectionConsistency =
                 directionConsistency;
 
-            const bool linearEvidence = rSquared >= 0.45;
+            const double scoutConfidenceMedian =
+                scoutConfidences.empty()
+                    ? 0.0
+                    : median(scoutConfidences);
+
+            const bool strongScoutSupport =
+                scout.size() >= 4 &&
+                scoutConfidenceMedian >=
+                    settings.minConfidence &&
+                result.staticConfidence >=
+                    settings.minConfidence;
+
+            const bool linearEvidence =
+                strongScoutSupport &&
+                rSquared >= 0.45;
             const bool monotonicEvidence =
+                strongScoutSupport &&
                 meaningfulSteps >= 3 &&
                 directionConsistency >= 0.67;
 
@@ -1129,14 +1453,22 @@ Result AlignEngine::analyze(
             // above the normal confidence floor before this robust-only
             // temporal cue can promote the take to DYNAMIC.
             const bool robustTemporalEvidence =
-                scout.size() >= 4 &&
-                result.staticConfidence >= settings.minConfidence &&
+                strongScoutSupport &&
                 robustShift > std::max(
                     2.0 * dynamicThreshold,
                     1.0 * settings.sampleRate / 1000.0);
 
+            // Requiring a real set of high-confidence scout measurements
+            // prevents changing spectral balance/reverberation from being
+            // mistaken for a time-varying acoustic delay.
+            const double dynamicEndToEndThreshold =
+                std::max(
+                    3.0 * dynamicThreshold,
+                    1.0 * settings.sampleRate / 1000.0);
+
             coherentTemporalDrift =
-                endToEnd > dynamicThreshold &&
+                strongScoutSupport &&
+                endToEnd > dynamicEndToEndThreshold &&
                 (linearEvidence ||
                  monotonicEvidence ||
                  robustTemporalEvidence);
@@ -1152,8 +1484,9 @@ Result AlignEngine::analyze(
     // to DYNAMIC. The temporal drift cues are allowed to do so only when the
     // underlying static phase solution is already trusted.
     const bool staticSpreadDynamic =
-        staticSpread > dynamicThreshold &&
-        result.staticConfidence >= settings.minConfidence;
+        staticDelays.size() >= 3 &&
+        result.staticConfidence >= settings.minConfidence &&
+        staticMad > dynamicThreshold;
 
     const bool needsDynamic = explicitDynamic ||
         knownRateDrift ||
