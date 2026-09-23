@@ -5,7 +5,6 @@
 #include <complex>
 #include <cstddef>
 #include <limits>
-#include <iostream>
 #include <numeric>
 #include <vector>
 
@@ -382,35 +381,18 @@ TransientEstimate estimateDirectTransient(
     double masterConfidence = 0.0;
     double sourceConfidence = 0.0;
 
-    const bool masterOnsetOk =
-        findDirectOnset(
+    if (!findDirectOnset(
             master,
             settings.sampleRate,
             masterOnset,
-            masterConfidence);
-    const bool sourceOnsetOk =
-        findDirectOnset(
+            masterConfidence) ||
+        !findDirectOnset(
             source,
             settings.sampleRate,
             sourceOnset,
-            sourceConfidence);
-
-    if (!masterOnsetOk || !sourceOnsetOk) {
-        std::cerr
-            << "TRANSIENT_DEBUG onset master=" << masterOnsetOk
-            << " conf=" << masterConfidence
-            << " source=" << sourceOnsetOk
-            << " conf=" << sourceConfidence
-            << "\n";
+            sourceConfidence)) {
         return out;
     }
-
-    std::cerr
-        << "TRANSIENT_DEBUG onset master=" << masterOnset
-        << " source=" << sourceOnset
-        << " conf=" << masterConfidence
-        << "/" << sourceConfidence
-        << "\n";
 
     const double onsetDelay =
         sourceOnset - masterOnset;
@@ -426,8 +408,6 @@ TransientEstimate estimateDirectTransient(
 
     if (center < 384 ||
         center + 384 >= master.size()) {
-        std::cerr << "TRANSIENT_DEBUG center_out_of_range center="
-                  << center << "\n";
         return out;
     }
 
