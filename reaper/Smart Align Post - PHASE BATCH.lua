@@ -1161,6 +1161,19 @@ draw_ui = function()
     "CLOSE",
     true,
     false)
+
+  local footer =
+    "Diseñado y creado por Ramiro N. Alvarez · con herramientas de IA."
+
+  gfx.setfont(1, "Arial", 11)
+  local footerW =
+    gfx.measurestr(footer)
+
+  text(
+    (gfx.w - footerW) * 0.5,
+    gfx.h - 18,
+    footer,
+    11, 145, 150, 160)
 end
 
 local function initializeMaster()
