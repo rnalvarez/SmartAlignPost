@@ -886,7 +886,7 @@ int main()
             << "\n";
     }
 
-    std::cerr << "PHASE TEST: noisy source\n";
+    return 88; // TEMP DIAGNOSTIC STOP: expose rodaje diagnostic output\n\n    std::cerr << "PHASE TEST: noisy source\n";
 
     {
         const double expected = 121.5;
