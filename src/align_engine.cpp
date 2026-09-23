@@ -261,8 +261,16 @@ bool findDirectOnset(
     if (x.size() < 2048 || sampleRate <= 0.0)
         return false;
 
-    const std::size_t frame = 96; // 2 ms @ 48 kHz
-    const std::size_t hop = 24;   // 0.5 ms @ 48 kHz
+    const std::size_t frame =
+        std::max<std::size_t>(
+            32,
+            static_cast<std::size_t>(
+                std::llround(0.002 * sampleRate)));
+    const std::size_t hop =
+        std::max<std::size_t>(
+            8,
+            static_cast<std::size_t>(
+                std::llround(0.0005 * sampleRate)));
     const std::size_t half = frame / 2;
 
     std::vector<double> scores;
@@ -334,21 +342,17 @@ bool findDirectOnset(
     if (!haveFound)
         return false;
 
+    const std::size_t foundIndex =
+        (found - half) / hop;
+
     const double clarity =
         std::clamp(
-            (scores[found >= half
-                ? std::min(
-                    scores.size() - 1,
-                    (found - half) / hop)
-                : 0] - baseline) /
+            (scores[foundIndex] - baseline) /
             std::max(
                 peak - baseline,
                 1.0e-12),
             0.0,
             1.0);
-
-    const std::size_t foundIndex =
-        (found - half) / hop;
     const double levelFraction =
         std::clamp(
             levels[foundIndex] /
