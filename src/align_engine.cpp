@@ -365,7 +365,7 @@ bool findDirectOnset(
         0.30 * std::clamp(levelFraction / 0.20, 0.0, 1.0);
 
     onsetSamples = static_cast<double>(found);
-    return confidence >= 0.50;
+    return confidence >= 0.30;
 }
 
 TransientEstimate estimateDirectTransient(
@@ -1067,7 +1067,7 @@ Result AlignEngine::analyze(
                 maxLag);
 
         if (transient.valid &&
-            transient.confidence >= 0.50) {
+            transient.confidence >= 0.35) {
             result.staticDelaySamples =
                 transient.delaySamples;
             result.staticAnalysisTimeSec =
