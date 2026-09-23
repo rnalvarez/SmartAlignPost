@@ -1430,13 +1430,6 @@ Result AlignEngine::analyze(
             const bool linearEvidence =
                 strongScoutSupport &&
                 rSquared >= 0.45;
-            const bool monotonicEvidence =
-                strongScoutSupport &&
-                meaningfulSteps >= 3 &&
-                directionConsistency >= 0.67 &&
-                robustShift > std::max(
-                    2.0 * dynamicThreshold,
-                    1.0 * settings.sampleRate / 1000.0);
 
             // Robust early-vs-late evidence handles real movement that is
             // neither linear nor strictly monotonic. Compare the median delay
@@ -1463,6 +1456,14 @@ Result AlignEngine::analyze(
                 std::abs(lateMedian - earlyMedian);
 
             result.scoutRobustShiftSamples = robustShift;
+
+            const bool monotonicEvidence =
+                strongScoutSupport &&
+                meaningfulSteps >= 3 &&
+                directionConsistency >= 0.67 &&
+                robustShift > std::max(
+                    2.0 * dynamicThreshold,
+                    1.0 * settings.sampleRate / 1000.0);
 
             // A large early-vs-late shift is not enough by itself to
             // declare a dynamic acoustic delay. Reverberation, source
