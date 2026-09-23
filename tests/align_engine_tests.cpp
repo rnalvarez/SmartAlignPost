@@ -102,6 +102,47 @@ static std::vector<float> varyingDelaySignal(
     return y;
 }
 
+static std::vector<float> makeTransientBurstSignal(
+    std::size_t n,
+    std::size_t center)
+{
+    std::mt19937 rng(0x7a11c0deu);
+    std::normal_distribution<double> noise(0.0, 1.0);
+
+    std::vector<float> x(n, 0.0f);
+
+    const std::size_t length = 2400; // 50 ms
+    const std::size_t start =
+        center > 32 ? center - 32 : 0;
+
+    for (std::size_t i = 0; i < length && start + i < n; ++i) {
+        const double t =
+            static_cast<double>(i) /
+            static_cast<double>(std::max<std::size_t>(1, length - 1));
+
+        const double attack =
+            t < 0.08
+                ? t / 0.08
+                : std::exp(-5.0 * (t - 0.08));
+
+        x[start + i] = static_cast<float>(
+            0.85 * attack * noise(rng));
+    }
+
+    // Add a very short broadband attack to make the first arrival
+    // physically distinct from the low-passed reverberant tail.
+    for (std::size_t i = 0; i < 192 && center + i < n; ++i) {
+        const double env =
+            std::exp(
+                -static_cast<double>(i) / 55.0);
+
+        x[center + i] += static_cast<float>(
+            1.10 * env * noise(rng));
+    }
+
+    return x;
+}
+
 static std::vector<float> makeFarFieldReverbSignal(
     const std::vector<float>& direct,
     double delaySamples)
@@ -555,6 +596,58 @@ int main()
                 << r.staticConfidence
                 << "\n";
             return 15;
+        }
+    }
+
+    std::cerr << "PHASE TEST: transient direct arrival dominates room tail\n";
+
+    {
+        const double expected = -700.0;
+        const std::size_t burstCenter =
+            static_cast<std::size_t>(sr * 1.20);
+
+        const auto masterTransient =
+            makeTransientBurstSignal(
+                master.size(),
+                burstCenter);
+
+        const auto sourceTransient =
+            makeFarFieldReverbSignal(
+                masterTransient,
+                expected);
+
+        sap::Settings s;
+        s.sampleRate = sr;
+        s.mode = sap::Mode::Auto;
+        s.maxDelayMs = 20.0;
+        s.analysisWindowMs = 60.0;
+        s.hopMs = 250.0;
+        s.minConfidence = 0.72;
+        s.phaseMinHz = 700.0;
+        s.phaseMaxHz = 8000.0;
+
+        const auto r =
+            sap::AlignEngine::analyze(
+                masterTransient,
+                sourceTransient,
+                s);
+
+        if (r.modeUsed != sap::Mode::Static ||
+            !approx(
+                r.staticDelaySamples,
+                expected,
+                20.0)) {
+            std::cerr
+                << "transient direct-arrival rescue failed: mode="
+                << (r.modeUsed == sap::Mode::Dynamic ? "DYNAMIC" : "STATIC")
+                << " delay="
+                << r.staticDelaySamples
+                << " expected="
+                << expected
+                << " confidence="
+                << r.staticConfidence
+                << "\n";
+            return 16;
         }
     }
 
