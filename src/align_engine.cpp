@@ -1433,7 +1433,10 @@ Result AlignEngine::analyze(
             const bool monotonicEvidence =
                 strongScoutSupport &&
                 meaningfulSteps >= 3 &&
-                directionConsistency >= 0.67;
+                directionConsistency >= 0.67 &&
+                robustShift > std::max(
+                    2.0 * dynamicThreshold,
+                    1.0 * settings.sampleRate / 1000.0);
 
             // Robust early-vs-late evidence handles real movement that is
             // neither linear nor strictly monotonic. Compare the median delay
