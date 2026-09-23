@@ -194,6 +194,99 @@ static std::vector<float> makeFarFieldReverbSignal(
     return out;
 }
 
+static std::vector<float> makeInteriorBoomSignal(
+    const std::vector<float>& direct)
+{
+    const std::size_t n = direct.size();
+    std::vector<float> low1(n, 0.0f);
+    std::vector<float> low2(n, 0.0f);
+    std::vector<float> out(n, 0.0f);
+
+    double s1 = 0.0;
+    double s2 = 0.0;
+    constexpr double a1 = 0.08;
+    constexpr double a2 = 0.035;
+
+    for (std::size_t i = 0; i < n; ++i) {
+        s1 = (1.0 - a1) * s1 +
+             a1 * static_cast<double>(direct[i]);
+        s2 = (1.0 - a2) * s2 +
+             a2 * static_cast<double>(direct[i]);
+        low1[i] = static_cast<float>(s1);
+        low2[i] = static_cast<float>(s2);
+    }
+
+    // Direct boom component plus a deliberately audible but bounded room tail.
+    for (std::size_t i = 3; i + 2 < n; ++i) {
+        const double p1 =
+            static_cast<double>(i) - 240.0;
+        const double p2 =
+            static_cast<double>(i) - 720.0;
+
+        out[i] = static_cast<float>(
+            0.72 * lagrange4(direct, static_cast<double>(i)) +
+            0.46 * lagrange4(low1, p1) +
+            0.24 * lagrange4(low2, p2));
+    }
+
+    return out;
+}
+
+static std::vector<float> makePhysicalDelaySignal(
+    const std::vector<float>& base,
+    double boomStartMeters,
+    double boomEndMeters,
+    double lavDistanceMeters,
+    double sampleRate,
+    bool roundTrip)
+{
+    constexpr double speedOfSound = 343.0;
+    const std::size_t n = base.size();
+    std::vector<float> y(n, 0.0f);
+
+    const double startDelay =
+        (lavDistanceMeters - boomStartMeters) /
+        speedOfSound * sampleRate;
+    const double endDelay =
+        (lavDistanceMeters - boomEndMeters) /
+        speedOfSound * sampleRate;
+
+    for (std::size_t i = 3; i + 2 < n; ++i) {
+        const double u =
+            static_cast<double>(i) /
+            static_cast<double>(n - 1);
+
+        double shaped = u;
+        if (roundTrip) {
+            // BOOM goes from start -> end -> start. Smooth turnarounds avoid
+            // artificial discontinuities that would not occur with a person.
+            if (u < 0.5) {
+                const double v = u * 2.0;
+                shaped = 0.5 * (3.0 * v * v - 2.0 * v * v * v);
+            } else {
+                const double v = (u - 0.5) * 2.0;
+                shaped = 1.0 - 0.5 * (3.0 * v * v - 2.0 * v * v * v);
+            }
+        } else {
+            shaped =
+                3.0 * u * u -
+                2.0 * u * u * u;
+        }
+
+        const double delay =
+            startDelay +
+            (endDelay - startDelay) * shaped;
+
+        const double sourcePos =
+            static_cast<double>(i) - delay;
+
+        y[i] = static_cast<float>(
+            lagrange4(base, sourcePos));
+    }
+
+    return y;
+}
+
 static bool approx(
     double a,
     double b,
@@ -659,6 +752,138 @@ int main()
                 << "\n";
             return 16;
         }
+    }
+
+    std::cerr << "RODAGE DIAGNOSTIC: physical boom movement, exterior\n";
+
+    {
+        const auto dynamicSource =
+            makePhysicalDelaySignal(
+                master,
+                1.50,
+                0.40,
+                0.15,
+                sr,
+                false);
+
+        sap::Settings s;
+        s.sampleRate = sr;
+        s.mode = sap::Mode::Auto;
+        s.maxDelayMs = 20.0;
+        s.analysisWindowMs = 60.0;
+        s.hopMs = 250.0;
+        s.minConfidence = 0.72;
+
+        const auto r =
+            sap::AlignEngine::analyze(
+                master,
+                dynamicSource,
+                s);
+
+        const double expectedStart =
+            (0.15 - 1.50) / 343.0 * sr;
+        const double expectedEnd =
+            (0.15 - 0.40) / 343.0 * sr;
+
+        std::cerr
+            << "RODAGE EXTERIOR MONOTONIC"
+            << " expected=" << expectedStart << "->" << expectedEnd
+            << " got=" << r.scoutFirstDelaySamples
+            << "->" << r.scoutLastDelaySamples
+            << " mode=" << (r.modeUsed == sap::Mode::Dynamic ? "DYNAMIC" : "STATIC")
+            << " curve=" << r.curve.size()
+            << " R2=" << r.scoutR2
+            << " dir=" << r.scoutDirectionConsistency
+            << " robust=" << r.scoutRobustShiftSamples
+            << "\n";
+    }
+
+    std::cerr << "RODAGE DIAGNOSTIC: physical boom movement, interior reverb\n";
+
+    {
+        const auto boom =
+            makeInteriorBoomSignal(master);
+
+        const auto dynamicSource =
+            makePhysicalDelaySignal(
+                master,
+                1.50,
+                0.40,
+                0.15,
+                sr,
+                false);
+
+        sap::Settings s;
+        s.sampleRate = sr;
+        s.mode = sap::Mode::Auto;
+        s.maxDelayMs = 20.0;
+        s.analysisWindowMs = 60.0;
+        s.hopMs = 250.0;
+        s.minConfidence = 0.72;
+        s.phaseMinHz = 700.0;
+        s.phaseMaxHz = 8000.0;
+
+        const auto r =
+            sap::AlignEngine::analyze(
+                boom,
+                dynamicSource,
+                s);
+
+        const double expectedStart =
+            (0.15 - 1.50) / 343.0 * sr;
+        const double expectedEnd =
+            (0.15 - 0.40) / 343.0 * sr;
+
+        std::cerr
+            << "RODAGE INTERIOR MONOTONIC"
+            << " expected=" << expectedStart << "->" << expectedEnd
+            << " got=" << r.scoutFirstDelaySamples
+            << "->" << r.scoutLastDelaySamples
+            << " mode=" << (r.modeUsed == sap::Mode::Dynamic ? "DYNAMIC" : "STATIC")
+            << " curve=" << r.curve.size()
+            << " R2=" << r.scoutR2
+            << " dir=" << r.scoutDirectionConsistency
+            << " robust=" << r.scoutRobustShiftSamples
+            << "\n";
+    }
+
+    std::cerr << "RODAGE DIAGNOSTIC: physical boom out-and-back\n";
+
+    {
+        const auto dynamicSource =
+            makePhysicalDelaySignal(
+                master,
+                1.50,
+                0.40,
+                0.15,
+                sr,
+                true);
+
+        sap::Settings s;
+        s.sampleRate = sr;
+        s.mode = sap::Mode::Auto;
+        s.maxDelayMs = 20.0;
+        s.analysisWindowMs = 60.0;
+        s.hopMs = 250.0;
+        s.minConfidence = 0.72;
+
+        const auto r =
+            sap::AlignEngine::analyze(
+                master,
+                dynamicSource,
+                s);
+
+        std::cerr
+            << "RODAGE EXTERIOR OUT_BACK"
+            << " start=" << r.scoutFirstDelaySamples
+            << " last=" << r.scoutLastDelaySamples
+            << " mode=" << (r.modeUsed == sap::Mode::Dynamic ? "DYNAMIC" : "STATIC")
+            << " curve=" << r.curve.size()
+            << " R2=" << r.scoutR2
+            << " dir=" << r.scoutDirectionConsistency
+            << " robust=" << r.scoutRobustShiftSamples
+            << " coherent=" << (r.scoutCoherent ? "YES" : "NO")
+            << "\n";
     }
 
     std::cerr << "PHASE TEST: noisy source\n";
