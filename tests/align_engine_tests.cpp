@@ -106,14 +106,11 @@ static std::vector<float> makeTransientBurstSignal(
     std::size_t n,
     std::size_t center)
 {
-    std::mt19937 rng(0x7a11c0deu);
-    std::normal_distribution<double> noise(0.0, 1.0);
-
     std::vector<float> x(n, 0.0f);
 
     const std::size_t length = 2400; // 50 ms
     const std::size_t start =
-        center > 32 ? center - 32 : 0;
+        center > 24 ? center - 24 : 0;
 
     for (std::size_t i = 0; i < length && start + i < n; ++i) {
         const double t =
@@ -121,27 +118,40 @@ static std::vector<float> makeTransientBurstSignal(
             static_cast<double>(std::max<std::size_t>(1, length - 1));
 
         const double attack =
-            t < 0.08
-                ? t / 0.08
-                : std::exp(-5.0 * (t - 0.08));
+            std::min(
+                1.0,
+                static_cast<double>(i) / 64.0);
+
+        const double decay =
+            std::exp(-4.5 * t);
+
+        const double phase =
+            2.0 * 3.14159265358979323846 *
+            (2200.0 * t +
+             0.5 * (6800.0 - 2200.0) * t * t) *
+            (static_cast<double>(length) / 48000.0);
 
         x[start + i] = static_cast<float>(
-            0.85 * attack * noise(rng));
+            0.95 * attack * decay * std::sin(phase));
     }
 
-    // Add a very short broadband attack to make the first arrival
-    // physically distinct from the low-passed reverberant tail.
-    for (std::size_t i = 0; i < 192 && center + i < n; ++i) {
+    // A very sharp broadband component defines the physical first arrival.
+    for (std::size_t i = 0; i < 96 && center + i < n; ++i) {
         const double env =
             std::exp(
-                -static_cast<double>(i) / 55.0);
-
+                -static_cast<double>(i) / 30.0);
         x[center + i] += static_cast<float>(
-            1.10 * env * noise(rng));
+            0.85 * env *
+            std::sin(
+                2.0 * 3.14159265358979323846 *
+                6200.0 *
+                static_cast<double>(i) /
+                48000.0));
     }
 
     return x;
 }
+
 
 static std::vector<float> makeFarFieldReverbSignal(
     const std::vector<float>& direct,
