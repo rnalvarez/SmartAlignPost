@@ -202,6 +202,18 @@ double median(std::vector<double> values)
     return result;
 }
 
+Measurement measurePhaseBand(
+    const std::vector<float>& master,
+    const std::vector<float>& source,
+    std::size_t center,
+    std::size_t window,
+    double predictedDelaySamples,
+    double searchMinSamples,
+    double searchMaxSamples,
+    double sampleRate,
+    double phaseMinHz,
+    double phaseMaxHz);
+
 struct TransientEstimate {
     bool valid = false;
     double delaySamples = 0.0;
