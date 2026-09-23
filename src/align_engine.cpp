@@ -381,18 +381,35 @@ TransientEstimate estimateDirectTransient(
     double masterConfidence = 0.0;
     double sourceConfidence = 0.0;
 
-    if (!findDirectOnset(
+    const bool masterOnsetOk =
+        findDirectOnset(
             master,
             settings.sampleRate,
             masterOnset,
-            masterConfidence) ||
-        !findDirectOnset(
+            masterConfidence);
+    const bool sourceOnsetOk =
+        findDirectOnset(
             source,
             settings.sampleRate,
             sourceOnset,
-            sourceConfidence)) {
+            sourceConfidence);
+
+    if (!masterOnsetOk || !sourceOnsetOk) {
+        std::cerr
+            << "TRANSIENT_DEBUG onset master=" << masterOnsetOk
+            << " conf=" << masterConfidence
+            << " source=" << sourceOnsetOk
+            << " conf=" << sourceConfidence
+            << "\n";
         return out;
     }
+
+    std::cerr
+        << "TRANSIENT_DEBUG onset master=" << masterOnset
+        << " source=" << sourceOnset
+        << " conf=" << masterConfidence
+        << "/" << sourceConfidence
+        << "\n";
 
     const double onsetDelay =
         sourceOnset - masterOnset;
@@ -408,6 +425,8 @@ TransientEstimate estimateDirectTransient(
 
     if (center < 384 ||
         center + 384 >= master.size()) {
+        std::cerr << "TRANSIENT_DEBUG center_out_of_range center="
+                  << center << "\n";
         return out;
     }
 
