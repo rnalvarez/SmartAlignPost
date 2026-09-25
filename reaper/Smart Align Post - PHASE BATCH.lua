@@ -483,6 +483,11 @@ local function analyze_job(job)
   job.rawDiagnosticScoutFirstMs = 0.0
   job.rawDiagnosticScoutLastMs = 0.0
   job.rawDiagnosticR2 = 0.0
+  job.forcedDiagnosticMode = nil
+  job.forcedDiagnosticPoints = 0
+  job.forcedDiagnosticScoutFirstMs = 0.0
+  job.forcedDiagnosticScoutLastMs = 0.0
+  job.forcedDiagnosticR2 = 0.0
   job.engineExe = exe
   if job.modeUsed == "STATIC" and #job.curve == 0 then
     local rawCmd =
@@ -520,6 +525,47 @@ local function analyze_job(job)
           tonumber(rawOutput:match("SCOUT_LAST_MS=([%+%-]?[%d%.]+)")) or 0.0
         job.rawDiagnosticR2 =
           tonumber(rawOutput:match("SCOUT_R2=([%+%-]?[%d%.]+)")) or 0.0
+      end
+    end
+
+    -- Same WAV paths and exactly the same REAPER-derived parameters, but
+    -- force DYNAMIC. This distinguishes an AUTO classification failure from
+    -- a time-offset/source-path integration failure.
+    local forcedCmd =
+      quote(exe) .. " " ..
+      quote(job.masterPath) .. " " ..
+      quote(job.sourcePath) .. " " ..
+      string.format(
+        "\"%.9f\" \"%.9f\" \"%.6f\" \"%.9f\" \"%.9f\" DYNAMIC",
+        masterStart,
+        sourceStart,
+        duration,
+        masterRate,
+        sourceRate)
+
+    local forcedResult = reaper.ExecProcess(forcedCmd, 120000)
+    if forcedResult then
+      forcedResult = forcedResult:gsub("\r\n", "\n"):gsub("\r", "\n")
+      local forcedFirstNl = forcedResult:find("\n", 1, true)
+      local forcedOutput = forcedResult
+      if forcedFirstNl then
+        local forcedCode = tonumber(forcedResult:sub(1, forcedFirstNl - 1))
+        if forcedCode ~= nil then
+          forcedOutput = forcedResult:sub(forcedFirstNl + 1)
+        end
+      end
+
+      local forcedMode = forcedOutput:match("MODE_USED=([A-Z]+)")
+      if forcedMode then
+        job.forcedDiagnosticMode = forcedMode
+        job.forcedDiagnosticPoints =
+          tonumber(forcedOutput:match("CURVE_COUNT=([%d]+)")) or 0
+        job.forcedDiagnosticScoutFirstMs =
+          tonumber(forcedOutput:match("SCOUT_FIRST_MS=([%+%-]?[%d%.]+)")) or 0.0
+        job.forcedDiagnosticScoutLastMs =
+          tonumber(forcedOutput:match("SCOUT_LAST_MS=([%+%-]?[%d%.]+)")) or 0.0
+        job.forcedDiagnosticR2 =
+          tonumber(forcedOutput:match("SCOUT_R2=([%+%-]?[%d%.]+)")) or 0.0
       end
     end
   end
@@ -684,7 +730,9 @@ local function run_analysis(items)
                   "CURVA = %d puntos\n" ..
                   "DELAY = %.3f ms\n" ..
                   "CONF = %.3f\n\n" ..
-                  "MISMO EXE + MISMA RUTA DE WAV, OFFSETS 0/0:\n" ..
+                  "MISMO EXE + MISMOS PARÁMETROS, DYNAMIC FORZADO:\n" ..
+                  "%s · %d puntos · %.3f → %.3f ms · R² %.4f\n\n" ..
+                  "MISMO EXE + MISMA RUTA DE WAV, OFFSETS 0/0, AUTO:\n" ..
                   "%s\n\n" ..
                   "Este cuadro no modifica APPLY. Sirve para identificar " ..
                   "la diferencia entre la llamada de REAPER y la prueba aislada.",
@@ -701,6 +749,11 @@ local function run_analysis(items)
                   #job.curve,
                   job.delayMs or 0.0,
                   job.confidence or 0.0,
+                  job.forcedDiagnosticMode or "sin respuesta",
+                  job.forcedDiagnosticPoints or 0,
+                  job.forcedDiagnosticScoutFirstMs or 0.0,
+                  job.forcedDiagnosticScoutLastMs or 0.0,
+                  job.forcedDiagnosticR2 or 0.0,
                   rawSummary),
                 "Smart Align Post — diagnóstico",
                 0)
