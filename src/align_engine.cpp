@@ -1274,7 +1274,13 @@ Result AlignEngine::analyze(
         }
     }
 
-    if (staticDelays.empty()) {
+    // A direct-arrival rescue can establish a strong absolute delay
+    // even when the conventional energy/GCC anchor set contains no trusted
+    // measurements. That rescue is still valid temporal evidence: AUTO must
+    // be allowed to run the temporal scout instead of collapsing immediately
+    // to STATIC with a seemingly perfect confidence of 1.000.
+    if (staticDelays.empty() &&
+        result.staticConfidence <= 0.0) {
         result.modeUsed = Mode::Static;
         return result;
     }
