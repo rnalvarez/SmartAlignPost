@@ -35,6 +35,7 @@ local analyzingIndex = 0
 local applied = false
 local mouseDown = false
 local integrationDiag = "INTEGRACIÓN: sin datos de análisis."
+local diagnosticShown = false
 local dynamicRenderSerial = 0
 local draw_ui
 
@@ -413,6 +414,10 @@ local function analyze_job(job)
   job.rawDiagnosticMode = nil
   job.rawDiagnosticPoints = 0
   job.rawDiagnosticDelayMs = 0.0
+  job.rawDiagnosticScoutFirstMs = 0.0
+  job.rawDiagnosticScoutLastMs = 0.0
+  job.rawDiagnosticR2 = 0.0
+  job.engineExe = exe
   if job.modeUsed == "STATIC" and #job.curve == 0 then
     local rawCmd =
       quote(exe) .. " " ..
@@ -443,6 +448,12 @@ local function analyze_job(job)
           tonumber(rawOutput:match("CURVE_COUNT=([%d]+)")) or 0
         job.rawDiagnosticDelayMs =
           tonumber(rawOutput:match("DELAY_MS=([%+%-]?[%d%.]+)")) or 0.0
+        job.rawDiagnosticScoutFirstMs =
+          tonumber(rawOutput:match("SCOUT_FIRST_MS=([%+%-]?[%d%.]+)")) or 0.0
+        job.rawDiagnosticScoutLastMs =
+          tonumber(rawOutput:match("SCOUT_LAST_MS=([%+%-]?[%d%.]+)")) or 0.0
+        job.rawDiagnosticR2 =
+          tonumber(rawOutput:match("SCOUT_R2=([%+%-]?[%d%.]+)")) or 0.0
       end
     end
   end
@@ -514,6 +525,7 @@ local function run_analysis(items)
   analyzing = true
   applied = false
   analyzingIndex = 0
+  diagnosticShown = false
 
   local function step()
     if not analyzing then return end
@@ -569,6 +581,71 @@ local function run_analysis(items)
           ready, #jobs, dynamic, low, MIN_CONFIDENCE,
           table.concat(diagnostics, " | ")),
         low > 0 and "warn" or "ok")
+
+      if not diagnosticShown then
+        for _, job in ipairs(jobs) do
+          if job.status == "READY" and
+             job.modeUsed == "STATIC" and
+             job.rawDiagnosticMode then
+
+            diagnosticShown = true
+
+            local rawSummary =
+              string.format(
+                "%s · %.3f → %.3f ms · R² %.4f · %d puntos",
+                job.rawDiagnosticMode,
+                job.rawDiagnosticScoutFirstMs or 0.0,
+                job.rawDiagnosticScoutLastMs or 0.0,
+                job.rawDiagnosticR2 or 0.0,
+                job.rawDiagnosticPoints or 0)
+
+            local answer =
+              reaper.ShowMessageBox(
+                string.format(
+                  "DIAGNÓSTICO DE INTEGRACIÓN\n\n" ..
+                  "SOURCE: %s\n" ..
+                  "TRAMO: %s\n\n" ..
+                  "LUA BUILD:\n%s\n\n" ..
+                  "EXE QUE REAPER ESTÁ EJECUTANDO:\n%s\n\n" ..
+                  "LLAMADA REAL DESDE REAPER:\n" ..
+                  "MASTER_START = %.9f s\n" ..
+                  "SOURCE_START = %.9f s\n" ..
+                  "DURATION = %.9f s\n" ..
+                  "MASTER_RATE = %.9f\n" ..
+                  "SOURCE_RATE = %.9f\n\n" ..
+                  "RESULTADO REAPER → EXE:\n" ..
+                  "MODE = %s\n" ..
+                  "CURVA = %d puntos\n" ..
+                  "DELAY = %.3f ms\n" ..
+                  "CONF = %.3f\n\n" ..
+                  "MISMO EXE + MISMA RUTA DE WAV, OFFSETS 0/0:\n" ..
+                  "%s\n\n" ..
+                  "Este cuadro no modifica APPLY. Sirve para identificar " ..
+                  "la diferencia entre la llamada de REAPER y la prueba aislada.",
+                  track_label(job.sourceTrack),
+                  item_label(job.sourceItem),
+                  GUI_BUILD_ID,
+                  job.engineExe or "—",
+                  job.engineMasterStart or 0.0,
+                  job.engineSourceStart or 0.0,
+                  job.engineDuration or 0.0,
+                  job.masterRate or 0.0,
+                  job.sourceRate or 0.0,
+                  job.modeUsed or "?",
+                  #job.curve,
+                  job.delayMs or 0.0,
+                  job.confidence or 0.0,
+                  rawSummary),
+                "Smart Align Post — diagnóstico",
+                0)
+
+            if answer == 1 then
+              -- OK closes the report; no action is taken.
+            end
+            break
+          end
+        end
+      end
 
       return
     end
@@ -983,6 +1060,7 @@ local function reset_results()
   analyzing = false
   analyzingIndex = 0
   applied = false
+  diagnosticShown = false
   set_status(
     "Resultados limpiados. MASTER = " ..
       track_label(masterTrack),
