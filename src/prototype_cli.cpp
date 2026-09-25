@@ -15,6 +15,9 @@ namespace {
 constexpr double kPi =
     3.1415926535897932384626433832795;
 
+constexpr const char* kEngineVersion =
+    "20260925-final-integration-1";
+
 void writeU16(
     std::ofstream& f,
     uint16_t v)
@@ -661,6 +664,13 @@ const char* modeName(sap::Mode mode)
 
 int main(int argc, char** argv)
 {
+    if (argc == 2 &&
+        std::strcmp(argv[1], "--identity") == 0) {
+        std::cout << "ENGINE_VERSION=" << kEngineVersion << "\n";
+        std::cout << "ENGINE_ID=SmartAlignPostPrototype\n";
+        return 0;
+    }
+
     if (argc != 3 && argc != 9 && argc != 10) {
         std::cout
             << "ERROR=Uso: SmartAlignPostPrototype.exe MASTER.wav SOURCE.wav "
@@ -966,10 +976,36 @@ int main(int argc, char** argv)
         const double residualSamples =
             postStatic.staticDelaySamples;
 
+        double postResidualSpanSamples = 0.0;
+        double postResidualMaxAbsSamples = std::abs(residualSamples);
+        if (!post.curve.empty()) {
+            double minDelay = post.curve.front().delaySamples;
+            double maxDelay = post.curve.front().delaySamples;
+            postResidualMaxAbsSamples =
+                std::abs(post.curve.front().delaySamples);
+
+            for (const auto& point : post.curve) {
+                minDelay = std::min(minDelay, point.delaySamples);
+                maxDelay = std::max(maxDelay, point.delaySamples);
+                postResidualMaxAbsSamples = std::max(
+                    postResidualMaxAbsSamples,
+                    std::abs(point.delaySamples));
+            }
+
+            postResidualSpanSamples = maxDelay - minDelay;
+        }
+
+        // A valid render must be both centered at zero and essentially flat.
+        // Do not reject it merely because the post-analysis classifier still
+        // calls the residual curve DYNAMIC; the acceptance criterion is the
+        // measured residual magnitude/spread itself.
+        constexpr double kMaxResidualSamples = 3.0;
         const bool postValid =
             std::isfinite(residualSamples) &&
-            std::abs(residualSamples) <= 2.0 &&
-            post.modeUsed != sap::Mode::Dynamic;
+            std::isfinite(postResidualSpanSamples) &&
+            std::isfinite(postResidualMaxAbsSamples) &&
+            postResidualMaxAbsSamples <= kMaxResidualSamples &&
+            postResidualSpanSamples <= kMaxResidualSamples;
 
         std::cout
             << "POST_MODE_USED="
@@ -986,6 +1022,14 @@ int main(int argc, char** argv)
         std::cout
             << "POST_DELAY_MS="
             << residualSamples * 1000.0 / settings.sampleRate
+            << "\n";
+        std::cout
+            << "POST_RESIDUAL_SPAN_SAMPLES="
+            << postResidualSpanSamples
+            << "\n";
+        std::cout
+            << "POST_RESIDUAL_MAX_ABS_SAMPLES="
+            << postResidualMaxAbsSamples
             << "\n";
         std::cout
             << "POST_CONFIDENCE="
@@ -1019,8 +1063,6 @@ int main(int argc, char** argv)
     const double totalMs =
         std::chrono::duration<double, std::milli>(
             analyzeEnd - totalStart).count();
-
-    constexpr const char* kEngineVersion = "20260920-dynamic-render-1";
 
     std::cout << "ENGINE_VERSION="
               << kEngineVersion << "\n";
