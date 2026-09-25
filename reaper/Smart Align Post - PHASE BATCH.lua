@@ -38,6 +38,7 @@ local mouseDown = false
 local integrationDiag = "INTEGRACIÓN: sin datos de análisis."
 local diagnosticShown = false
 local dynamicRenderSerial = 0
+local pendingPeakBuilds = {}
 local draw_ui
 
 local function script_dir()
@@ -53,6 +54,50 @@ end
 local function set_status(msg, kind)
   status = msg or ""
   statusKind = kind or "info"
+end
+
+local function queue_peak_build(source, item)
+  if not source then return end
+
+  if not reaper.PCM_Source_BuildPeaks then
+    reaper.UpdateItemInProject(item)
+    reaper.UpdateArrange()
+    return
+  end
+
+  -- Start the native REAPER peak-cache build without blocking APPLY.
+  local remaining =
+    reaper.PCM_Source_BuildPeaks(source, 0)
+
+  if remaining and remaining ~= 0 then
+    pendingPeakBuilds[#pendingPeakBuilds + 1] = {
+      source = source,
+      item = item
+    }
+  else
+    reaper.UpdateItemInProject(item)
+    reaper.UpdateArrange()
+  end
+end
+
+local function process_peak_builds()
+  if #pendingPeakBuilds == 0 or
+     not reaper.PCM_Source_BuildPeaks then
+    return
+  end
+
+  -- Advance one source per UI cycle. REAPER documents mode=1 as the
+  -- incremental PeaksBuild_Run() call and mode=2 as finalization.
+  local entry = pendingPeakBuilds[1]
+  local remaining =
+    reaper.PCM_Source_BuildPeaks(entry.source, 1)
+
+  if not remaining or remaining == 0 then
+    reaper.PCM_Source_BuildPeaks(entry.source, 2)
+    reaper.UpdateItemInProject(entry.item)
+    reaper.UpdateArrange()
+    table.remove(pendingPeakBuilds, 1)
+  end
 end
 
 local function query_engine_identity(exe)
@@ -1018,6 +1063,12 @@ local function applyDynamic(job)
       "No se pudo reemplazar el SOURCE del take"
   end
 
+  -- Replacing the SOURCE changes the media immediately, but its waveform
+  -- peaks can still be absent until REAPER's peak cache is built. Zooming
+  -- manually triggers that build, which is why the waveform reappeared.
+  -- Start the same native build here so the waveform returns automatically.
+  queue_peak_build(newSource, job.sourceItem)
+
   reaper.SetMediaItemTakeInfo_Value(
     take, "D_STARTOFFS", 0.0)
 
@@ -1559,6 +1610,8 @@ local function loop()
   if mouse_handler() then
     return
   end
+
+  process_peak_builds()
 
   if not analyzing then
     initializeMaster()
