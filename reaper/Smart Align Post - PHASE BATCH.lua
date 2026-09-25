@@ -23,6 +23,7 @@
 local WIN_W, WIN_H = 1080, 650
 local MIN_CONFIDENCE = 0.72
 local EXE_NAME = "SmartAlignPostPrototype.exe"
+local GUI_BUILD_ID = "20260925-e7db-integration-diag"
 
 local status = "Seleccioná primero un item del MASTER y luego al menos un item de cada SOURCE."
 local statusKind = "info"
@@ -33,6 +34,7 @@ local analyzing = false
 local analyzingIndex = 0
 local applied = false
 local mouseDown = false
+local integrationDiag = "INTEGRACIÓN: sin datos de análisis."
 local dynamicRenderSerial = 0
 local draw_ui
 
@@ -443,6 +445,30 @@ local function analyze_job(job)
           tonumber(rawOutput:match("DELAY_MS=([%+%-]?[%d%.]+)")) or 0.0
       end
     end
+  end
+
+  if job.rawDiagnosticMode then
+    integrationDiag = string.format(
+      "%s · %s · REAPER %.3f/%.3f/%.3f s → %s pts=%d · RAW 0/0 → %s pts=%d",
+      GUI_BUILD_ID,
+      job.engineVersion or "CORE ?",
+      job.engineMasterStart or 0.0,
+      job.engineSourceStart or 0.0,
+      job.engineDuration or 0.0,
+      job.modeUsed or "?",
+      #job.curve,
+      job.rawDiagnosticMode or "?",
+      job.rawDiagnosticPoints or 0)
+  else
+    integrationDiag = string.format(
+      "%s · %s · REAPER %.3f/%.3f/%.3f s → %s pts=%d · RAW 0/0 → sin respuesta",
+      GUI_BUILD_ID,
+      job.engineVersion or "CORE ?",
+      job.engineMasterStart or 0.0,
+      job.engineSourceStart or 0.0,
+      job.engineDuration or 0.0,
+      job.modeUsed or "?",
+      #job.curve)
   end
 
   if job.rateRatio and math.abs(job.rateRatio - 1.0) > 1e-6 and job.modeUsed ~= "DYNAMIC" then
@@ -1173,6 +1199,11 @@ draw_ui = function()
   elseif statusKind == "error" then
     rr, gg, bb = 245, 120, 120
   end
+
+  text(
+    24, fy - 38,
+    integrationDiag,
+    11, 165, 175, 190)
 
   text(
     24, fy - 18,
