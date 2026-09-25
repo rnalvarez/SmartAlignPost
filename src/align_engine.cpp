@@ -1302,6 +1302,10 @@ Result AlignEngine::analyze(
 
     bool coherentTemporalDrift = false;
     if (settings.mode != Mode::Static) {
+        // Use a denser temporal scout than the old 7-point pass.
+        // Real BOOM/LAV movement can contain quiet or ambiguous windows;
+        // with only 7 samples, two bad endpoints can hide an otherwise clear
+        // monotonic acoustic delay change.
         const auto scoutAnchors = selectTimelineAnchors(
             master,
             source,
@@ -1312,7 +1316,7 @@ Result AlignEngine::analyze(
                     std::llround(
                         std::max(250.0, settings.hopMs) *
                         settings.sampleRate / 1000.0))),
-            7);
+            17);
 
         std::vector<std::pair<double, double>> scout;
         std::vector<double> scoutConfidences;
@@ -1330,7 +1334,13 @@ Result AlignEngine::analyze(
                 static_cast<double>(maxLag),
                 settings);
 
-            if (m.confidence >= settings.minConfidence * 0.75) {
+            // PHAT can produce a mathematically sharp peak in a
+            // quiet/ambiguous window even when the actual broadband waveform
+            // correlation is effectively zero. Such a point must not count as
+            // temporal evidence for AUTO DYNAMIC.
+            constexpr double kTemporalCorrelationFloor = 0.20;
+            if (m.confidence >= settings.minConfidence * 0.75 &&
+                m.correlation >= kTemporalCorrelationFloor) {
                 scout.emplace_back(
                     static_cast<double>(anchor.center) /
                         settings.sampleRate,
@@ -1566,6 +1576,8 @@ Result AlignEngine::analyze(
                     result.staticConfidence * 0.95))
             : settings.minConfidence;
 
+    constexpr double kDynamicCorrelationFloor = 0.20;
+
     std::size_t previousCenter = anchors.front().center;
 
     for (const auto& anchor : anchors) {
@@ -1599,7 +1611,13 @@ Result AlignEngine::analyze(
             first ? static_cast<double>(maxLag) : dynamicMax,
             settings);
 
-        if (m.confidence >= dynamicPointMinConfidence) {
+        const bool correlationSupportsDynamic =
+            explicitDynamic ||
+            knownRateDrift ||
+            m.correlation >= kDynamicCorrelationFloor;
+
+        if (m.confidence >= dynamicPointMinConfidence &&
+            correlationSupportsDynamic) {
             double acceptedDelay = m.finalDelay;
 
             if (!first) {
