@@ -23,7 +23,8 @@
 local WIN_W, WIN_H = 1080, 650
 local MIN_CONFIDENCE = 0.72
 local EXE_NAME = "SmartAlignPostPrototype.exe"
-local GUI_BUILD_ID = "20260925-e7db-integration-diag"
+local EXPECTED_ENGINE_VERSION = "20260925-final-integration-1"
+local GUI_BUILD_ID = "20260925-final-integration-test"
 
 local status = "Seleccioná primero un item del MASTER y luego al menos un item de cada SOURCE."
 local statusKind = "info"
@@ -52,6 +53,40 @@ end
 local function set_status(msg, kind)
   status = msg or ""
   statusKind = kind or "info"
+end
+
+local function query_engine_identity(exe)
+  local result = reaper.ExecProcess(
+    quote(exe) .. " --identity",
+    5000)
+
+  if not result then
+    return nil, "No se pudo ejecutar --identity."
+  end
+
+  result = result:gsub("\r\n", "\n"):gsub("\r", "\n")
+
+  local firstNl = result:find("\n", 1, true)
+  local code = nil
+  local output = result
+  if firstNl then
+    code = tonumber(result:sub(1, firstNl - 1))
+    if code ~= nil then
+      output = result:sub(firstNl + 1)
+    end
+  end
+
+  if code ~= nil and code ~= 0 then
+    return nil, output ~= "" and output or ("exit code " .. tostring(code))
+  end
+
+  local version = output:match("ENGINE_VERSION=([^%s]+)")
+  if not version then
+    return nil, "El EXE no devolvió ENGINE_VERSION con --identity."
+  end
+
+  local id = output:match("ENGINE_ID=([^%s]+)") or "?"
+  return version, id
 end
 
 local function take_source_path(item)
@@ -317,6 +352,27 @@ local function analyze_job(job)
     return
   end
 
+  job.engineExe = exe
+  local engineVersion, engineIdentity = query_engine_identity(exe)
+  if not engineVersion then
+    job.status = "ERROR"
+    job.error = "EXE incompatible o sin identidad: " .. tostring(engineIdentity)
+    return
+  end
+
+  job.engineIdentity = engineIdentity
+  job.engineVersion = engineVersion
+
+  if engineVersion ~= EXPECTED_ENGINE_VERSION then
+    job.status = "ERROR"
+    job.error = string.format(
+      "EXE incorrecto. REAPER está usando %s, pero esta GUI requiere %s. Ruta: %s",
+      engineVersion,
+      EXPECTED_ENGINE_VERSION,
+      exe)
+    return
+  end
+
   job.masterRate = masterRate
   job.sourceRate = sourceRate
 
@@ -384,6 +440,16 @@ local function analyze_job(job)
   if not result.engineVersion then
     job.status = "ERROR"
     job.error = "El ejecutable no reportó ENGINE_VERSION. Reemplazá SmartAlignPostPrototype.exe por el del último artefacto."
+    return
+  end
+
+  if result.engineVersion ~= EXPECTED_ENGINE_VERSION then
+    job.status = "ERROR"
+    job.error = string.format(
+      "Versión de motor inesperada: %s (se esperaba %s). Ruta: %s",
+      result.engineVersion or "?",
+      EXPECTED_ENGINE_VERSION,
+      exe)
     return
   end
 
@@ -858,10 +924,13 @@ local function applyDynamic(job)
     local validation =
       output:match("POST_DELAY_MS=([%+%-]?[%d%.eE]+)")
         or "n/a"
+    local span =
+      output:match("POST_RESIDUAL_SPAN_SAMPLES=([%+%-]?[%d%.eE]+)")
+        or "n/a"
 
     return false,
       "DYNAMIC no validado · residual " ..
-      validation .. " ms"
+      validation .. " ms · span " .. span .. " samples"
   end
 
   local postValid =
@@ -918,6 +987,16 @@ local function applyDynamic(job)
     tonumber(
       output:match(
         "POST_CONFIDENCE=([%+%-]?[%d%.eE]+)")) or 0.0
+
+  job.postResidualSpanSamples =
+    tonumber(
+      output:match(
+        "POST_RESIDUAL_SPAN_SAMPLES=([%+%-]?[%d%.eE]+)")) or 0.0
+
+  job.postResidualMaxAbsSamples =
+    tonumber(
+      output:match(
+        "POST_RESIDUAL_MAX_ABS_SAMPLES=([%+%-]?[%d%.eE]+)")) or 0.0
 
   job.outputWav = outputWav
 
@@ -1131,12 +1210,12 @@ draw_ui = function()
 
   text(
     24, 18,
-    "SMART ALIGN POST",
+    "SMART ALIGN POST · FINAL INTEGRATION TEST",
     25, 245, 245, 250)
 
   text(
     24, 50,
-    "PHASE BATCH · GCC-PHAT + waveform refinement",
+    "PHASE BATCH · GCC-PHAT + waveform refinement · " .. GUI_BUILD_ID,
     15, 160, 175, 190)
 
   text(
