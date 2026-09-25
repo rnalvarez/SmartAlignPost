@@ -317,6 +317,10 @@ local function analyze_job(job)
   job.masterRate = masterRate
   job.sourceRate = sourceRate
 
+  job.engineMasterStart = masterStart
+  job.engineSourceStart = sourceStart
+  job.engineDuration = duration
+
   local cmd =
     quote(exe) .. " " ..
     quote(job.masterPath) .. " " ..
@@ -400,6 +404,47 @@ local function analyze_job(job)
   job.curve = result.curve
   job.analyzeMs = result.analyzeMs
 
+  -- Integration diagnostic: when the normal REAPER slice is STATIC with
+  -- no curve, ask the exact same EXE whether the same WAV pair at raw file
+  -- offsets 0/0 produces a different classification. This does not affect
+  -- APPLY and is only used to expose a project/take-offset mismatch.
+  job.rawDiagnosticMode = nil
+  job.rawDiagnosticPoints = 0
+  job.rawDiagnosticDelayMs = 0.0
+  if job.modeUsed == "STATIC" and #job.curve == 0 then
+    local rawCmd =
+      quote(exe) .. " " ..
+      quote(job.masterPath) .. " " ..
+      quote(job.sourcePath) .. " " ..
+      string.format(
+        "\"0.0\" \"0.0\" \"%.6f\" \"%.9f\" \"%.9f\" AUTO",
+        duration,
+        masterRate,
+        sourceRate)
+
+    local rawResult = reaper.ExecProcess(rawCmd, 120000)
+    if rawResult then
+      rawResult = rawResult:gsub("\r\n", "\n"):gsub("\r", "\n")
+      local rawFirstNl = rawResult:find("\n", 1, true)
+      local rawOutput = rawResult
+      if rawFirstNl then
+        local rawCode = tonumber(rawResult:sub(1, rawFirstNl - 1))
+        if rawCode ~= nil then
+          rawOutput = rawResult:sub(rawFirstNl + 1)
+        end
+      end
+
+      local rawMode = rawOutput:match("MODE_USED=([A-Z]+)")
+      if rawMode then
+        job.rawDiagnosticMode = rawMode
+        job.rawDiagnosticPoints =
+          tonumber(rawOutput:match("CURVE_COUNT=([%d]+)")) or 0
+        job.rawDiagnosticDelayMs =
+          tonumber(rawOutput:match("DELAY_MS=([%+%-]?[%d%.]+)")) or 0.0
+      end
+    end
+  end
+
   if job.rateRatio and math.abs(job.rateRatio - 1.0) > 1e-6 and job.modeUsed ~= "DYNAMIC" then
     job.status = "ERROR"
     job.error = string.format(
@@ -470,11 +515,14 @@ local function run_analysis(items)
       local diagnostics = {}
       for _, job in ipairs(jobs) do
         diagnostics[#diagnostics + 1] = string.format(
-          "%s: rate %.6f/%.6f ratio %.6f · scout %d %.2f→%.2f ms R² %.3f dir %.3f robust %.2f ms coh %s · %s→%s→%s",
+          "%s: rate %.6f/%.6f ratio %.6f · params %.3f/%.3f/%.3f s · scout %d %.2f→%.2f ms R² %.3f dir %.3f robust %.2f ms coh %s · raw0/0=%s pts=%d · %s→%s→%s",
           track_label(job.sourceTrack),
           job.masterRate or 0.0,
           job.sourceRate or 0.0,
           job.rateRatio or 1.0,
+          job.engineMasterStart or 0.0,
+          job.engineSourceStart or 0.0,
+          job.engineDuration or 0.0,
           job.scoutPoints or 0,
           job.scoutFirstMs or 0.0,
           job.scoutLastMs or 0.0,
@@ -482,6 +530,8 @@ local function run_analysis(items)
           job.scoutDirection or 0.0,
           job.scoutRobustShiftMs or 0.0,
           job.scoutCoherent and "YES" or "NO",
+          job.rawDiagnosticMode or "—",
+          job.rawDiagnosticPoints or 0,
           job.modeRequested or "?",
           job.modeEffective or "?",
           job.modeUsed or "?")
